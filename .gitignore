@@ -31,4 +31,6 @@
 *.out
 *.app
 build/*
-!build/.gitkeep
+
+# IDE specific dirs
+.vscode
