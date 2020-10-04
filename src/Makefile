@@ -1,5 +1,14 @@
+# Find C++ Standard Library header files to exclude them from instrumentation
+CPP_STD_INCLUDES=$(shell ( 	`gcc -print-prog-name=cc1plus` -v < /dev/null 2>&1 \
+								| LC_ALL=C sed -ne '/starts here/,/End of/p' \
+								| grep -o '/[^"]*' ; \
+							`gcc -print-prog-name=cpp` -v < /dev/null 2>&1 \
+								| LC_ALL=C sed -ne '/starts here/,/End of/p' \
+								| grep -o '/[^"]*' ) \
+						| cat | sort | uniq | tr '\n' ',' | sed 's/\(.*\),/\1 /')
+
 CXX = g++
-CXXFLAGS = -g -Wall -finstrument-functions -rdynamic -std=c++17
+CXXFLAGS = -g -Wall -rdynamic -std=c++20 -finstrument-functions -finstrument-functions-exclude-file-list=$(CPP_STD_INCLUDES)
 
 IDIR = ../include
 ODIR = ../build

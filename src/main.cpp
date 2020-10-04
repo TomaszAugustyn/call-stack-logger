@@ -1,26 +1,31 @@
 #include <iostream>
 #include <string>
+#include <vector>
 
-class Klaska {
+class A {
     public:
         static void foo() {
-            std::cout<<"LOL\n";
+            std::cout << "static foo \n";
         }
 };
 
-class Klaska2 {
+class B {
     public:
         void foo() {
-            std::cout<<"LOL2\n";
+            std::cout << "non-static foo \n";
+            std::vector<int> vec{ 1, 55, 78, 3, 11, 7, 90 };
+            std::sort(vec.begin(), vec.end());
         }
 };
-
-
 
 int main()
 {
-    Klaska::foo();
-    Klaska2 k2;
-    k2.foo();
-    std::cout<<"HELLO WORLD!"<<std::endl;
+    // Test logging static member methods.
+    A::foo();
+
+    // Test logging non-static member methods with calls
+    // to std functions/containers (which should not be instrumented).
+    B b;
+    b.foo();
+    std::cout << "HELLO WORLD!" << std::endl;
 }
