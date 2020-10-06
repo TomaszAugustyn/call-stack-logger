@@ -7,6 +7,10 @@ CPP_STD_INCLUDES=$(shell ( 	`gcc -print-prog-name=cc1plus` -v < /dev/null 2>&1 \
 								| grep -o '/[^"]*' ) \
 						| cat | sort | uniq | tr '\n' ',' | sed 's/\(.*\),/\1 /')
 
+# Exclude tracing functions themselves from instrumentation
+CPP_STD_INCLUDES := "${CPP_STD_INCLUDES},include/callStack.h"
+$(info $$CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}])
+
 CXX = g++
 CXXFLAGS = -g -Wall -rdynamic -std=c++20 -finstrument-functions -finstrument-functions-exclude-file-list=$(CPP_STD_INCLUDES)
 
@@ -14,7 +18,7 @@ IDIR = ../include
 ODIR = ../build
 LIB_DIR = ../lib
 INCS = -I$(IDIR) -L$(LIB_DIR)
-LIBS = -lpthread -ldl
+LIBS = -lpthread -ldl -lbfd
 
 SOURCES := $(shell find . -name "*.cpp" -printf '%f\n')
 _HEADERS  := $(shell find $(IDIR) -name "*.h" -printf '%f\n')

@@ -2,6 +2,8 @@
 #include <string>
 #include <vector>
 
+#include "callStack.h"
+
 class A {
     public:
         static void foo() {
