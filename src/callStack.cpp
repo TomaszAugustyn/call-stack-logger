@@ -24,14 +24,18 @@
 
 /*
     [Tomasz Augustyn] Changes for own usage:
-    06-10-2020:
+    09-10-2020:
 	* get rid of `XERUS_NO_FANCY_CALLSTACK` switch,
     * change namespace names,
     * add `resolve` function,
     * get rid of always false comparison: `if ((section->flags | SEC_CODE) == 0u)`,
-    * move `demangle_cxa` to anonymous namespace, 
+    * move `demangle_cxa` to anonymous namespace,
+	* use tenary operator at the end of `demangle_cxa` function,
     * add `__attribute__((no_instrument_function))` to exclude from instrumentation,
-    * add additional condition `|| bfds.find(info.dli_fbase) == bfds.end()`
+    * add additional condition `|| s_bfds.find(info.dli_fbase) == s_bfds.end()`,
+	* check `newBfd` against nullptr before dereferencing it with `!newBfd->abfd`,
+	* initialize unique_ptr<storedBfd> with `std::make_unique`,
+	* convert initializing with `std::pair<...>(...)` with `std::make_pair(...)`.
 */
 
 #include <callStack.h>
@@ -58,25 +62,22 @@
 
 namespace {
 		__attribute__((no_instrument_function))
-		std::string demangle_cxa(const std::string &_cxa) {
+		std::string demangle_cxa(const std::string& _cxa) {
 			int status;
 			std::unique_ptr<char, void(*)(void*)> realname(abi::__cxa_demangle(_cxa.data(), nullptr, nullptr, &status), &free);
 			if (status != 0) { return _cxa; }
 
-			if (realname) { 
-				return std::string(realname.get()); 
-			} 
-			return ""; 
+			return realname ? std::string(realname.get()) : "";
 		}
 } // namespace
 
 namespace instrumentation {
 
-	bool bfdResolver::ensure_bfd_loaded(Dl_info &_info) {
-		// load the corresponding bfd file (from file or map)
-		if (bfds.count(_info.dli_fbase) == 0) {
-			std::unique_ptr<storedBfd> newBfd(new storedBfd(bfd_openr(_info.dli_fname, nullptr), &bfd_close));
-			if (!newBfd->abfd) {
+	bool bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
+		// Load the corresponding bfd file (from file or map).
+		if (s_bfds.count(_info.dli_fbase) == 0) {
+			auto newBfd = std::make_unique<storedBfd>(bfd_openr(_info.dli_fname, nullptr), &bfd_close);
+			if (!newBfd || !newBfd->abfd) {
 				return false;
 			}
 			bfd_check_format(newBfd->abfd.get(),bfd_object);
@@ -88,60 +89,58 @@ namespace instrumentation {
 			/*size_t numSymbols = */bfd_canonicalize_symtab(newBfd->abfd.get(), newBfd->symbols.get());
 			
 			newBfd->offset = reinterpret_cast<intptr_t>(_info.dli_fbase);
-			std::cout << "inserting" << std::endl;
-			bfds.insert(std::pair<void *, storedBfd>(_info.dli_fbase, std::move(*newBfd)));
-			std::cout << "inserted" << std::endl;
+			s_bfds.insert(std::make_pair(_info.dli_fbase, std::move(*newBfd)));
 		}
 		return true;
 	}
 
-	std::pair<uintptr_t, uintptr_t> bfdResolver::get_range_of_section(void * _addr, std::string _name) {
-		if (!bfd_initialized) {
+	std::pair<uintptr_t, uintptr_t> bfdResolver::get_range_of_section(void* _addr, std::string _name) {
+		if (!s_bfd_initialized) {
 			bfd_init();
-			bfd_initialized = true;
+			s_bfd_initialized = true;
 		}
 		
-		// get path and offset of shared object that contains this address
+		// Get path and offset of shared object that contains this address.
 		Dl_info info;
 		dladdr(_addr, &info);
 		if (info.dli_fbase == nullptr) {
-			return std::pair<uintptr_t, uintptr_t>(0,0);
+			return std::make_pair(0,0);
 		}
 		
 		if (!ensure_bfd_loaded(info)) {
-			return std::pair<uintptr_t, uintptr_t>(0,0);
+			return std::make_pair(0,0);
 		}
-		storedBfd &currBfd = bfds.at(info.dli_fbase);
+		storedBfd &currBfd = s_bfds.at(info.dli_fbase);
 		
-		asection *section = bfd_get_section_by_name(currBfd.abfd.get(), _name.c_str());
+		asection* section = bfd_get_section_by_name(currBfd.abfd.get(), _name.c_str());
 		if (section == nullptr) {
-			return std::pair<uintptr_t, uintptr_t>(0,0);
+			return std::make_pair(0,0);
 		}
-		return std::pair<uintptr_t, uintptr_t>(section->vma, section->vma+section->size);
+		return std::make_pair(section->vma, section->vma+section->size);
 	}
 
-	std::string bfdResolver::resolve(void *address) {
-		if (!bfd_initialized) {
+	std::string bfdResolver::resolve(void* address) {
+		if (!s_bfd_initialized) {
 			bfd_init();
-			bfd_initialized = true;
+			s_bfd_initialized = true;
 		}
 			
 		std::stringstream res;
 		res << "[0x" << std::setw(int(sizeof(void*)*2)) << std::setfill('0') << std::hex << reinterpret_cast<uintptr_t>(address);
 		
-		// get path and offset of shared object that contains this address
+		// Get path and offset of shared object that contains this address.
 		Dl_info info;
 		dladdr(address, &info);
 		if (info.dli_fbase == nullptr) {
 			return res.str() + " .?] <object to address not found>";
 		}
 		
-		if (!ensure_bfd_loaded(info) || bfds.find(info.dli_fbase) == bfds.end()) {
+		if (!ensure_bfd_loaded(info) || s_bfds.find(info.dli_fbase) == s_bfds.end()) {
 			return res.str() + " .?] <could not open object file>";
 		}
-		storedBfd &currBfd = bfds.at(info.dli_fbase);
+		storedBfd& currBfd = s_bfds.at(info.dli_fbase);
 		
-		asection *section = currBfd.abfd->sections;
+		asection* section = currBfd.abfd->sections;
 		const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
 		// std::cout << '\n' << "sections:\n";
 		while (section != nullptr) {
@@ -155,9 +154,9 @@ namespace instrumentation {
 			}
 			res << ' ' << section->name;
 
-			// get more info on legal addresses
-			const char *file;
-			const char *func;
+			// Get more info on legal addresses.
+			const char* file;
+			const char* func;
 			unsigned line;
 			if (bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
 				if (file != nullptr) {
@@ -176,7 +175,7 @@ namespace instrumentation {
 
 	std::string get_call_stack() {
 		const size_t MAX_FRAMES = 1000;
-		std::vector<void *> stack(MAX_FRAMES);
+		std::vector<void*> stack(MAX_FRAMES);
 		int num = backtrace(&stack[0], MAX_FRAMES);
 		if (num <= 0) {
 			return "Callstack could not be built.";
@@ -194,11 +193,11 @@ namespace instrumentation {
 		return res;
 	}
 
-	std::pair<uintptr_t, uintptr_t> get_range_of_section(void * _addr, std::string _name) {
+	std::pair<uintptr_t, uintptr_t> get_range_of_section(void* _addr, std::string _name) {
 		return bfdResolver::get_range_of_section(_addr, _name);
 	}
 
-    std::string resolve(void * _addr) {
+    std::string resolve(void* _addr) {
 		return bfdResolver::resolve(_addr);
 	}
 

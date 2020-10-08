@@ -24,12 +24,12 @@
 
 /*
     [Tomasz Augustyn] Changes for own usage:
-    06-10-2020: 
+    09-10-2020: 
     * change namespace names,
     * add `resolve` standalone function,
     * add `__attribute__((no_instrument_function))` to exclude from instrumentation,
 	* split `bfdResolver` struct to declaration (.h) and definition (.cpp),
-	* initialize static members `bfds` and `bfd_initialized` inside the class during declaration (c++17).
+	* initialize static members `s_bfds` and `s_bfd_initialized` inside the class during declaration (c++17).
 */
 
 #pragma once 
@@ -37,7 +37,6 @@
 #include <map>
 #include <memory>
 #include <string>
-#include <utility>
 #include <bfd.h>
 #include <dlfcn.h>
 
@@ -70,8 +69,8 @@ namespace instrumentation {
 			static std::string resolve(void *address);
 
 		private:
-			inline static std::map<void *, storedBfd> bfds = {};
-			inline static bool bfd_initialized = false;
+			inline static std::map<void *, storedBfd> s_bfds = {};
+			inline static bool s_bfd_initialized = false;
 	};
 
 	/**

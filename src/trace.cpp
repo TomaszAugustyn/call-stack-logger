@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <time.h>
-#include <string>
 #include <execinfo.h> // for backtrace
 #include <dlfcn.h>  // for dladdr
 #include <cxxabi.h> // for __cxa_demangle
