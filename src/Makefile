@@ -30,8 +30,8 @@ OBJS = $(patsubst %,$(ODIR)/%,$(_OBJS))
 
 EXECUTABLE = $(ODIR)/runDemo
 
-.PHONY: all
-all: clean $(SOURCES) $(EXECUTABLE)
+.PHONY: build
+build: clean $(SOURCES) $(EXECUTABLE)
 
 $(EXECUTABLE): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
@@ -40,7 +40,10 @@ $(ODIR)/%.o : %.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@ $(INCS)
 
 log_with_addr: CXXFLAGS += -DLOG_ADDR
-log_with_addr: clean all
+log_with_addr: clean build
+
+log_not_demangled: CXXFLAGS += -DLOG_NOT_DEMANGLED
+log_not_demangled: clean build
 
 run:
 	$(EXECUTABLE)

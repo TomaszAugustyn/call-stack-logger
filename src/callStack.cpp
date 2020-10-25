@@ -24,7 +24,7 @@
 
 /*
     [Tomasz Augustyn] Changes for own usage:
-    09-10-2020:
+    25-10-2020:
 	* get rid of `XERUS_NO_FANCY_CALLSTACK` switch,
     * change namespace names,
     * add `resolve` standalone function,
@@ -36,7 +36,8 @@
 	* check `newBfd` against nullptr before dereferencing it with `!newBfd->abfd`,
 	* initialize unique_ptr<storedBfd> with `std::make_unique`,
 	* convert initializing with `std::pair<...>(...)` with `std::make_pair(...)`,
-	* use `LOG_ADDR` compilation flag to either log or not log function address.
+	* use `LOG_ADDR` compilation flag to either log or not log function address,
+	* use `LOG_NOT_DEMANGLED` compilation flag to log even not demangled functions.
 */
 
 #include <callStack.h>
@@ -51,7 +52,7 @@
 #endif
 
 #include <bfd.h>
-#include <dlfcn.h>
+#include <dlfcn.h> // for dladdr
 #include <cxxabi.h> // for __cxa_demangle
 #include <unistd.h>
 #include <iostream>
@@ -171,11 +172,17 @@ namespace instrumentation {
 			const char* func;
 			unsigned line;
 			if (bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
+				#ifndef LOG_NOT_DEMANGLED
+					if (info.dli_sname == nullptr) { return ""; }
+					const std::string& demangled = demangle_cxa(info.dli_sname);
+					bool success = !demangled.empty() && file != nullptr;
+					return success ? res.str() + std::string(file) + ":" + std::to_string(line) + " (inside " + demangled + ")" : "";
+				#endif
 				if (file != nullptr) {
-					return res.str() + std::string(file) + ":" + std::to_string(line)+ " (inside " + demangle_cxa(func) + ")";
+					return res.str() + std::string(file) + ":" + std::to_string(line) + " (inside " + demangle_cxa(func) + ")";
 				}
 				if (info.dli_saddr != nullptr) {
-					return res.str() + "??:? (inside " + demangle_cxa(func)+ " +0x" + std::to_string(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(info.dli_saddr)) + ")";
+					return res.str() + "??:? (inside " + demangle_cxa(func) + " +0x" + std::to_string(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(info.dli_saddr)) + ")";
 				}
 				return res.str() + "??:? (inside " + demangle_cxa(func) + ")";
 			}
@@ -201,7 +208,7 @@ namespace instrumentation {
 		}
 		stack.resize(static_cast<size_t>(num));
 		std::string res;
-		// NOTE i=0 corresponds to get_call_stack and is omitted
+		// NOTE i = 0 corresponds to get_call_stack and is omitted
 		for (size_t i = 1; i < static_cast<size_t>(num); ++i) {
 			res += bfdResolver::resolve(stack[i]) + '\n';
 		}

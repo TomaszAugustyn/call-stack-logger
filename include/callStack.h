@@ -1,20 +1,20 @@
 // Xerus - A General Purpose Tensor Library
-// Copyright (C) 2014-2017 Benjamin Huber and Sebastian Wolf. 
-// 
+// Copyright (C) 2014-2017 Benjamin Huber and Sebastian Wolf.
+//
 // Xerus is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
 // by the Free Software Foundation, either version 3 of the License,
 // or (at your option) any later version.
-// 
+//
 // Xerus is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-// 
+//
 // You should have received a copy of the GNU Affero General Public License
 // along with Xerus. If not, see <http://www.gnu.org/licenses/>.
 //
-// For further information on Xerus visit https://libXerus.org 
+// For further information on Xerus visit https://libXerus.org
 // or contact us at contact@libXerus.org.
 
 /**
@@ -24,7 +24,7 @@
 
 /*
     [Tomasz Augustyn] Changes for own usage:
-    09-10-2020: 
+    09-10-2020:
     * change namespace names,
     * add `resolve` standalone function,
     * add `__attribute__((no_instrument_function))` to exclude from instrumentation,
@@ -32,7 +32,7 @@
 	* initialize static members `s_bfds` and `s_bfd_initialized` inside the class during declaration (c++17).
 */
 
-#pragma once 
+#pragma once
 
 #include <map>
 #include <memory>
@@ -58,13 +58,13 @@ namespace instrumentation {
 
 				storedBfd(bfd *_abfd, deleter_t *_del) : abfd(_abfd, _del) {}
 			};
-			
+
 			__attribute__((no_instrument_function))
 			static bool ensure_bfd_loaded(Dl_info &_info);
-			
+
 			__attribute__((no_instrument_function))
 			static std::pair<uintptr_t, uintptr_t> get_range_of_section(void * _addr, std::string _name);
-			
+
 			__attribute__((no_instrument_function))
 			static std::string resolve(void *address);
 
@@ -77,11 +77,11 @@ namespace instrumentation {
 	* @brief Returns a string representation of the current call-stack (excluding the function itself).
 	* @details Per default this uses the binutils library to get the following information:
 	* [address .section] filename:line (function)
-	* if all of these are available. 
+	* if all of these are available.
 	*/
     __attribute__((no_instrument_function))
 	std::string get_call_stack();
-	
+
 	/**
 	* @brief Returns the address range of the elf-section names @a _name as part of the executable / so file that contained @a _addr.
 	*/
