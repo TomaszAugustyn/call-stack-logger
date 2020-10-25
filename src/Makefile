@@ -5,14 +5,14 @@ CPP_STD_INCLUDES=$(shell ( 	`gcc -print-prog-name=cc1plus` -v < /dev/null 2>&1 \
 							`gcc -print-prog-name=cpp` -v < /dev/null 2>&1 \
 								| LC_ALL=C sed -ne '/starts here/,/End of/p' \
 								| grep -o '/[^"]*' ) \
-						| cat | sort | uniq | tr '\n' ',' | sed 's/\(.*\),/\1 /')
+						| cat | sort | uniq | tr '\n' ',' | sed 's/\(.*\),/\1 /' | xargs )
 
 # Exclude tracing functions themselves from instrumentation
 CPP_STD_INCLUDES := "${CPP_STD_INCLUDES},include/callStack.h"
 $(info $$CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}])
 
 CXX = g++
-CXXFLAGS = -g -Wall -rdynamic -std=c++20 -finstrument-functions -finstrument-functions-exclude-file-list=$(CPP_STD_INCLUDES)
+CXXFLAGS = -g -Wall -rdynamic -std=c++17 -finstrument-functions -finstrument-functions-exclude-file-list=$(CPP_STD_INCLUDES)
 
 IDIR = ../include
 ODIR = ../build
@@ -31,13 +31,16 @@ OBJS = $(patsubst %,$(ODIR)/%,$(_OBJS))
 EXECUTABLE = $(ODIR)/runDemo
 
 .PHONY: all
-all: $(SOURCES) $(EXECUTABLE)
+all: clean $(SOURCES) $(EXECUTABLE)
 
 $(EXECUTABLE): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
 
 $(ODIR)/%.o : %.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@ $(INCS)
+
+log_with_addr: CXXFLAGS += -DLOG_ADDR
+log_with_addr: clean all
 
 run:
 	$(EXECUTABLE)

@@ -1,20 +1,20 @@
 // Xerus - A General Purpose Tensor Library
-// Copyright (C) 2014-2017 Benjamin Huber and Sebastian Wolf. 
-// 
+// Copyright (C) 2014-2017 Benjamin Huber and Sebastian Wolf.
+//
 // Xerus is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
 // by the Free Software Foundation, either version 3 of the License,
 // or (at your option) any later version.
-// 
+//
 // Xerus is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-// 
+//
 // You should have received a copy of the GNU Affero General Public License
 // along with Xerus. If not, see <http://www.gnu.org/licenses/>.
 //
-// For further information on Xerus visit https://libXerus.org 
+// For further information on Xerus visit https://libXerus.org
 // or contact us at contact@libXerus.org.
 
 /**
@@ -27,7 +27,7 @@
     09-10-2020:
 	* get rid of `XERUS_NO_FANCY_CALLSTACK` switch,
     * change namespace names,
-    * add `resolve` function,
+    * add `resolve` standalone function,
     * get rid of always false comparison: `if ((section->flags | SEC_CODE) == 0u)`,
     * move `demangle_cxa` to anonymous namespace,
 	* use tenary operator at the end of `demangle_cxa` function,
@@ -35,7 +35,8 @@
     * add additional condition `|| s_bfds.find(info.dli_fbase) == s_bfds.end()`,
 	* check `newBfd` against nullptr before dereferencing it with `!newBfd->abfd`,
 	* initialize unique_ptr<storedBfd> with `std::make_unique`,
-	* convert initializing with `std::pair<...>(...)` with `std::make_pair(...)`.
+	* convert initializing with `std::pair<...>(...)` with `std::make_pair(...)`,
+	* use `LOG_ADDR` compilation flag to either log or not log function address.
 */
 
 #include <callStack.h>
@@ -87,7 +88,7 @@ namespace instrumentation {
 			}
 			newBfd->symbols.reset(reinterpret_cast<asymbol**>(new char[static_cast<size_t>(storageNeeded)]));
 			/*size_t numSymbols = */bfd_canonicalize_symtab(newBfd->abfd.get(), newBfd->symbols.get());
-			
+
 			newBfd->offset = reinterpret_cast<intptr_t>(_info.dli_fbase);
 			s_bfds.insert(std::make_pair(_info.dli_fbase, std::move(*newBfd)));
 		}
@@ -99,19 +100,19 @@ namespace instrumentation {
 			bfd_init();
 			s_bfd_initialized = true;
 		}
-		
+
 		// Get path and offset of shared object that contains this address.
 		Dl_info info;
 		dladdr(_addr, &info);
 		if (info.dli_fbase == nullptr) {
 			return std::make_pair(0,0);
 		}
-		
+
 		if (!ensure_bfd_loaded(info)) {
 			return std::make_pair(0,0);
 		}
 		storedBfd &currBfd = s_bfds.at(info.dli_fbase);
-		
+
 		asection* section = bfd_get_section_by_name(currBfd.abfd.get(), _name.c_str());
 		if (section == nullptr) {
 			return std::make_pair(0,0);
@@ -124,35 +125,46 @@ namespace instrumentation {
 			bfd_init();
 			s_bfd_initialized = true;
 		}
-			
+
 		std::stringstream res;
-		res << "[0x" << std::setw(int(sizeof(void*)*2)) << std::setfill('0') << std::hex << reinterpret_cast<uintptr_t>(address);
-		
+		#ifdef LOG_ADDR
+			res << "[0x" << std::setw(int(sizeof(void*)*2)) << std::setfill('0') << std::hex << reinterpret_cast<uintptr_t>(address);
+		#endif
+
 		// Get path and offset of shared object that contains this address.
 		Dl_info info;
 		dladdr(address, &info);
 		if (info.dli_fbase == nullptr) {
-			return res.str() + " .?] <object to address not found>";
+			#ifdef LOG_ADDR
+				res << " .?] ";
+			#endif
+			return res.str() + "<object to address not found>";
 		}
-		
+
 		if (!ensure_bfd_loaded(info) || s_bfds.find(info.dli_fbase) == s_bfds.end()) {
-			return res.str() + " .?] <could not open object file>";
+			#ifdef LOG_ADDR
+				res << " .?] ";
+			#endif
+			return res.str() + "<could not open object file>";
 		}
 		storedBfd& currBfd = s_bfds.at(info.dli_fbase);
-		
+
 		asection* section = currBfd.abfd->sections;
 		const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
 		// std::cout << '\n' << "sections:\n";
 		while (section != nullptr) {
 			const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd.offset : 0) - static_cast<intptr_t>(section->vma);
-			// std::cout << section->name << " " << section->id << " file: " << section->filepos << " flags: " << section->flags 
+			// std::cout << section->name << " " << section->id << " file: " << section->filepos << " flags: " << section->flags
 			//			<< " vma: " << std::hex << section->vma << " - " << std::hex << (section->vma+section->size) << std::endl;
-			
+
 			if (offset < 0 || static_cast<size_t>(offset) > section->size) {
 				section = section->next;
 				continue;
 			}
-			res << ' ' << section->name;
+
+			#ifdef LOG_ADDR
+				res << " " << section->name << "] ";
+			#endif
 
 			// Get more info on legal addresses.
 			const char* file;
@@ -160,17 +172,20 @@ namespace instrumentation {
 			unsigned line;
 			if (bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
 				if (file != nullptr) {
-					return res.str() + "] " +std::string(file) + ":" + std::to_string(line)+ " (inside " + demangle_cxa(func) + ")";
+					return res.str() + std::string(file) + ":" + std::to_string(line)+ " (inside " + demangle_cxa(func) + ")";
 				}
 				if (info.dli_saddr != nullptr) {
-					return res.str() + "] ??:? (inside " + demangle_cxa(func)+ " +0x" +std::to_string(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(info.dli_saddr)) + ")";
+					return res.str() + "??:? (inside " + demangle_cxa(func)+ " +0x" + std::to_string(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(info.dli_saddr)) + ")";
 				}
-				return res.str() + "] ??:? (inside " + demangle_cxa(func) + ")";
+				return res.str() + "??:? (inside " + demangle_cxa(func) + ")";
 			}
-			return res.str() + "] <bfd_error> (inside " + demangle_cxa((info.dli_sname != nullptr ? info.dli_sname : "")) + ")";
+			return res.str() + "<bfd_error> (inside " + demangle_cxa((info.dli_sname != nullptr ? info.dli_sname : "")) + ")";
 		}
 		// std::cout << " ---- sections end ------ " << std::endl;
-		return res.str() + " .none] <not sectioned address>";
+		#ifdef LOG_ADDR
+			res << " .none] ";
+		#endif
+		return res.str() + "<not sectioned address>";
 	}
 
 	std::string get_call_stack() {

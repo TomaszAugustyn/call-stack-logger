@@ -1,10 +1,9 @@
 #include <stdio.h>
 #include <time.h>
-#include <execinfo.h> // for backtrace
 #include <dlfcn.h>  // for dladdr
 #include <cxxabi.h> // for __cxa_demangle
 #include "callStack.h"
- 
+
 static FILE *fp_trace;
 
 __attribute__ ((constructor))
@@ -24,8 +23,6 @@ extern "C" __attribute__((no_instrument_function))
 void __cyg_profile_func_enter(void *func,  void *caller) {
     if(fp_trace != NULL) {
         fprintf(fp_trace, "e %p %p %lu\n", func, caller, time(NULL) );
-        backtrace_symbols_fd(&func, 1, 1);
-        backtrace_symbols_fd(&caller, 1, 1);
 
         Dl_info info;
 		if (dladdr(func, &info)) {
@@ -44,11 +41,11 @@ void __cyg_profile_func_enter(void *func,  void *caller) {
             if (demangled) {
                 delete demangled;
                 demangled = nullptr;
-            }	
+            }
 		} else {
             fprintf(fp_trace, "%s\n", "unknown");
 		}
-        
+
     }
 }
 
