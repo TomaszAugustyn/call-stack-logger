@@ -22,7 +22,7 @@ void __cyg_profile_func_enter(void *func,  void *caller) {
     if(fp_trace != NULL) {
         std::string resolved = instrumentation::resolve(func);
         if (resolved.empty()) { return; }
-        fprintf(fp_trace, "bdf: %s\n", resolved.c_str());
+        fprintf(fp_trace, "%s\n", resolved.c_str());
     }
 }
 

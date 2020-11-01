@@ -24,7 +24,7 @@
 
 /*
     [Tomasz Augustyn] Changes for own usage:
-    25-10-2020:
+    01-11-2020:
 	* get rid of `XERUS_NO_FANCY_CALLSTACK` switch,
     * change namespace names,
     * add `resolve` standalone function,
@@ -37,7 +37,8 @@
 	* initialize unique_ptr<storedBfd> with `std::make_unique`,
 	* convert initializing with `std::pair<...>(...)` with `std::make_pair(...)`,
 	* use `LOG_ADDR` compilation flag to either log or not log function address,
-	* use `LOG_NOT_DEMANGLED` compilation flag to log even not demangled functions.
+	* use `LOG_NOT_DEMANGLED` compilation flag to log even not demangled functions,
+	* change resolved string output format.
 */
 
 #include <callStack.h>
@@ -176,17 +177,17 @@ namespace instrumentation {
 					if (info.dli_sname == nullptr) { return ""; }
 					const std::string& demangled = demangle_cxa(info.dli_sname);
 					bool success = !demangled.empty() && file != nullptr;
-					return success ? res.str() + std::string(file) + ":" + std::to_string(line) + " (inside " + demangled + ")" : "";
+					return success ? demangled + "  (" + std::string(file) + ":" + std::to_string(line) + ") " + res.str() : "";
 				#endif
 				if (file != nullptr) {
-					return res.str() + std::string(file) + ":" + std::to_string(line) + " (inside " + demangle_cxa(func) + ")";
+					return demangle_cxa(func) + "  (" + std::string(file) + ":" + std::to_string(line) + ") " + res.str();
 				}
 				if (info.dli_saddr != nullptr) {
-					return res.str() + "??:? (inside " + demangle_cxa(func) + " +0x" + std::to_string(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(info.dli_saddr)) + ")";
+					return demangle_cxa(func) + " +0x" + std::to_string(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(info.dli_saddr)) + "  (???:?) " + res.str();
 				}
-				return res.str() + "??:? (inside " + demangle_cxa(func) + ")";
+				return demangle_cxa(func) + "  (???:?) " + res.str();
 			}
-			return res.str() + "<bfd_error> (inside " + demangle_cxa((info.dli_sname != nullptr ? info.dli_sname : "")) + ")";
+			return demangle_cxa((info.dli_sname != nullptr ? info.dli_sname : "")) + " <bfd_error> " + res.str();
 		}
 		// std::cout << " ---- sections end ------ " << std::endl;
 		#ifdef LOG_ADDR
