@@ -142,6 +142,9 @@ namespace instrumentation {
 			#endif
 			return res.str() + "<object to address not found>";
 		}
+		#ifndef LOG_NOT_DEMANGLED
+			if (info.dli_sname == nullptr) { return ""; }
+		#endif
 
 		if (!ensure_bfd_loaded(info) || s_bfds.find(info.dli_fbase) == s_bfds.end()) {
 			#ifdef LOG_ADDR
@@ -173,12 +176,6 @@ namespace instrumentation {
 			const char* func;
 			unsigned line;
 			if (bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
-				#ifndef LOG_NOT_DEMANGLED
-					if (info.dli_sname == nullptr) { return ""; }
-					const std::string& demangled = demangle_cxa(info.dli_sname);
-					bool success = !demangled.empty() && file != nullptr;
-					return success ? demangled + "  (" + std::string(file) + ":" + std::to_string(line) + ") " + res.str() : "";
-				#endif
 				if (file != nullptr) {
 					return demangle_cxa(func) + "  (" + std::string(file) + ":" + std::to_string(line) + ") " + res.str();
 				}
