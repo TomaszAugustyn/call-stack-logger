@@ -38,7 +38,13 @@
 	* convert initializing with `std::pair<...>(...)` with `std::make_pair(...)`,
 	* use `LOG_ADDR` compilation flag to either log or not log function address,
 	* use `LOG_NOT_DEMANGLED` compilation flag to log even not demangled functions,
-	* change resolved string output format.
+	* change resolved string output format,
+	* extract `check_bfd_initialized` function,
+	* add `ensure_actual_executable` function,
+	* divide resolving into 2 parts: `resolve_function_name` and `resolve_filename_and_line`
+	  as they use different addresses,
+	* resolved filename and line now indicates correct place from which the function
+	  is called.
 */
 
 #include <callStack.h>
@@ -62,6 +68,7 @@
 #include <map>
 #include <vector>
 #include <iomanip>
+#include <fstream>
 
 namespace {
 		__attribute__((no_instrument_function))
@@ -79,6 +86,7 @@ namespace instrumentation {
 	bool bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
 		// Load the corresponding bfd file (from file or map).
 		if (s_bfds.count(_info.dli_fbase) == 0) {
+			ensure_actual_executable(_info);
 			auto newBfd = std::make_unique<storedBfd>(bfd_openr(_info.dli_fname, nullptr), &bfd_close);
 			if (!newBfd || !newBfd->abfd) {
 				return false;
@@ -97,11 +105,36 @@ namespace instrumentation {
 		return true;
 	}
 
-	std::pair<uintptr_t, uintptr_t> bfdResolver::get_range_of_section(void* _addr, std::string _name) {
+	void bfdResolver::check_bfd_initialized() {
 		if (!s_bfd_initialized) {
 			bfd_init();
 			s_bfd_initialized = true;
 		}
+	}
+
+	std::string bfdResolver::get_argv0() {
+		std::string argv0;
+		std::ifstream ifs("/proc/self/cmdline");
+		std::getline(ifs, argv0, '\0');
+		return argv0;
+	}
+
+	void bfdResolver::ensure_actual_executable(Dl_info &symbol_info) {
+		// Mutates symbol_info.dli_fname to be filename to open and returns filename
+		// to display
+		if (symbol_info.dli_fname == s_argv0) {
+			// dladdr returns argv[0] in dli_fname for symbols contained in
+			// the main executable, which is not a valid path if the
+			// executable was found by a search of the PATH environment
+			// variable; In that case, we actually open /proc/self/exe, which
+			// is always the actual executable (even if it was deleted/replaced!)
+			// but display the path that /proc/self/exe links to.
+			symbol_info.dli_fname = "/proc/self/exe";
+		}
+	}
+
+	std::pair<uintptr_t, uintptr_t> bfdResolver::get_range_of_section(void* _addr, std::string _name) {
+		check_bfd_initialized();
 
 		// Get path and offset of shared object that contains this address.
 		Dl_info info;
@@ -122,35 +155,18 @@ namespace instrumentation {
 		return std::make_pair(section->vma, section->vma+section->size);
 	}
 
-	std::string bfdResolver::resolve(void* address) {
-		if (!s_bfd_initialized) {
-			bfd_init();
-			s_bfd_initialized = true;
-		}
-
-		std::stringstream res;
-		#ifdef LOG_ADDR
-			res << "[0x" << std::setw(int(sizeof(void*)*2)) << std::setfill('0') << std::hex << reinterpret_cast<uintptr_t>(address);
-		#endif
-
-		// Get path and offset of shared object that contains this address.
+	std::pair<bool, std::string> bfdResolver::resolve_function_name(void *address) {
 		Dl_info info;
 		dladdr(address, &info);
 		if (info.dli_fbase == nullptr) {
-			#ifdef LOG_ADDR
-				res << " .?] ";
-			#endif
-			return res.str() + "<object to address not found>";
+			return std::make_pair(false, "<address to object not found>");
 		}
 		#ifndef LOG_NOT_DEMANGLED
-			if (info.dli_sname == nullptr) { return ""; }
+			if (info.dli_sname == nullptr) { return std::make_pair(false, ""); }
 		#endif
 
 		if (!ensure_bfd_loaded(info) || s_bfds.find(info.dli_fbase) == s_bfds.end()) {
-			#ifdef LOG_ADDR
-				res << " .?] ";
-			#endif
-			return res.str() + "<could not open object file>";
+			return std::make_pair(false, "<could not open object file>");
 		}
 		storedBfd& currBfd = s_bfds.at(info.dli_fbase);
 
@@ -167,30 +183,87 @@ namespace instrumentation {
 				continue;
 			}
 
-			#ifdef LOG_ADDR
-				res << " " << section->name << "] ";
-			#endif
-
 			// Get more info on legal addresses.
 			const char* file;
 			const char* func;
 			unsigned line;
 			if (bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
-				if (file != nullptr) {
-					return demangle_cxa(func) + "  (" + std::string(file) + ":" + std::to_string(line) + ") " + res.str();
-				}
-				if (info.dli_saddr != nullptr) {
-					return demangle_cxa(func) + " +0x" + std::to_string(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(info.dli_saddr)) + "  (???:?) " + res.str();
-				}
-				return demangle_cxa(func) + "  (???:?) " + res.str();
+				auto demangled = demangle_cxa(func);
+				#ifdef LOG_ADDR
+					if (info.dli_saddr != nullptr) {
+						demangled += " +0x";
+						demangled += std::to_string(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(info.dli_saddr));
+					}
+				#endif
+
+				return std::make_pair(true, std::move(demangled));
 			}
-			return demangle_cxa((info.dli_sname != nullptr ? info.dli_sname : "")) + " <bfd_error> " + res.str();
+			return std::make_pair(true, demangle_cxa((info.dli_sname != nullptr ? info.dli_sname : "")) + " <bfd_error>");
 		}
 		// std::cout << " ---- sections end ------ " << std::endl;
+		return std::make_pair(false, "<not sectioned address>");
+	}
+
+	std::string bfdResolver::resolve_filename_and_line(void *address) {
+		// Get path and offset of shared object that contains caller address.
+		Dl_info info;
+		dladdr(address, &info);
+		if (info.dli_fbase == nullptr) {
+			return "caller address to object not found>";
+		}
+
+		if (!ensure_bfd_loaded(info) || s_bfds.find(info.dli_fbase) == s_bfds.end()) {
+			return "<could not open caller object file>";
+		}
+		storedBfd& currBfd = s_bfds.at(info.dli_fbase);
+
+		asection* section = currBfd.abfd->sections;
+		const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
+		// std::cout << '\n' << "sections:\n";
+		while (section != nullptr) {
+			const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd.offset : 0) - static_cast<intptr_t>(section->vma);
+			// std::cout << section->name << " " << section->id << " file: " << section->filepos << " flags: " << section->flags
+			//			<< " vma: " << std::hex << section->vma << " - " << std::hex << (section->vma+section->size) << std::endl;
+
+			if (offset < 0 || static_cast<size_t>(offset) > section->size) {
+				section = section->next;
+				continue;
+			}
+			// Get more info on legal addresses.
+			const char* file;
+			const char* func;
+			unsigned line = 0;
+			if (bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
+				if (file != nullptr) {
+					return "(Called from: " + std::string(file) + ":" + std::to_string(line) + ")";
+				}
+				return "(Called from: " + demangle_cxa(func) + ")";
+			}
+			if (info.dli_sname != nullptr) {
+				return "(Called from: " + demangle_cxa(info.dli_sname) + " <bfd_error>)";
+			}
+		}
+		// std::cout << " ---- sections end ------ " << std::endl;
+		return "(???:? <not sectioned address>)";
+	}
+
+	std::string bfdResolver::resolve(void *callee_address, void *caller_address) {
+		check_bfd_initialized();
+		std::stringstream res;
 		#ifdef LOG_ADDR
-			res << " .none] ";
+			res << "Addr: [0x" << std::setw(int(sizeof(void*)*2)) << std::setfill('0') << std::hex << reinterpret_cast<uintptr_t>(callee_address) << "] ";
 		#endif
-		return res.str() + "<not sectioned address>";
+
+		auto pair = resolve_function_name(callee_address);
+		if (!pair.first) {
+			if (pair.second.empty()) {
+				return "";
+			}
+			return res.str() + pair.second;
+		}
+
+		std::string filename = resolve_filename_and_line(caller_address);
+		return res.str() + pair.second + "  " + filename;
 	}
 
 	std::string get_call_stack() {
@@ -208,7 +281,7 @@ namespace instrumentation {
 		std::string res;
 		// NOTE i = 0 corresponds to get_call_stack and is omitted
 		for (size_t i = 1; i < static_cast<size_t>(num); ++i) {
-			res += bfdResolver::resolve(stack[i]) + '\n';
+			res += bfdResolver::resolve(stack[i], stack[i-1]) + '\n';
 		}
 		return res;
 	}
@@ -217,8 +290,8 @@ namespace instrumentation {
 		return bfdResolver::get_range_of_section(_addr, _name);
 	}
 
-    std::string resolve(void* _addr) {
-		return bfdResolver::resolve(_addr);
+    std::string resolve(void *callee_address, void *caller_address) {
+		return bfdResolver::resolve(callee_address, caller_address);
 	}
 
 } // instrumentation

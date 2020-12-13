@@ -17,6 +17,7 @@ class B {
             std::cout << "non-static foo \n";
             std::vector<int> vec{ 1, 55, 78, 3, 11, 7, 90 };
             std::sort(vec.begin(), vec.end());
+            A::foo();
         }
 };
 

@@ -29,7 +29,11 @@
     * add `resolve` standalone function,
     * add `__attribute__((no_instrument_function))` to exclude from instrumentation,
 	* split `bfdResolver` struct to declaration (.h) and definition (.cpp),
-	* initialize static members `s_bfds` and `s_bfd_initialized` inside the class during declaration (c++17).
+	* initialize static members `s_bfds` and `s_bfd_initialized` inside the class during declaration (c++17),
+	* extract `check_bfd_initialized` function,
+	* add `ensure_actual_executable` function,
+	* divide resolving into 2 parts: `resolve_function_name` and `resolve_filename_and_line`
+	  as they use different addresses.
 */
 
 #pragma once
@@ -63,14 +67,30 @@ namespace instrumentation {
 			static bool ensure_bfd_loaded(Dl_info &_info);
 
 			__attribute__((no_instrument_function))
-			static std::pair<uintptr_t, uintptr_t> get_range_of_section(void * _addr, std::string _name);
+			static std::pair<uintptr_t, uintptr_t> get_range_of_section(void *_addr, std::string _name);
 
 			__attribute__((no_instrument_function))
-			static std::string resolve(void *address);
+			static std::string resolve(void *callee_address, void *caller_address);
 
 		private:
+			__attribute__((no_instrument_function))
+			static std::pair<bool, std::string> resolve_function_name(void *callee_address);
+
+			__attribute__((no_instrument_function))
+			static std::string resolve_filename_and_line(void *caller_address);
+
+			__attribute__((no_instrument_function))
+			static void check_bfd_initialized();
+
+			__attribute__((no_instrument_function))
+			static std::string get_argv0();
+
+			__attribute__((no_instrument_function))
+			static void ensure_actual_executable(Dl_info &symbol_info);
+
 			inline static std::map<void *, storedBfd> s_bfds = {};
 			inline static bool s_bfd_initialized = false;
+			inline static std::string s_argv0 = get_argv0();
 	};
 
 	/**
@@ -92,5 +112,5 @@ namespace instrumentation {
 	* @brief Returns std::string with human-readable information about the function which pointer is passed.
 	*/
     __attribute__((no_instrument_function))
-    std::string resolve(void *address);
+    std::string resolve(void *callee_address, void *caller_address);
 }
