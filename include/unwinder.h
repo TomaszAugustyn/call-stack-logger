@@ -4,6 +4,15 @@
 
 namespace instrumentation {
 
+struct Callback {
+    void *caller;
+    Callback(void *addr) : caller(addr) { }
+
+    void operator()(void *addr) {
+        caller = addr;
+    }
+};
+
 template <typename F>
 class FrameUnwinder {
 

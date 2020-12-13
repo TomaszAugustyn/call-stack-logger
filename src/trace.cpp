@@ -2,7 +2,6 @@
 #include <time.h>
 #include "callStack.h"
 #include "unwinder.h"
-#include <execinfo.h>
 
 static FILE *fp_trace;
 
@@ -19,21 +18,10 @@ void trace_end() {
     }
 }
 
-struct Callback {
-    void *caller;
-    __attribute__((no_instrument_function))
-    Callback(void *addr) : caller(addr) { }
-
-    __attribute__((no_instrument_function))
-    void operator()(void *addr) {
-        caller = addr;
-    }
-};
-
 extern "C" __attribute__((no_instrument_function))
 void __cyg_profile_func_enter(void *callee, void *caller) {
     if(fp_trace != NULL) {
-        Callback callback(caller);
+        instrumentation::Callback callback(caller);
         instrumentation::unwind_nth_frame(callback, 4);
 
         std::string resolved = instrumentation::resolve(callee, callback.caller);
