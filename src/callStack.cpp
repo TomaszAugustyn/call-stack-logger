@@ -73,14 +73,14 @@
 #include <fstream>
 
 namespace {
-		NO_INSTRUMENT
-		std::string demangle_cxa(const std::string& _cxa) {
-			int status;
-			std::unique_ptr<char, void(*)(void*)> realname(abi::__cxa_demangle(_cxa.data(), nullptr, nullptr, &status), &free);
-			if (status != 0) { return _cxa; }
+	NO_INSTRUMENT
+	std::string demangle_cxa(const std::string& _cxa) {
+		int status;
+		std::unique_ptr<char, void(*)(void*)> realname(abi::__cxa_demangle(_cxa.data(), nullptr, nullptr, &status), &free);
+		if (status != 0) { return _cxa; }
 
-			return realname ? std::string(realname.get()) : "";
-		}
+		return realname ? std::string(realname.get()) : "";
+	}
 } // namespace
 
 namespace instrumentation {
