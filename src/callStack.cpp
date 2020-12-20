@@ -24,7 +24,7 @@
 
 /*
     [Tomasz Augustyn] Changes for own usage:
-    01-11-2020:
+    20-12-2020:
 	* get rid of `XERUS_NO_FANCY_CALLSTACK` switch,
     * change namespace names,
     * add `resolve` standalone function,
@@ -44,11 +44,12 @@
 	* divide resolving into 2 parts: `resolve_function_name` and `resolve_filename_and_line`
 	  as they use different addresses,
 	* resolved filename and line now indicates correct place from which the function
-	  is called.
+	  is called,
+	* Call `unwind_nth_frame` before resolving filename and line to get proper results.
 */
 
-#include <callStack.h>
-#include <execinfo.h>
+#include "callStack.h"
+#include "unwinder.h"
 
 // workaround for deliberately incompatible bfd.h header files on some systems.
 #ifndef PACKAGE
@@ -61,6 +62,7 @@
 #include <bfd.h>
 #include <dlfcn.h> // for dladdr
 #include <cxxabi.h> // for __cxa_demangle
+#include <execinfo.h> // for backtrace
 #include <unistd.h>
 #include <iostream>
 #include <sstream>
@@ -183,7 +185,6 @@ namespace instrumentation {
 				continue;
 			}
 
-			// Get more info on legal addresses.
 			const char* file;
 			const char* func;
 			unsigned line;
@@ -229,7 +230,6 @@ namespace instrumentation {
 				section = section->next;
 				continue;
 			}
-			// Get more info on legal addresses.
 			const char* file;
 			const char* func;
 			unsigned line = 0;
@@ -262,7 +262,20 @@ namespace instrumentation {
 			return res.str() + pair.second;
 		}
 
-		std::string filename = resolve_filename_and_line(caller_address);
+		// If the code is not changed 6th frame is constant as the execution flow
+		// starting from 6th frame to the top of the stack will look e.g. as follows:
+		// * 6th - instrumentation::FrameUnwinder::unwind_nth_frame
+		// * 5th - bfdResolver::resolve instrumentation::unwind_nth_frame
+		// * 4th - instrumentation::bfdResolver::resolve
+		// * 3rd - instrumentation::resolve
+		// * 2nd - __cyg_profile_func_enter
+		// * 1st - A::foo() --> function we are interested in
+		//
+		// Otherwise, if this call flow is altered, frame number must be recalculated.
+		Callback callback(caller_address);
+        unwind_nth_frame(callback, 6);
+
+		std::string filename = resolve_filename_and_line(callback.caller);
 		return res.str() + pair.second + "  " + filename;
 	}
 

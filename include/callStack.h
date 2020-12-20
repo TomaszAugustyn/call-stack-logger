@@ -24,7 +24,7 @@
 
 /*
     [Tomasz Augustyn] Changes for own usage:
-    09-10-2020:
+    20-12-2020:
     * change namespace names,
     * add `resolve` standalone function,
     * add `__attribute__((no_instrument_function))` to exclude from instrumentation,

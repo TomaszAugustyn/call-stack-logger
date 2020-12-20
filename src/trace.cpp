@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <time.h>
 #include "callStack.h"
-#include "unwinder.h"
 
 static FILE *fp_trace;
 
@@ -22,10 +21,7 @@ void trace_end() {
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
     if(fp_trace != NULL) {
-        instrumentation::Callback callback(caller);
-        instrumentation::unwind_nth_frame(callback, 4);
-
-        std::string resolved = instrumentation::resolve(callee, callback.caller);
+        std::string resolved = instrumentation::resolve(callee, caller);
         if (resolved.empty()) { return; }
         fprintf(fp_trace, "%s\n", resolved.c_str());
     }
