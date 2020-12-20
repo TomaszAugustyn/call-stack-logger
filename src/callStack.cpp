@@ -273,7 +273,7 @@ namespace instrumentation {
 		//
 		// Otherwise, if this call flow is altered, frame number must be recalculated.
 		Callback callback(caller_address);
-        unwind_nth_frame(callback, 6);
+		unwind_nth_frame(callback, 6);
 
 		std::string filename = resolve_filename_and_line(callback.caller);
 		return res.str() + pair.second + "  " + filename;
