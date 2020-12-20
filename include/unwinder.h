@@ -17,12 +17,11 @@ template <typename F>
 class FrameUnwinder {
 
 public:
-    size_t unwind_nth_frame(F &f, size_t frame_number) {
+    void unwind_nth_frame(F &f, size_t frame_number) {
         m_depth = frame_number;
         m_index = -1;
         m_pF = &f;
         _Unwind_Backtrace(&this->nth_frame_trampoline, this);
-        return static_cast<size_t>(m_index);
     }
 
 private:
@@ -72,9 +71,9 @@ private:
 
 // Do not pass copy here, as we want to mutate `f` to get address of the n-th frame.
 template <typename F>
-size_t unwind_nth_frame(F &f, size_t frame_number) {
+void unwind_nth_frame(F &f, size_t frame_number) {
     FrameUnwinder<F> unwinder;
-    return unwinder.unwind_nth_frame(f, frame_number);
+    unwinder.unwind_nth_frame(f, frame_number);
 }
 
 } // namespace instrumentation

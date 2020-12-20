@@ -6,19 +6,20 @@
 static FILE *fp_trace;
 
 __attribute__ ((constructor))
+NO_INSTRUMENT
 void trace_begin() {
     fp_trace = fopen("trace.out", "a");
 }
 
 __attribute__ ((destructor))
-__attribute__ ((no_instrument_function))
+NO_INSTRUMENT
 void trace_end() {
     if(fp_trace != NULL) {
         fclose(fp_trace);
     }
 }
 
-extern "C" __attribute__((no_instrument_function))
+extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
     if(fp_trace != NULL) {
         instrumentation::Callback callback(caller);
@@ -30,7 +31,7 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
     }
 }
 
-extern "C" __attribute__((no_instrument_function))
+extern "C" NO_INSTRUMENT
 void __cyg_profile_func_exit (void *callee, void *caller) {
     if(fp_trace != NULL) {
         //fprintf(fp_trace, "x %p %p %lu\n", callee, caller, time(NULL));

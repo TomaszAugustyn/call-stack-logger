@@ -33,7 +33,8 @@
 	* extract `check_bfd_initialized` function,
 	* add `ensure_actual_executable` function,
 	* divide resolving into 2 parts: `resolve_function_name` and `resolve_filename_and_line`
-	  as they use different addresses.
+	  as they use different addresses,
+	* Add `NO_INSTRUMENT` macro.
 */
 
 #pragma once
@@ -43,6 +44,10 @@
 #include <string>
 #include <bfd.h>
 #include <dlfcn.h>
+
+#ifndef NO_INSTRUMENT
+	#define NO_INSTRUMENT __attribute__((no_instrument_function))
+#endif
 
 namespace instrumentation {
 
@@ -63,29 +68,29 @@ namespace instrumentation {
 				storedBfd(bfd *_abfd, deleter_t *_del) : abfd(_abfd, _del) {}
 			};
 
-			__attribute__((no_instrument_function))
+			NO_INSTRUMENT
 			static bool ensure_bfd_loaded(Dl_info &_info);
 
-			__attribute__((no_instrument_function))
+			NO_INSTRUMENT
 			static std::pair<uintptr_t, uintptr_t> get_range_of_section(void *_addr, std::string _name);
 
-			__attribute__((no_instrument_function))
+			NO_INSTRUMENT
 			static std::string resolve(void *callee_address, void *caller_address);
 
 		private:
-			__attribute__((no_instrument_function))
+			NO_INSTRUMENT
 			static std::pair<bool, std::string> resolve_function_name(void *callee_address);
 
-			__attribute__((no_instrument_function))
+			NO_INSTRUMENT
 			static std::string resolve_filename_and_line(void *caller_address);
 
-			__attribute__((no_instrument_function))
+			NO_INSTRUMENT
 			static void check_bfd_initialized();
 
-			__attribute__((no_instrument_function))
+			NO_INSTRUMENT
 			static std::string get_argv0();
 
-			__attribute__((no_instrument_function))
+			NO_INSTRUMENT
 			static void ensure_actual_executable(Dl_info &symbol_info);
 
 			inline static std::map<void *, storedBfd> s_bfds = {};
@@ -99,18 +104,18 @@ namespace instrumentation {
 	* [address .section] filename:line (function)
 	* if all of these are available.
 	*/
-    __attribute__((no_instrument_function))
+    NO_INSTRUMENT
 	std::string get_call_stack();
 
 	/**
 	* @brief Returns the address range of the elf-section names @a _name as part of the executable / so file that contained @a _addr.
 	*/
-    __attribute__((no_instrument_function))
+    NO_INSTRUMENT
 	std::pair<uintptr_t, uintptr_t> get_range_of_section(void* _addr, std::string _name);
 
 	/**
 	* @brief Returns std::string with human-readable information about the function which pointer is passed.
 	*/
-    __attribute__((no_instrument_function))
+    NO_INSTRUMENT
     std::string resolve(void *callee_address, void *caller_address);
 }

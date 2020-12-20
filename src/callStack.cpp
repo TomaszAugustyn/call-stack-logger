@@ -31,7 +31,7 @@
     * get rid of always false comparison: `if ((section->flags | SEC_CODE) == 0u)`,
     * move `demangle_cxa` to anonymous namespace,
 	* use tenary operator at the end of `demangle_cxa` function,
-    * add `__attribute__((no_instrument_function))` to exclude from instrumentation,
+    * use `NO_INSTRUMENT` macro to exclude from instrumentation,
     * add additional condition `|| s_bfds.find(info.dli_fbase) == s_bfds.end()`,
 	* check `newBfd` against nullptr before dereferencing it with `!newBfd->abfd`,
 	* initialize unique_ptr<storedBfd> with `std::make_unique`,
@@ -71,7 +71,7 @@
 #include <fstream>
 
 namespace {
-		__attribute__((no_instrument_function))
+		NO_INSTRUMENT
 		std::string demangle_cxa(const std::string& _cxa) {
 			int status;
 			std::unique_ptr<char, void(*)(void*)> realname(abi::__cxa_demangle(_cxa.data(), nullptr, nullptr, &status), &free);
