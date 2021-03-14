@@ -24,7 +24,7 @@
 
 /*
     [Tomasz Augustyn] Changes for own usage:
-    20-12-2020:
+    14-03-2021:
     * change namespace names,
     * add `resolve` standalone function,
     * add `__attribute__((no_instrument_function))` to exclude from instrumentation,
@@ -34,7 +34,8 @@
 	* add `ensure_actual_executable` function,
 	* divide resolving into 2 parts: `resolve_function_name` and `resolve_filename_and_line`
 	  as they use different addresses,
-	* Add `NO_INSTRUMENT` macro.
+	* add `NO_INSTRUMENT` macro,
+	* get rid of `get_range_of_section` function.
 */
 
 #pragma once
@@ -72,9 +73,6 @@ namespace instrumentation {
 			static bool ensure_bfd_loaded(Dl_info &_info);
 
 			NO_INSTRUMENT
-			static std::pair<uintptr_t, uintptr_t> get_range_of_section(void *_addr, std::string _name);
-
-			NO_INSTRUMENT
 			static std::string resolve(void *callee_address, void *caller_address);
 
 		private:
@@ -106,12 +104,6 @@ namespace instrumentation {
 	*/
     NO_INSTRUMENT
 	std::string get_call_stack();
-
-	/**
-	* @brief Returns the address range of the elf-section names @a _name as part of the executable / so file that contained @a _addr.
-	*/
-    NO_INSTRUMENT
-	std::pair<uintptr_t, uintptr_t> get_range_of_section(void* _addr, std::string _name);
 
 	/**
 	* @brief Returns std::string with human-readable information about the function which pointer is passed.

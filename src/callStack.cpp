@@ -24,7 +24,7 @@
 
 /*
     [Tomasz Augustyn] Changes for own usage:
-    20-12-2020:
+    14-03-2021:
 	* get rid of `XERUS_NO_FANCY_CALLSTACK` switch,
     * change namespace names,
     * add `resolve` standalone function,
@@ -45,7 +45,8 @@
 	  as they use different addresses,
 	* resolved filename and line now indicates correct place from which the function
 	  is called,
-	* Call `unwind_nth_frame` before resolving filename and line to get proper results.
+	* call `unwind_nth_frame` before resolving filename and line to get proper results,
+	* get rid of `get_range_of_section` function.
 */
 
 #include "callStack.h"
@@ -133,28 +134,6 @@ namespace instrumentation {
 			// but display the path that /proc/self/exe links to.
 			symbol_info.dli_fname = "/proc/self/exe";
 		}
-	}
-
-	std::pair<uintptr_t, uintptr_t> bfdResolver::get_range_of_section(void* _addr, std::string _name) {
-		check_bfd_initialized();
-
-		// Get path and offset of shared object that contains this address.
-		Dl_info info;
-		dladdr(_addr, &info);
-		if (info.dli_fbase == nullptr) {
-			return std::make_pair(0,0);
-		}
-
-		if (!ensure_bfd_loaded(info)) {
-			return std::make_pair(0,0);
-		}
-		storedBfd &currBfd = s_bfds.at(info.dli_fbase);
-
-		asection* section = bfd_get_section_by_name(currBfd.abfd.get(), _name.c_str());
-		if (section == nullptr) {
-			return std::make_pair(0,0);
-		}
-		return std::make_pair(section->vma, section->vma+section->size);
 	}
 
 	std::pair<bool, std::string> bfdResolver::resolve_function_name(void *address) {
@@ -297,10 +276,6 @@ namespace instrumentation {
 			res += bfdResolver::resolve(stack[i], stack[i-1]) + '\n';
 		}
 		return res;
-	}
-
-	std::pair<uintptr_t, uintptr_t> get_range_of_section(void* _addr, std::string _name) {
-		return bfdResolver::get_range_of_section(_addr, _name);
 	}
 
     std::string resolve(void *callee_address, void *caller_address) {
