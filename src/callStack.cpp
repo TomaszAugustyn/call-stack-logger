@@ -46,7 +46,10 @@
 	* resolved filename and line now indicates correct place from which the function
 	  is called,
 	* call `unwind_nth_frame` before resolving filename and line to get proper results,
-	* get rid of `get_range_of_section` function.
+	* get rid of `get_range_of_section` function,
+	* use `std::optional` in resolving functions,
+	* make `resolve` function return `ResolvedFrame` struct instead of already formatted
+	  std::string.
 */
 
 #include "callStack.h"
@@ -65,13 +68,10 @@
 #include <cxxabi.h> // for __cxa_demangle
 #include <execinfo.h> // for backtrace
 #include <unistd.h>
-#include <iostream>
-#include <sstream>
 #include <memory>
 #include <map>
-#include <vector>
-#include <iomanip>
 #include <fstream>
+#include <stdexcept>
 
 namespace {
 	NO_INSTRUMENT
@@ -136,28 +136,26 @@ namespace instrumentation {
 		}
 	}
 
-	std::pair<bool, std::string> bfdResolver::resolve_function_name(void *address) {
+	std::optional<std::string> bfdResolver::resolve_function_name(void *address) {
 		Dl_info info;
 		dladdr(address, &info);
 		if (info.dli_fbase == nullptr) {
-			return std::make_pair(false, "<address to object not found>");
+			return "<address to object not found>";
 		}
 		#ifndef LOG_NOT_DEMANGLED
-			if (info.dli_sname == nullptr) { return std::make_pair(false, ""); }
+			if (info.dli_sname == nullptr) { return std::nullopt; }
 		#endif
 
 		if (!ensure_bfd_loaded(info) || s_bfds.find(info.dli_fbase) == s_bfds.end()) {
-			return std::make_pair(false, "<could not open object file>");
+			return "<could not open object file>";
 		}
 		storedBfd& currBfd = s_bfds.at(info.dli_fbase);
 
 		asection* section = currBfd.abfd->sections;
 		const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
-		// std::cout << '\n' << "sections:\n";
+
 		while (section != nullptr) {
 			const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd.offset : 0) - static_cast<intptr_t>(section->vma);
-			// std::cout << section->name << " " << section->id << " file: " << section->filepos << " flags: " << section->flags
-			//			<< " vma: " << std::hex << section->vma << " - " << std::hex << (section->vma+section->size) << std::endl;
 
 			if (offset < 0 || static_cast<size_t>(offset) > section->size) {
 				section = section->next;
@@ -169,31 +167,23 @@ namespace instrumentation {
 			unsigned line;
 			if (bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
 				auto demangled = demangle_cxa(func);
-				#ifdef LOG_ADDR
-					if (info.dli_saddr != nullptr) {
-						demangled += " +0x";
-						demangled += std::to_string(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(info.dli_saddr));
-					}
-				#endif
-
-				return std::make_pair(true, std::move(demangled));
+				return demangled.empty() ? std::nullopt : std::make_optional(demangled);
 			}
-			return std::make_pair(true, demangle_cxa((info.dli_sname != nullptr ? info.dli_sname : "")) + " <bfd_error>");
+			return demangle_cxa(info.dli_sname != nullptr ? info.dli_sname : "") + " <bfd_error>";
 		}
-		// std::cout << " ---- sections end ------ " << std::endl;
-		return std::make_pair(false, "<not sectioned address>");
+		return "<not sectioned address>";
 	}
 
-	std::string bfdResolver::resolve_filename_and_line(void *address) {
+	std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filename_and_line(void *address) {
 		// Get path and offset of shared object that contains caller address.
 		Dl_info info;
 		dladdr(address, &info);
 		if (info.dli_fbase == nullptr) {
-			return "caller address to object not found>";
+			return std::make_pair("<caller address to object not found>", std::nullopt);
 		}
 
 		if (!ensure_bfd_loaded(info) || s_bfds.find(info.dli_fbase) == s_bfds.end()) {
-			return "<could not open caller object file>";
+			return std::make_pair("<could not open caller object file>", std::nullopt);
 		}
 		storedBfd& currBfd = s_bfds.at(info.dli_fbase);
 
@@ -211,35 +201,35 @@ namespace instrumentation {
 			}
 			const char* file;
 			const char* func;
-			unsigned line = 0;
+			unsigned int line = 0;
 			if (bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
 				if (file != nullptr) {
-					return "(Called from: " + std::string(file) + ":" + std::to_string(line) + ")";
+					return std::make_pair(std::string(file), std::make_optional(line));
 				}
-				return "(Called from: " + demangle_cxa(func) + ")";
+				return std::make_pair(demangle_cxa(func), std::nullopt);
 			}
 			if (info.dli_sname != nullptr) {
-				return "(Called from: " + demangle_cxa(info.dli_sname) + " <bfd_error>)";
+				return std::make_pair(demangle_cxa(info.dli_sname) + " <bfd_error>", std::nullopt);
 			}
 		}
 		// std::cout << " ---- sections end ------ " << std::endl;
-		return "(???:? <not sectioned address>)";
+		return std::make_pair("<not sectioned address>", std::nullopt);
 	}
 
-	std::string bfdResolver::resolve(void *callee_address, void *caller_address) {
+	std::optional<ResolvedFrame> bfdResolver::resolve(void *callee_address, void *caller_address) {
 		check_bfd_initialized();
-		std::stringstream res;
+		ResolvedFrame resolved;
+
 		#ifdef LOG_ADDR
-			res << "Addr: [0x" << std::setw(int(sizeof(void*)*2)) << std::setfill('0') << std::hex << reinterpret_cast<uintptr_t>(callee_address) << "] ";
+			resolved.callee_address = std::make_optional(callee_address);
 		#endif
 
-		auto pair = resolve_function_name(callee_address);
-		if (!pair.first) {
-			if (pair.second.empty()) {
-				return "";
-			}
-			return res.str() + pair.second;
+		auto maybe_func_name = resolve_function_name(callee_address);
+		if (!maybe_func_name) {
+			return std::nullopt;
 		}
+
+		resolved.callee_function_name = *maybe_func_name;
 
 		// If the code is not changed 6th frame is constant as the execution flow
 		// starting from 6th frame to the top of the stack will look e.g. as follows:
@@ -254,31 +244,35 @@ namespace instrumentation {
 		Callback callback(caller_address);
 		unwind_nth_frame(callback, 6);
 
-		std::string filename = resolve_filename_and_line(callback.caller);
-		return res.str() + pair.second + "  " + filename;
+		auto pair = resolve_filename_and_line(callback.caller);
+		resolved.caller_filename = pair.first;
+		resolved.caller_line_number = pair.second;
+
+		return std::make_optional(resolved);
 	}
 
-	std::string get_call_stack() {
+	std::vector<std::optional<ResolvedFrame>> get_call_stack() {
 		const size_t MAX_FRAMES = 1000;
 		std::vector<void*> stack(MAX_FRAMES);
 		int num = backtrace(&stack[0], MAX_FRAMES);
 		if (num <= 0) {
-			return "Callstack could not be built.";
+			throw std::runtime_error("Callstack could not be built");
 		}
 		while (size_t(num) == stack.size()) {
 			stack.resize(stack.size()*2);
 			num = backtrace(&stack[0], int(stack.size()));
 		}
 		stack.resize(static_cast<size_t>(num));
-		std::string res;
+		std::vector<std::optional<ResolvedFrame>> res;
+		res.reserve(static_cast<size_t>(num));
 		// NOTE i = 0 corresponds to get_call_stack and is omitted
 		for (size_t i = 1; i < static_cast<size_t>(num); ++i) {
-			res += bfdResolver::resolve(stack[i], stack[i-1]) + '\n';
+			res.push_back(bfdResolver::resolve(stack[i], stack[i-1]));
 		}
 		return res;
 	}
 
-    std::string resolve(void *callee_address, void *caller_address) {
+    std::optional<ResolvedFrame> resolve(void *callee_address, void *caller_address) {
 		return bfdResolver::resolve(callee_address, caller_address);
 	}
 

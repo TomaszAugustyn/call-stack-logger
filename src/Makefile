@@ -8,7 +8,7 @@ CPP_STD_INCLUDES=$(shell ( 	`gcc -print-prog-name=cc1plus` -v < /dev/null 2>&1 \
 						| cat | sort | uniq | tr '\n' ',' | sed 's/\(.*\),/\1 /' | xargs )
 
 # Exclude tracing functions themselves from instrumentation
-CPP_STD_INCLUDES := "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h"
+CPP_STD_INCLUDES := "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/utils.h"
 $(info $$CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}])
 
 CXX = g++

@@ -1,3 +1,5 @@
+#pragma once
+
 #include <cstdlib>
 #include <limits>
 #include <unwind.h>

@@ -29,13 +29,17 @@
     * add `resolve` standalone function,
     * add `__attribute__((no_instrument_function))` to exclude from instrumentation,
 	* split `bfdResolver` struct to declaration (.h) and definition (.cpp),
-	* initialize static members `s_bfds` and `s_bfd_initialized` inside the class during declaration (c++17),
+	* initialize static members `s_bfds` and `s_bfd_initialized` inside the class during
+	  declaration (c++17),
 	* extract `check_bfd_initialized` function,
 	* add `ensure_actual_executable` function,
 	* divide resolving into 2 parts: `resolve_function_name` and `resolve_filename_and_line`
 	  as they use different addresses,
 	* add `NO_INSTRUMENT` macro,
-	* get rid of `get_range_of_section` function.
+	* get rid of `get_range_of_section` function,
+	* use `std::optional` in resolving functions,
+	* make `resolve` function return `ResolvedFrame` struct instead of already formatted
+	  std::string.
 */
 
 #pragma once
@@ -43,8 +47,11 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 #include <bfd.h>
 #include <dlfcn.h>
+#include <optional>
+#include "types.h"
 
 #ifndef NO_INSTRUMENT
 	#define NO_INSTRUMENT __attribute__((no_instrument_function))
@@ -73,14 +80,14 @@ namespace instrumentation {
 			static bool ensure_bfd_loaded(Dl_info &_info);
 
 			NO_INSTRUMENT
-			static std::string resolve(void *callee_address, void *caller_address);
+			static std::optional<ResolvedFrame> resolve(void *callee_address, void *caller_address);
 
 		private:
 			NO_INSTRUMENT
-			static std::pair<bool, std::string> resolve_function_name(void *callee_address);
+			static std::optional<std::string> resolve_function_name(void *callee_address);
 
 			NO_INSTRUMENT
-			static std::string resolve_filename_and_line(void *caller_address);
+			static std::pair<std::string, std::optional<unsigned int>> resolve_filename_and_line(void *caller_address);
 
 			NO_INSTRUMENT
 			static void check_bfd_initialized();
@@ -103,11 +110,11 @@ namespace instrumentation {
 	* if all of these are available.
 	*/
     NO_INSTRUMENT
-	std::string get_call_stack();
+	std::vector<std::optional<ResolvedFrame>> get_call_stack();
 
 	/**
 	* @brief Returns std::string with human-readable information about the function which pointer is passed.
 	*/
     NO_INSTRUMENT
-    std::string resolve(void *callee_address, void *caller_address);
+    std::optional<ResolvedFrame> resolve(void *callee_address, void *caller_address);
 }
