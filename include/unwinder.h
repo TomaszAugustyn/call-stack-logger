@@ -7,19 +7,17 @@
 namespace instrumentation {
 
 struct Callback {
-    void *caller;
-    Callback(void *addr) : caller(addr) { }
+    void* caller;
+    Callback(void* addr) : caller(addr) {}
 
-    void operator()(void *addr) {
-        caller = addr;
-    }
+    void operator()(void* addr) { caller = addr; }
 };
 
 template <typename F>
 class FrameUnwinder {
 
 public:
-    void unwind_nth_frame(F &f, size_t frame_number) {
+    void unwind_nth_frame(F& f, size_t frame_number) {
         m_depth = frame_number;
         m_index = -1;
         m_pF = &f;
@@ -29,14 +27,13 @@ public:
 private:
     size_t m_depth;
     ssize_t m_index;
-    F *m_pF;
+    F* m_pF;
 
-    static _Unwind_Reason_Code nth_frame_trampoline(_Unwind_Context *ctx,
-                                                    void *self) {
+    static _Unwind_Reason_Code nth_frame_trampoline(_Unwind_Context* ctx, void* self) {
         return (static_cast<FrameUnwinder*>(self))->nth_frame_backtrace(ctx);
     }
 
-    _Unwind_Reason_Code nth_frame_backtrace(_Unwind_Context *ctx) {
+    _Unwind_Reason_Code nth_frame_backtrace(_Unwind_Context* ctx) {
         if (m_index < (ssize_t)m_depth - 1) {
             m_index += 1;
             return _URC_NO_REASON;
@@ -44,7 +41,7 @@ private:
         return backtrace(ctx);
     }
 
-    _Unwind_Reason_Code backtrace(_Unwind_Context *ctx) {
+    _Unwind_Reason_Code backtrace(_Unwind_Context* ctx) {
         if (m_index >= 0 && static_cast<size_t>(m_index) >= m_depth)
             return _URC_END_OF_STACK;
 
@@ -64,7 +61,7 @@ private:
         }
         // Ignore first frame.
         if (m_index >= 0) {
-            (*m_pF)(reinterpret_cast<void *>(ip));
+            (*m_pF)(reinterpret_cast<void*>(ip));
         }
         m_index += 1;
         return _URC_NO_REASON;
@@ -73,7 +70,7 @@ private:
 
 // Do not pass copy here, as we want to mutate `f` to get address of the n-th frame.
 template <typename F>
-void unwind_nth_frame(F &f, size_t frame_number) {
+void unwind_nth_frame(F& f, size_t frame_number) {
     FrameUnwinder<F> unwinder;
     unwinder.unwind_nth_frame(f, frame_number);
 }

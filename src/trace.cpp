@@ -1,7 +1,9 @@
-#include <stdio.h>
-#include <time.h>
 #include "callStack.h"
 #include "utils.h"
+#include <stdio.h>
+#include <time.h>
+
+// clang-format off
 
 static FILE *fp_trace;
 
@@ -34,3 +36,4 @@ void __cyg_profile_func_exit (void *callee, void *caller) {
         //fprintf(fp_trace, "x %p %p %lu\n", callee, caller, time(NULL));
     }
 }
+// clang-format on
