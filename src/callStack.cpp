@@ -53,6 +53,7 @@
 */
 
 #include "callStack.h"
+#include "prettyTime.h"
 #include "unwinder.h"
 
 // workaround for deliberately incompatible bfd.h header files on some systems.
@@ -231,18 +232,18 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
 
 std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* caller_address) {
     check_bfd_initialized();
-    ResolvedFrame resolved;
-
-#ifdef LOG_ADDR
-    resolved.callee_address = std::make_optional(callee_address);
-#endif
 
     auto maybe_func_name = resolve_function_name(callee_address);
     if (!maybe_func_name) {
         return std::nullopt;
     }
-
+    ResolvedFrame resolved;
+    resolved.timestamp = utils::pretty_time();
     resolved.callee_function_name = *maybe_func_name;
+
+#ifdef LOG_ADDR
+    resolved.callee_address = std::make_optional(callee_address);
+#endif
 
     // If the code is not changed 6th frame is constant as the execution flow
     // starting from 6th frame to the top of the stack will look e.g. as follows:
