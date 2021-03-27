@@ -7,10 +7,10 @@
 namespace utils {
 
 // strftime format
-#define LOGGER_PRETTY_TIME_FORMAT "[%d-%m-%Y %H:%M:%S"
+#define LOGGER_PRETTY_TIME_FORMAT "%d-%m-%Y %H:%M:%S"
 
 // printf format
-#define LOGGER_PRETTY_MS_FORMAT ".%03d]"
+#define LOGGER_PRETTY_MS_FORMAT ".%03d"
 
 // Convert current time to milliseconds since unix epoch.
 template <typename T>

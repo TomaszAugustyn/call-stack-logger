@@ -19,6 +19,12 @@ public:
     }
 };
 
+int fib(int n) {
+    if (n <= 1)
+        return n;
+    return fib(n - 1) + fib(n - 2);
+}
+
 int main() {
     // Test logging static member methods.
     A::foo();
@@ -27,5 +33,7 @@ int main() {
     // to std functions/containers (which should not be instrumented).
     B b;
     b.foo();
+    fib(10);
+    A::foo();
     std::cout << "HELLO WORLD!" << std::endl;
 }

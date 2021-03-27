@@ -49,7 +49,7 @@ private:
         uintptr_t ip = _Unwind_GetIPInfo(ctx, &ip_before_instruction);
 
         if (!ip_before_instruction) {
-            // Calculating 0-1 for unsigned, looks like a possible bug to sanitiziers,
+            // Calculating 0-1 for unsigned, looks like a possible bug to sanitizers.
             // so let's do it explicitly:
             if (ip == 0) {
                 // Set it to 0xffff... (as from casting 0-1).
