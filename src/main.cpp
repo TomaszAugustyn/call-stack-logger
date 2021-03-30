@@ -19,21 +19,21 @@ public:
     }
 };
 
-int fib(int n) {
+int fibonacci(int n) {
     if (n <= 1)
         return n;
-    return fib(n - 1) + fib(n - 2);
+    return fibonacci(n - 1) + fibonacci(n - 2);
 }
 
 int main() {
     // Test logging static member methods.
     A::foo();
 
-    // Test logging non-static member methods with calls
-    // to std functions/containers (which should not be instrumented).
+    // Test logging non-static member methods with calls to std
+    // functions/containers (which should not be instrumented).
     B b;
     b.foo();
-    fib(10);
+    fibonacci(6);
     A::foo();
     std::cout << "HELLO WORLD!" << std::endl;
 }

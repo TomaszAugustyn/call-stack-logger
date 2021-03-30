@@ -10,15 +10,15 @@ namespace utils {
 #define LOGGER_PRETTY_TIME_FORMAT "%d-%m-%Y %H:%M:%S"
 
 // printf format
-#define LOGGER_PRETTY_MS_FORMAT ".%03d"
+#define LOGGER_PRETTY_MS_FORMAT ".%03ld"
 
 // Convert current time to milliseconds since unix epoch.
 template <typename T>
-int to_ms(const std::chrono::time_point<T>& tp) {
+long to_ms(const std::chrono::time_point<T>& tp) {
     using namespace std::chrono;
 
     auto dur = tp.time_since_epoch();
-    return static_cast<int>(duration_cast<milliseconds>(dur).count());
+    return duration_cast<milliseconds>(dur).count();
 }
 
 // Format it in two parts: main part with date and time and part with milliseconds.
@@ -31,7 +31,7 @@ std::string pretty_time() {
 
     char buffer[128];
     int string_size = strftime(buffer, sizeof(buffer), LOGGER_PRETTY_TIME_FORMAT, time_info);
-    int ms = to_ms(tp) % 1000;
+    auto ms = to_ms(tp) % 1000;
     string_size +=
             std::snprintf(buffer + string_size, sizeof(buffer) - string_size, LOGGER_PRETTY_MS_FORMAT, ms);
 

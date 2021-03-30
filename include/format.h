@@ -26,7 +26,7 @@ std::string format(const instrumentation::ResolvedFrame& frame, int current_stac
     std::fill_n(std::ostream_iterator<std::string>(res), current_stack_depth, "|_ ");
 
     res << frame.callee_function_name << "  (called from: " << frame.caller_filename << ":"
-        << (frame.caller_line_number ? std::to_string(*frame.caller_line_number) : "???");
+        << (frame.caller_line_number ? std::to_string(*frame.caller_line_number) : "???") << ")";
 
     return res.str();
 }
