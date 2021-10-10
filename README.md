@@ -19,3 +19,10 @@ sudo apt-get install binutils-dev
 ```
 
 ## Building and running ##
+
+```bash
+git clone https://github.com/TomaszAugustyn/call-stack-logger.git
+cd call-stack-logger
+make
+make run
+```

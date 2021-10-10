@@ -12,12 +12,12 @@ subdirs:
 	done
 
 makedirs: $(ODIR)
-	
+
 ${ODIR}:
 	${MKDIR_P} ${ODIR}
 
 run:
 	$(EXECUTABLE)
-	
+
 cleanAll:
 	rm -f $(ODIR)/*
