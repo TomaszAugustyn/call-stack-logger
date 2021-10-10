@@ -36,4 +36,6 @@ int main() {
     fibonacci(6);
     A::foo();
     std::cout << "HELLO WORLD!" << std::endl;
+
+    return 0;
 }

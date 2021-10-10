@@ -18,7 +18,7 @@ IDIR = ../include
 ODIR = ../build
 LIB_DIR = ../lib
 INCS = -I$(IDIR) -L$(LIB_DIR)
-LIBS = -lpthread -ldl -lbfd
+LIBS = -ldl -lbfd
 
 SOURCES := $(shell find . -name "*.cpp" -printf '%f\n')
 _HEADERS  := $(shell find $(IDIR) -name "*.h" -printf '%f\n')

@@ -18,14 +18,14 @@ void trace_begin() {
 __attribute__ ((destructor))
 NO_INSTRUMENT
 void trace_end() {
-    if(fp_trace != NULL) {
+    if(fp_trace != nullptr) {
         fclose(fp_trace);
     }
 }
 
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
-    if(fp_trace != NULL) {
+    if(fp_trace != nullptr) {
         last_frame_was_resolved = false;
         auto maybe_resolved = instrumentation::resolve(callee, caller);
         if (!maybe_resolved) { return; }
@@ -37,9 +37,9 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_exit (void *callee, void *caller) {
-    if(fp_trace != NULL && last_frame_was_resolved) {
+    if(fp_trace != nullptr && last_frame_was_resolved) {
         current_stack_depth--;
-        //fprintf(fp_trace, "x %p %p %lu\n", callee, caller, time(NULL));
+        //fprintf(fp_trace, "x %p %p %lu\n", callee, caller, time(nullptr));
     }
 }
 // clang-format on

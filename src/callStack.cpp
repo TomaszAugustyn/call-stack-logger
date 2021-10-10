@@ -32,7 +32,6 @@
     * move `demangle_cxa` to anonymous namespace,
     * use tenary operator at the end of `demangle_cxa` function,
     * use `NO_INSTRUMENT` macro to exclude from instrumentation,
-    * add additional condition `|| s_bfds.find(info.dli_fbase) == s_bfds.end()`,
     * check `newBfd` against nullptr before dereferencing it with `!newBfd->abfd`,
     * initialize unique_ptr<storedBfd> with `std::make_unique`,
     * convert initializing with `std::pair<...>(...)` with `std::make_pair(...)`,
@@ -154,7 +153,7 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
     }
 #endif
 
-    if (!ensure_bfd_loaded(info) || s_bfds.find(info.dli_fbase) == s_bfds.end()) {
+    if (!ensure_bfd_loaded(info)) {
         return "<could not open object file>";
     }
     storedBfd& currBfd = s_bfds.at(info.dli_fbase);
@@ -192,7 +191,7 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
         return std::make_pair("<caller address to object not found>", std::nullopt);
     }
 
-    if (!ensure_bfd_loaded(info) || s_bfds.find(info.dli_fbase) == s_bfds.end()) {
+    if (!ensure_bfd_loaded(info)) {
         return std::make_pair("<could not open caller object file>", std::nullopt);
     }
     storedBfd& currBfd = s_bfds.at(info.dli_fbase);
@@ -238,7 +237,6 @@ std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* ca
         return std::nullopt;
     }
     ResolvedFrame resolved;
-    resolved.timestamp = utils::pretty_time();
     resolved.callee_function_name = *maybe_func_name;
 
 #ifdef LOG_ADDR
@@ -261,6 +259,7 @@ std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* ca
     auto pair = resolve_filename_and_line(callback.caller);
     resolved.caller_filename = pair.first;
     resolved.caller_line_number = pair.second;
+    resolved.timestamp = utils::pretty_time();
 
     return std::make_optional(resolved);
 }
