@@ -30,6 +30,16 @@ OBJS = $(patsubst %,$(ODIR)/%,$(_OBJS))
 
 EXECUTABLE = $(ODIR)/runDemo
 
+ifdef log_with_addr
+	CXXFLAGS += -DLOG_ADDR
+endif
+ifdef log_not_demangled
+	CXXFLAGS += -DLOG_NOT_DEMANGLED
+endif
+ifdef disable_instrumentation
+	CXXFLAGS = -g -Wall -std=c++17 -DDISABLE_INSTRUMENTATION
+endif
+
 .PHONY: build
 build: clean $(SOURCES) $(EXECUTABLE)
 
@@ -38,12 +48,6 @@ $(EXECUTABLE): $(OBJS)
 
 $(ODIR)/%.o : %.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@ $(INCS)
-
-log_with_addr: CXXFLAGS += -DLOG_ADDR
-log_with_addr: clean build
-
-log_not_demangled: CXXFLAGS += -DLOG_NOT_DEMANGLED
-log_not_demangled: clean build
 
 run:
 	$(EXECUTABLE)

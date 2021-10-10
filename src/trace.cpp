@@ -4,6 +4,7 @@
 #include <time.h>
 
 // clang-format off
+#ifndef DISABLE_INSTRUMENTATION
 
 static FILE *fp_trace;
 static int current_stack_depth = -1;
@@ -42,4 +43,6 @@ void __cyg_profile_func_exit (void *callee, void *caller) {
         //fprintf(fp_trace, "x %p %p %lu\n", callee, caller, time(nullptr));
     }
 }
+
+#endif
 // clang-format on

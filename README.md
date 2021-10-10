@@ -23,6 +23,13 @@ sudo apt-get install binutils-dev
 ```bash
 git clone https://github.com/TomaszAugustyn/call-stack-logger.git
 cd call-stack-logger
+
+# build with default logging
 make
+# or for extended logging you can play with these flags
+make log_with_addr=1 log_not_demangled=1
+# or to compile your application with disabled instrumentation (no logging)
+make disable_instrumentation=1
+
 make run
 ```
