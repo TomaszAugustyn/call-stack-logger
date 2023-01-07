@@ -27,7 +27,7 @@ cd call-stack-logger
 # Create build folder and go there
 mkdir build && cd build
 
-# configure cmake with default logging
+# Configure cmake with default logging
 cmake ..
 # or for extended logging you can play with these flags
 cmake -DLOG_ADDR=ON -DLOG_NOT_DEMANGLED=ON ..
@@ -50,7 +50,7 @@ cd call-stack-logger
 mv Makefile_legacy Makefile
 mv src/Makefile_legacy src/Makefile
 
-# build with default logging
+# Build with default logging
 make
 # or for extended logging you can play with these flags
 make log_with_addr=1 log_not_demangled=1
