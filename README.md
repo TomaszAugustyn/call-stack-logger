@@ -24,6 +24,32 @@ sudo apt-get install binutils-dev
 git clone https://github.com/TomaszAugustyn/call-stack-logger.git
 cd call-stack-logger
 
+# Create build folder and go there
+mkdir build && cd build
+
+# configure cmake with default logging
+cmake ..
+# or for extended logging you can play with these flags
+cmake -DLOG_ADDR=ON -DLOG_NOT_DEMANGLED=ON ..
+# or to compile your application with disabled instrumentation (no logging)
+cmake -DDISABLE_INSTRUMENTATION=ON ..
+
+# Build
+make
+
+# Build and Run (as the result trace.out file will be generated)
+make run
+```
+
+## Building and running - legacy (Makefiles) ##
+
+```bash
+git clone https://github.com/TomaszAugustyn/call-stack-logger.git
+cd call-stack-logger
+
+mv Makefile_legacy Makefile
+mv src/Makefile_legacy src/Makefile
+
 # build with default logging
 make
 # or for extended logging you can play with these flags
@@ -31,5 +57,6 @@ make log_with_addr=1 log_not_demangled=1
 # or to compile your application with disabled instrumentation (no logging)
 make disable_instrumentation=1
 
+# Build and Run (as the result trace.out file will be generated)
 make run
 ```
