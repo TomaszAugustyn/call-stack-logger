@@ -1,61 +1,17 @@
-// Xerus - A General Purpose Tensor Library
-// Copyright (C) 2014-2017 Benjamin Huber and Sebastian Wolf.
-//
-// Xerus is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License,
-// or (at your option) any later version.
-//
-// Xerus is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with Xerus. If not, see <http://www.gnu.org/licenses/>.
-//
-// For further information on Xerus visit https://libXerus.org
-// or contact us at contact@libXerus.org.
-
-/**
- * @file
- * @brief Implementation of the callstack functionality and respective helper class bfdResolver.
- */
-
 /*
-    [Tomasz Augustyn] Changes for own usage:
-    14-03-2021:
-    * get rid of `XERUS_NO_FANCY_CALLSTACK` switch,
-    * change namespace names,
-    * add `resolve` standalone function,
-    * get rid of always false comparison: `if ((section->flags | SEC_CODE) == 0u)`,
-    * move `demangle_cxa` to anonymous namespace,
-    * use tenary operator at the end of `demangle_cxa` function,
-    * use `NO_INSTRUMENT` macro to exclude from instrumentation,
-    * check `newBfd` against nullptr before dereferencing it with `!newBfd->abfd`,
-    * initialize unique_ptr<storedBfd> with `std::make_unique`,
-    * convert initializing with `std::pair<...>(...)` with `std::make_pair(...)`,
-    * use `LOG_ADDR` compilation flag to either log or not log function address,
-    * use `LOG_NOT_DEMANGLED` compilation flag to log even not demangled functions,
-    * change resolved string output format,
-    * extract `check_bfd_initialized` function,
-    * add `ensure_actual_executable` function,
-    * divide resolving into 2 parts: `resolve_function_name` and `resolve_filename_and_line`
-      as they use different addresses,
-    * resolved filename and line now indicates correct place from which the function
-      is called,
-    * call `unwind_nth_frame` before resolving filename and line to get proper results,
-    * get rid of `get_range_of_section` function,
-    * use `std::optional` in resolving functions,
-    * make `resolve` function return `ResolvedFrame` struct instead of already formatted
-      std::string.
-*/
+ * Copyright © 2020-2023 Tomasz Augustyn
+ * All rights reserved.
+ *
+ * Project Name: Call Stack Logger
+ * GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+ * Contact Email: t.augustyn@poczta.fm
+ */
 
 #include "callStack.h"
 #include "prettyTime.h"
 #include "unwinder.h"
 
-// workaround for deliberately incompatible bfd.h header files on some systems.
+// Workaround for deliberately incompatible bfd.h header files on some systems.
 #ifndef PACKAGE
     #define PACKAGE
 #endif
@@ -198,14 +154,10 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
 
     asection* section = currBfd.abfd->sections;
     const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
-    // std::cout << '\n' << "sections:\n";
+
     while (section != nullptr) {
         const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd.offset : 0) -
                 static_cast<intptr_t>(section->vma);
-        // std::cout << section->name << " " << section->id << " file: " << section->filepos << "
-        // flags: " << section->flags
-        //			<< " vma: " << std::hex << section->vma << " - " << std::hex <<
-        //(section->vma+section->size) << std::endl;
 
         if (offset < 0 || static_cast<size_t>(offset) > section->size) {
             section = section->next;
@@ -225,7 +177,7 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
             return std::make_pair(demangle_cxa(info.dli_sname) + " <bfd_error>", std::nullopt);
         }
     }
-    // std::cout << " ---- sections end ------ " << std::endl;
+
     return std::make_pair("<not sectioned address>", std::nullopt);
 }
 

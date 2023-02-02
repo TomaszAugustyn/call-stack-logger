@@ -4,10 +4,16 @@ Call Stack Logger uses function instrumentation to facilitate logging of
 every function call. Each nesting adds an ident, whereas returning from a
 function removes it. As the result call stack tree is produced at the runtime
 giving knowledge of the actual program's flow of execution.
+## :seedling: Outcome ##
 
 ![Call Stack logger capture](misc/call-stack-logger-capture.gif)
+## :book: Article ##
 
-## Requirements ##
+Here is the article on dev.to describing the details of the project, its aim and motivation
+behind it: \
+[Call Stack Logger - Function instrumentation as a way to trace program’s flow of execution](https://dev.to/taugustyn/call-stack-logger-function-instrumentation-as-a-way-to-trace-programs-flow-of-execution-419a)
+
+## :scroll: Requirements ##
 
 ### GNU Binutils ###
 
@@ -18,7 +24,7 @@ library) necessary to get information about object files and manipulate them.
 sudo apt-get install binutils-dev
 ```
 
-## Building and running ##
+## :wrench: Building and running ##
 
 ```bash
 git clone https://github.com/TomaszAugustyn/call-stack-logger.git
@@ -41,7 +47,7 @@ make
 make run
 ```
 
-## Building and running - legacy (Makefiles) ##
+## :wrench: Building and running - legacy (Makefiles) ##
 
 ```bash
 git clone https://github.com/TomaszAugustyn/call-stack-logger.git

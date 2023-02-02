@@ -1,3 +1,12 @@
+/*
+ * Copyright © 2020-2023 Tomasz Augustyn
+ * All rights reserved.
+ *
+ * Project Name: Call Stack Logger
+ * GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+ * Contact Email: t.augustyn@poczta.fm
+ */
+
 #include "callStack.h"
 #include "format.h"
 #include <stdio.h>
