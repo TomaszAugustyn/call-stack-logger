@@ -1,0 +1,314 @@
+# Call Stack Logger - Project Guide
+
+## Project Overview
+
+Call Stack Logger is a C++ instrumentation framework that traces a program's flow of execution
+at runtime by logging every function call. It leverages GCC's `-finstrument-functions` compiler
+flag to automatically insert profiling hooks into every function entry and exit. The output is a
+hierarchical call-stack tree written to `trace.out`, showing timestamps, function names, source
+file locations, line numbers, and visual nesting depth.
+
+**Author:** Tomasz Augustyn (t.augustyn@poczta.fm)
+**Repository:** https://github.com/TomaszAugustyn/call-stack-logger
+**Article:** https://dev.to/taugustyn/call-stack-logger-function-instrumentation-as-a-way-to-trace-programs-flow-of-execution-419a
+**License:** Dual-licensed under GNU AGPLv3 (default) and commercial/closed-source (contact author)
+**Language Standard:** C++17
+**Target Platform:** Linux (relies on `/proc/self/cmdline`, `/proc/self/exe`, `dladdr`, BFD library)
+
+## Architecture & How It Works
+
+### Core Mechanism: GCC Function Instrumentation
+
+The compiler flag `-finstrument-functions` causes GCC to inject calls to two special functions
+at every function entry and exit:
+
+- `__cyg_profile_func_enter(void *callee, void *caller)` - called on function entry
+- `__cyg_profile_func_exit(void *callee, void *caller)` - called before function exit
+
+Both receive raw `void*` pointers: `callee` is the address of the function being called,
+`caller` is the return address (call site). The framework resolves these addresses into
+human-readable function names, source filenames, and line numbers.
+
+### Symbol Resolution Pipeline
+
+Address resolution happens in multiple stages (implemented in `src/callStack.cpp`):
+
+1. **`dladdr()`** (from `<dlfcn.h>`) - Retrieves basic symbol info from the dynamic linker,
+   including the shared object base address (`dli_fbase`) and symbol name (`dli_sname`).
+
+2. **BFD Library** (`<bfd.h>` from GNU binutils) - Opens the object file and reads its symbol
+   table. Uses `bfd_find_nearest_line()` to map an address offset within a section to a source
+   filename, function name, and line number. BFD objects are cached in a static
+   `std::map<void*, storedBfd>` so each object file is loaded only once.
+
+3. **`abi::__cxa_demangle()`** (from `<cxxabi.h>`) - Converts GCC-mangled C++ symbol names
+   (e.g., `_ZN1A3fooEv`) into human-readable form (e.g., `A::foo()`).
+
+### Stack Unwinding for Accurate Caller Location
+
+The `caller` address from `__cyg_profile_func_enter` points to the instrumentation call site,
+not the original source location. To get the real caller, the framework uses `_Unwind_Backtrace`
+and `_Unwind_GetIPInfo` from `<unwind.h>` to walk the stack to frame 6.
+
+The constant frame depth of 6 is derived from this fixed call chain:
+```
+Frame 6: instrumentation::FrameUnwinder::unwind_nth_frame
+Frame 5: bfdResolver::resolve / instrumentation::unwind_nth_frame
+Frame 4: instrumentation::bfdResolver::resolve
+Frame 3: instrumentation::resolve
+Frame 2: __cyg_profile_func_enter
+Frame 1: The actual user function being called
+```
+
+**IMPORTANT:** If the resolution pipeline code is modified (adding/removing function calls in the
+chain), the frame number (currently 6) in `callStack.cpp:209` MUST be recalculated.
+
+### Excluding Standard Library from Instrumentation
+
+The build system auto-discovers C++ standard library header paths using GCC's `cc1plus -v` and
+`cpp -v` commands, then passes them via `-finstrument-functions-exclude-file-list=<paths>`.
+The project's own instrumentation headers are also excluded to prevent infinite recursion:
+`callStack.h`, `unwinder.h`, `types.h`, `format.h`, `prettyTime.h`.
+
+### The NO_INSTRUMENT Macro
+
+```cpp
+#define NO_INSTRUMENT __attribute__((no_instrument_function))
+```
+
+Applied to all functions in the instrumentation/resolution pipeline to prevent recursive
+instrumentation (which would cause infinite recursion and stack overflow).
+
+### Trace File Lifecycle
+
+`trace.cpp` uses GCC `__attribute__((constructor))` and `__attribute__((destructor))` to
+open `trace.out` before `main()` runs and close it after the program exits. All trace output
+is appended to this file.
+
+### Indentation / Nesting Depth
+
+A static `current_stack_depth` counter in `trace.cpp`:
+- Increments on each successfully resolved function entry
+- Decrements on function exit (only if the entry was resolved)
+- The `last_frame_was_resolved` flag prevents depth misalignment from unresolved frames
+
+The `utils::format()` function in `format.h` uses this depth to produce tree-style indentation
+with `|  ` and `|_ ` prefixes.
+
+### Output Format
+
+Each line in `trace.out` follows this pattern:
+```
+[DD-MM-YYYY HH:MM:SS.mmm] |_ functionName  (called from: filename.cpp:42)
+```
+
+Nested calls are indented with `|  ` prefixes, creating a visual call tree:
+```
+[14-03-2021 01:12:00.231] |_ main  (called from: /build/glibc-.../csu/../libc-start.c:310)
+[14-03-2021 01:12:00.231] |  |_ A::foo()  (called from: .../src/main.cpp:28)
+[14-03-2021 01:12:00.231] |  |_ B::foo()  (called from: .../src/main.cpp:33)
+[14-03-2021 01:12:00.231] |  |  |_ A::foo()  (called from: .../src/main.cpp:18)
+[14-03-2021 01:12:00.231] |  |_ fibonacci(int)  (called from: .../src/main.cpp:23)
+[14-03-2021 01:12:00.231] |  |  |_ fibonacci(int)  (called from: .../src/main.cpp:23)
+[14-03-2021 01:12:00.231] |  |  |  |_ fibonacci(int)  (called from: .../src/main.cpp:23)
+```
+
+With optional address logging when `LOG_ADDR` is defined:
+```
+[DD-MM-YYYY HH:MM:SS.mmm] addr: [0x00007fff12345678] |_ functionName  (called from: filename.cpp:42)
+```
+
+## File Structure
+
+```
+call-stack-logger/
+|-- CMakeLists.txt              # Root CMake config (project definition, run target)
+|-- Makefile_legacy             # Legacy root Makefile (delegates to src/)
+|-- README.md                   # Project overview, build instructions
+|-- CONTRIBUTING.md             # Contribution guidelines
+|-- CONTRIBUTOR_AGREEMENT.md    # CLA for contributors
+|-- LICENSE                     # GNU AGPLv3 full text
+|-- LICENSE_COMMERCIAL          # Commercial license placeholder
+|-- .clang-format               # Code formatting rules (WebKit-based, 110 col limit)
+|-- .gitignore                  # Ignores build artifacts, IDE files, *.out
+|-- include/
+|   |-- callStack.h             # bfdResolver struct, get_call_stack(), resolve() API
+|   |-- format.h                # utils::format() - formats ResolvedFrame into string
+|   |-- prettyTime.h            # utils::pretty_time() - timestamp with milliseconds
+|   |-- types.h                 # ResolvedFrame struct definition
+|   |-- unwinder.h              # FrameUnwinder template, Callback, unwind_nth_frame()
+|-- src/
+|   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, executable)
+|   |-- Makefile_legacy         # Legacy Makefile with same logic
+|   |-- callStack.cpp           # Core implementation: BFD loading, symbol resolution
+|   |-- trace.cpp               # __cyg_profile_func_enter/exit, trace file I/O
+|   |-- main.cpp                # Demo program exercising various C++ features
+|-- lib/                        # Empty dir (placeholder for external libs)
+|   |-- .gitignore              # Keeps dir in git but ignores contents
+|-- misc/
+    |-- call-stack-logger-capture.gif  # Demo capture for README
+```
+
+## Key Source Files In Detail
+
+### `include/types.h`
+Defines `instrumentation::ResolvedFrame` struct with fields:
+- `timestamp` (string), `callee_address` (optional void*), `callee_function_name` (string),
+  `caller_filename` (string), `caller_line_number` (optional unsigned int)
+
+### `include/callStack.h`
+Declares the `bfdResolver` struct with:
+- `storedBfd` inner struct wrapping a `bfd*` with unique_ptr and symbol table
+- Static methods: `ensure_bfd_loaded()`, `resolve()`, `resolve_function_name()`,
+  `resolve_filename_and_line()`, `check_bfd_initialized()`, `get_argv0()`,
+  `ensure_actual_executable()`
+- Static state: `s_bfds` (map cache), `s_bfd_initialized`, `s_argv0`
+- Free functions: `get_call_stack()`, `resolve()`
+
+### `include/unwinder.h`
+Template class `FrameUnwinder<F>` that uses `_Unwind_Backtrace` to walk to the N-th stack
+frame and invoke a callback. The `Callback` struct captures the caller address.
+
+### `include/format.h`
+`utils::format()` takes a `ResolvedFrame` and `current_stack_depth`, produces the formatted
+log line with optional address, tree indentation, function name, and caller location.
+
+### `include/prettyTime.h`
+`utils::pretty_time()` returns current time as `"DD-MM-YYYY HH:MM:SS.mmm"` string.
+**Note:** Uses `std::localtime()` which is not thread-safe.
+
+### `src/callStack.cpp`
+The core implementation (~244 lines). Key functions:
+- `demangle_cxa()` - Wraps `abi::__cxa_demangle` with RAII
+- `bfdResolver::ensure_bfd_loaded()` - Opens BFD, reads symbol table, caches by base address
+- `bfdResolver::resolve_function_name()` - Resolves callee address to demangled function name
+- `bfdResolver::resolve_filename_and_line()` - Resolves caller address to source file and line
+- `bfdResolver::resolve()` - Orchestrates full resolution including stack unwinding
+- `bfdResolver::get_argv0()` - Reads `/proc/self/cmdline` for executable path
+- `bfdResolver::ensure_actual_executable()` - Handles PATH-found executables via `/proc/self/exe`
+- `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames)
+
+### `src/trace.cpp`
+The instrumentation entry points (~57 lines):
+- `trace_begin()` / `trace_end()` - Constructor/destructor for trace file
+- `__cyg_profile_func_enter()` - Resolves and logs function entry
+- `__cyg_profile_func_exit()` - Decrements depth counter
+- Guarded by `#ifndef DISABLE_INSTRUMENTATION`
+
+### `src/main.cpp`
+Demo program testing instrumentation with:
+- Static member method (`A::foo()`)
+- Lambda expressions
+- Constructor (`B::B()`)
+- Non-static methods with STL usage (`B::foo()` with `std::sort`)
+- Constexpr function (`fibonacci(6)`)
+- Variadic function templates (`print()`)
+- Inline function (`cube()`)
+
+## Build System
+
+### CMake (Primary)
+
+```bash
+mkdir build && cd build
+cmake ..                                    # Default logging
+cmake -DLOG_ADDR=ON ..                      # Include addresses in output
+cmake -DLOG_NOT_DEMANGLED=ON ..             # Log even undemangled functions
+cmake -DLOG_ADDR=ON -DLOG_NOT_DEMANGLED=ON ..  # Both flags
+cmake -DDISABLE_INSTRUMENTATION=ON ..       # No instrumentation at all
+make                                        # Build
+make run                                    # Build and run (generates trace.out)
+```
+
+### Legacy Makefiles
+
+Rename `Makefile_legacy` -> `Makefile` and `src/Makefile_legacy` -> `src/Makefile`, then:
+```bash
+make                                    # Default
+make log_with_addr=1                    # With addresses
+make log_not_demangled=1                # With undemangled names
+make disable_instrumentation=1          # No instrumentation
+make run                                # Run
+```
+
+### Compilation Flags
+
+| Flag | Purpose |
+|------|---------|
+| `-finstrument-functions` | Enable function entry/exit hooks |
+| `-finstrument-functions-exclude-file-list=...` | Exclude std lib and project headers |
+| `-rdynamic` | Export all symbols to dynamic symbol table (needed by `dladdr`) |
+| `-g` | Debug symbols (needed by BFD for line numbers) |
+| `-Wall` | All warnings |
+| `-std=c++17` | C++17 standard (for `std::optional`, structured bindings, etc.) |
+
+### Preprocessor Defines
+
+| Define | Effect |
+|--------|--------|
+| `LOG_ADDR` | Include function addresses in trace output |
+| `LOG_NOT_DEMANGLED` | Log functions even when demangling fails |
+| `DISABLE_INSTRUMENTATION` | Compile without any instrumentation hooks |
+
+### Link Dependencies
+
+| Library | Purpose |
+|---------|---------|
+| `-ldl` | Dynamic linking (`dladdr`) |
+| `-lbfd` | Binary File Descriptor (symbol/line resolution) |
+
+### System Requirement
+
+- **GNU Binutils dev package:** `sudo apt-get install binutils-dev` (provides `libbfd`)
+
+## Code Style
+
+- **Formatter:** clang-format with WebKit-based style
+- **Column limit:** 110
+- **Indent:** 4 spaces (no tabs)
+- **Braces:** Attach style (K&R / same-line)
+- **Pointer alignment:** Left (`int* ptr`)
+- **Namespace indentation:** None
+- **Short functions:** Inline only allowed on single line
+- **Include sorting:** Enabled
+- **Template declarations:** Always break after
+
+## Namespaces
+
+- `instrumentation::` - All symbol resolution and call stack logic
+- `utils::` - Formatting and time utilities
+- Anonymous namespace in `callStack.cpp` for `demangle_cxa()`
+
+## Design Decisions & Caveats
+
+1. **Linux-only:** Relies on `/proc/self/cmdline`, `/proc/self/exe`, `dladdr`, BFD, `_Unwind_*`
+2. **Not thread-safe:** `prettyTime.h` uses `std::localtime()` (static buffer);
+   `trace.cpp` uses static `current_stack_depth` and `fp_trace` without synchronization
+3. **Frame 6 constant:** The unwinder hard-codes frame depth 6 - must be recalculated if the
+   call chain between `__cyg_profile_func_enter` and `unwind_nth_frame` changes
+4. **Append mode:** `trace.out` is opened with `"a"` (append) - multiple runs accumulate
+5. **Performance overhead:** Every function call triggers symbol resolution via BFD; this tool
+   is for debugging/tracing, not production use
+6. **Header-only utilities:** `format.h`, `prettyTime.h`, `unwinder.h` contain inline
+   implementations in headers (definitions in headers, not just declarations)
+
+## Use Cases (from the article)
+
+The tool is designed for scenarios where traditional debugging is impractical:
+- Problem reproducible only on customer/remote infrastructure
+- Lacking necessary test setup to reproduce locally
+- Bug lies in third-party library code without source access
+- Need to understand flow of execution in large, unfamiliar codebases
+- Step-through debugging too slow or not available
+
+## Git History Summary
+
+The project evolved through ~30 commits from initial commit to current state:
+1. Initial commit with basic class/function name printing
+2. Added standard library exclusion from instrumentation
+3. Added filename and line number resolution via BFD
+4. Added unwinder for correct caller location resolution
+5. Added NO_INSTRUMENT macro, formatting, timestamps
+6. Added optional LOG_ADDR and LOG_NOT_DEMANGLED flags
+7. Migrated to CMake build system (Makefiles became legacy)
+8. Added documentation, article link, licensing, contribution guidelines
