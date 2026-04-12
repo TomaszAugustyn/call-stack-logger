@@ -17,7 +17,9 @@
 
 static FILE *fp_trace;
 static int current_stack_depth = -1;
-static bool last_frame_was_resolved = false;
+static constexpr int MAX_TRACE_DEPTH = 1024;
+static bool frame_resolved_stack[MAX_TRACE_DEPTH];
+static int frame_resolved_top = -1;
 
 __attribute__ ((constructor))
 NO_INSTRUMENT
@@ -36,20 +38,24 @@ void trace_end() {
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
     if(fp_trace != nullptr) {
-        last_frame_was_resolved = false;
         auto maybe_resolved = instrumentation::resolve(callee, caller);
-        if (!maybe_resolved) { return; }
-        last_frame_was_resolved = true;
+        bool resolved = maybe_resolved.has_value();
+        if (frame_resolved_top < MAX_TRACE_DEPTH - 1) {
+            frame_resolved_stack[++frame_resolved_top] = resolved;
+        }
+        if (!resolved) { return; }
         current_stack_depth++;
         fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
     }
 }
 
 extern "C" NO_INSTRUMENT
-void __cyg_profile_func_exit (void *callee, void *caller) {
-    if(fp_trace != nullptr && last_frame_was_resolved) {
-        current_stack_depth--;
-        //fprintf(fp_trace, "x %p %p %lu\n", callee, caller, time(nullptr));
+void __cyg_profile_func_exit(void *callee, void *caller) {
+    if (fp_trace != nullptr && frame_resolved_top >= 0) {
+        bool was_resolved = frame_resolved_stack[frame_resolved_top--];
+        if (was_resolved) {
+            current_stack_depth--;
+        }
     }
 }
 
