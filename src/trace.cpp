@@ -26,6 +26,10 @@ NO_INSTRUMENT
 void trace_begin() {
     fp_trace = fopen("trace.out", "a");
     if (fp_trace != nullptr) {
+        // Use line-buffered mode: flushes automatically after each '\n' (every trace
+        // line ends with '\n'). This provides crash-safety without the overhead of
+        // explicit fflush() on every function entry.
+        setvbuf(fp_trace, NULL, _IOLBF, 0);
         fprintf(fp_trace,
                 "\n========================================\n"
                 "=== New trace run: %s\n"
@@ -56,7 +60,6 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         if (!resolved) { return; }
         current_stack_depth++;
         fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
-        fflush(fp_trace);
     }
 }
 
