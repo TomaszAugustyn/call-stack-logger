@@ -121,6 +121,9 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
     storedBfd& currBfd = s_bfds.at(info.dli_fbase);
 
     asection* section = currBfd.abfd->sections;
+    if (section == nullptr) {
+        return "<no sections in object file>";
+    }
     const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
 
     while (section != nullptr) {
@@ -162,6 +165,9 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
     storedBfd& currBfd = s_bfds.at(info.dli_fbase);
 
     asection* section = currBfd.abfd->sections;
+    if (section == nullptr) {
+        return std::make_pair(std::string("<no sections in caller object>"), std::nullopt);
+    }
     const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
 
     while (section != nullptr) {
