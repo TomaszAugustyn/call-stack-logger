@@ -49,9 +49,8 @@ std::string demangle_cxa(const char* mangled) {
 
 namespace instrumentation {
 
+// Must be called with s_bfd_mutex already held (locked in resolve()).
 bool bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
-    // Lock protects s_bfds map and BFD library calls (which are not thread-safe).
-    std::lock_guard<std::mutex> lock(s_bfd_mutex);
     // Load the corresponding bfd file (from file or map).
     if (s_bfds.count(_info.dli_fbase) == 0) {
         ensure_actual_executable(_info);
@@ -75,8 +74,8 @@ bool bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
     return true;
 }
 
+// Must be called with s_bfd_mutex already held (locked in resolve()).
 void bfdResolver::check_bfd_initialized() {
-    std::lock_guard<std::mutex> lock(s_bfd_mutex);
     if (!s_bfd_initialized) {
         bfd_init();
         s_bfd_initialized = true;
@@ -195,6 +194,10 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
 }
 
 std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* caller_address) {
+    // Lock covers ALL BFD operations: initialization, loading, symbol/section iteration,
+    // and bfd_find_nearest_line(). BFD library is not thread-safe — concurrent calls on
+    // the same bfd* object corrupt internal state. This lock serializes all BFD access.
+    std::lock_guard<std::mutex> lock(s_bfd_mutex);
     check_bfd_initialized();
 
     auto maybe_func_name = resolve_function_name(callee_address);
