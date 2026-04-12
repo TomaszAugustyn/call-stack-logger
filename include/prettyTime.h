@@ -35,11 +35,13 @@ inline std::string pretty_time() {
     auto tp = std::chrono::system_clock::now();
     std::time_t current_time = std::chrono::system_clock::to_time_t(tp);
 
-    // This function use static global pointer, so it's not thread safe solution.
-    std::tm* time_info = std::localtime(&current_time);
+    // Use localtime_r (POSIX thread-safe variant) instead of std::localtime which
+    // uses a static global buffer and is not thread-safe.
+    std::tm time_info_buf{};
+    localtime_r(&current_time, &time_info_buf);
 
     char buffer[128];
-    int string_size = strftime(buffer, sizeof(buffer), LOGGER_PRETTY_TIME_FORMAT, time_info);
+    int string_size = strftime(buffer, sizeof(buffer), LOGGER_PRETTY_TIME_FORMAT, &time_info_buf);
     auto ms = to_ms(tp) % 1000;
     string_size +=
             std::snprintf(buffer + string_size, sizeof(buffer) - string_size, LOGGER_PRETTY_MS_FORMAT, ms);

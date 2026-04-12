@@ -10,49 +10,62 @@
 #include "callStack.h"
 #include "format.h"
 #include "prettyTime.h"
+#include <mutex>
 #include <stdio.h>
 
 // clang-format off
 #ifndef DISABLE_INSTRUMENTATION
 
+// Shared output file — protected by trace_mutex. Currently all threads write to the same
+// file with serialized access. Per-thread trace files are a future enhancement for full
+// multi-threaded support.
 static FILE *fp_trace;
-static int current_stack_depth = -1;
+static std::mutex trace_mutex;
+
+// Per-thread call stack tracking. Each thread has its own call stack depth, so these must
+// be thread_local to prevent data races and incorrect depth tracking across threads.
+static thread_local int current_stack_depth = -1;
 
 // Maximum tracked call depth for the frame resolution stack. Each entry is 1 byte (bool).
 // If call depth exceeds this limit, an overflow counter prevents stack desynchronization.
-// This value can be increased if needed — the memory cost is MAX_TRACE_DEPTH bytes.
+// This value can be increased if needed — the memory cost is MAX_TRACE_DEPTH bytes per thread.
 static constexpr int MAX_TRACE_DEPTH = 2048;
-static bool frame_resolved_stack[MAX_TRACE_DEPTH];
-static int frame_resolved_top = -1;
+static thread_local bool frame_resolved_stack[MAX_TRACE_DEPTH];
+static thread_local int frame_resolved_top = -1;
 // Counts frames that exceeded MAX_TRACE_DEPTH. On exit, overflow frames are handled
 // before popping from the stack, keeping the stack in sync with the actual call stack.
-static int frame_overflow_count = 0;
+static thread_local int frame_overflow_count = 0;
 
 __attribute__ ((constructor))
 NO_INSTRUMENT
 void trace_begin() {
-    fp_trace = fopen("trace.out", "a");
-    if (fp_trace != nullptr) {
-        // Use line-buffered mode: flushes automatically after each '\n' (every trace
-        // line ends with '\n'). This provides crash-safety without the overhead of
-        // explicit fflush() on every function entry.
-        setvbuf(fp_trace, NULL, _IOLBF, 0);
-        fprintf(fp_trace,
-                "\n========================================\n"
-                "=== New trace run: %s\n"
-                "========================================\n",
-                utils::pretty_time().c_str());
-        fflush(fp_trace);
-    } else {
-        fprintf(stderr, "[call-stack-logger] WARNING: Could not open trace.out for writing\n");
+    {
+        std::lock_guard<std::mutex> lock(trace_mutex);
+        fp_trace = fopen("trace.out", "a");
+        if (fp_trace != nullptr) {
+            // Use line-buffered mode: flushes automatically after each '\n' (every trace
+            // line ends with '\n'). This provides crash-safety without the overhead of
+            // explicit fflush() on every function entry.
+            setvbuf(fp_trace, NULL, _IOLBF, 0);
+            fprintf(fp_trace,
+                    "\n========================================\n"
+                    "=== New trace run: %s\n"
+                    "========================================\n",
+                    utils::pretty_time().c_str());
+            fflush(fp_trace);
+        } else {
+            fprintf(stderr, "[call-stack-logger] WARNING: Could not open trace.out for writing\n");
+        }
     }
 }
 
 __attribute__ ((destructor))
 NO_INSTRUMENT
 void trace_end() {
+    std::lock_guard<std::mutex> lock(trace_mutex);
     if(fp_trace != nullptr) {
         fclose(fp_trace);
+        fp_trace = nullptr;
     }
 }
 
@@ -70,7 +83,10 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         }
         if (!resolved) { return; }
         current_stack_depth++;
-        fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
+        {
+            std::lock_guard<std::mutex> lock(trace_mutex);
+            fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
+        }
     }
 }
 

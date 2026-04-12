@@ -50,6 +50,8 @@ std::string demangle_cxa(const char* mangled) {
 namespace instrumentation {
 
 bool bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
+    // Lock protects s_bfds map and BFD library calls (which are not thread-safe).
+    std::lock_guard<std::mutex> lock(s_bfd_mutex);
     // Load the corresponding bfd file (from file or map).
     if (s_bfds.count(_info.dli_fbase) == 0) {
         ensure_actual_executable(_info);
@@ -74,6 +76,7 @@ bool bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
 }
 
 void bfdResolver::check_bfd_initialized() {
+    std::lock_guard<std::mutex> lock(s_bfd_mutex);
     if (!s_bfd_initialized) {
         bfd_init();
         s_bfd_initialized = true;

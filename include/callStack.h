@@ -14,6 +14,7 @@
 #include <dlfcn.h>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -76,6 +77,8 @@ private:
     inline static std::map<void*, storedBfd> s_bfds = {};
     inline static bool s_bfd_initialized = false;
     inline static std::string s_argv0 = get_argv0();
+    // Protects s_bfds, s_bfd_initialized, and BFD library calls which are not thread-safe.
+    inline static std::mutex s_bfd_mutex;
 };
 
 /**
