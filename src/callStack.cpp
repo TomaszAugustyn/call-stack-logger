@@ -31,13 +31,15 @@
 
 namespace {
 
+// Takes const char* directly to avoid constructing a temporary std::string at each
+// call site — all callers pass const char* from BFD/dladdr.
 NO_INSTRUMENT
-std::string demangle_cxa(const std::string& _cxa) {
+std::string demangle_cxa(const char* mangled) {
     int status;
     std::unique_ptr<char, void (*)(void*)> realname(
-            abi::__cxa_demangle(_cxa.data(), nullptr, nullptr, &status), &free);
+            abi::__cxa_demangle(mangled, nullptr, nullptr, &status), &free);
     if (status != 0) {
-        return _cxa;
+        return std::string(mangled);
     }
 
     return realname ? std::string(realname.get()) : "";
@@ -55,7 +57,9 @@ bool bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
         if (!newBfd || !newBfd->abfd) {
             return false;
         }
-        bfd_check_format(newBfd->abfd.get(), bfd_object);
+        if (!bfd_check_format(newBfd->abfd.get(), bfd_object)) {
+            return false;
+        }
         long storageNeeded = bfd_get_symtab_upper_bound(newBfd->abfd.get());
         if (storageNeeded < 0) {
             return false;
@@ -99,8 +103,8 @@ void bfdResolver::ensure_actual_executable(Dl_info& symbol_info) {
 
 std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
     Dl_info info;
-    dladdr(address, &info);
-    if (info.dli_fbase == nullptr) {
+    // dladdr returns 0 on failure; on failure the Dl_info contents are undefined.
+    if (dladdr(address, &info) == 0 || info.dli_fbase == nullptr) {
         return "<address to object not found>";
     }
 #ifndef LOG_NOT_DEMANGLED
@@ -145,8 +149,8 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
 std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filename_and_line(void* address) {
     // Get path and offset of shared object that contains caller address.
     Dl_info info;
-    dladdr(address, &info);
-    if (info.dli_fbase == nullptr) {
+    // dladdr returns 0 on failure; on failure the Dl_info contents are undefined.
+    if (dladdr(address, &info) == 0 || info.dli_fbase == nullptr) {
         return std::make_pair("<caller address to object not found>", std::nullopt);
     }
 
