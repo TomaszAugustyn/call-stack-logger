@@ -54,7 +54,9 @@ void trace_begin() {
 
         // Use open() with O_NOFOLLOW to prevent symlink-based file overwrite attacks,
         // then wrap the file descriptor with fdopen() for buffered I/O.
-        int fd = open(trace_path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0644);
+        // Permissions 0600: owner read/write only — trace output may contain internal
+        // source paths and function names that should not be world-readable.
+        int fd = open(trace_path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
         if (fd >= 0) {
             fp_trace = fdopen(fd, "a");
             if (fp_trace == nullptr) {
