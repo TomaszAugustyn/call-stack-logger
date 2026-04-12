@@ -126,9 +126,9 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
             continue;
         }
 
-        const char* file;
-        const char* func;
-        unsigned line;
+        const char* file = nullptr;
+        const char* func = nullptr;
+        unsigned line = 0;
         if (bfd_find_nearest_line(
                     currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
             if (func == nullptr) {
@@ -166,8 +166,8 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
             section = section->next;
             continue;
         }
-        const char* file;
-        const char* func;
+        const char* file = nullptr;
+        const char* func = nullptr;
         unsigned int line = 0;
         if (bfd_find_nearest_line(
                     currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
