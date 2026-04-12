@@ -47,9 +47,27 @@ make
 make run
 ```
 
-Each run appends to `trace.out` with a timestamped separator header, so consecutive runs are
-easy to distinguish. Output is flushed after each traced function entry to prevent data loss on
-abnormal termination. If `trace.out` cannot be opened, a warning is printed to `stderr`.
+Each run appends to the trace output file with a timestamped separator header, so consecutive
+runs are easy to distinguish. Output is line-buffered for crash safety without per-call overhead.
+If the trace file cannot be opened, a warning is printed to `stderr`.
+
+## :gear: Configuration ##
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `CSLG_OUTPUT_FILE` | `trace.out` | Path to the trace output file |
+
+Example:
+```bash
+CSLG_OUTPUT_FILE=/tmp/my_trace.out ./build/runDemo
+```
+
+## :shield: Thread Safety ##
+
+Call Stack Logger is **multithreaded-ready**: per-thread call stack tracking uses `thread_local`
+storage, shared BFD operations and file output are protected by mutexes. All threads currently
+write to a single shared trace file with serialized access. Per-thread trace files are a planned
+future enhancement for full multi-threaded support.
 
 ## :wrench: Building and running - legacy (Makefiles) ##
 
