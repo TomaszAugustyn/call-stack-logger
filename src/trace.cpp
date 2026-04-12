@@ -11,7 +11,6 @@
 #include "format.h"
 #include "prettyTime.h"
 #include <stdio.h>
-#include <time.h>
 
 // clang-format off
 #ifndef DISABLE_INSTRUMENTATION
