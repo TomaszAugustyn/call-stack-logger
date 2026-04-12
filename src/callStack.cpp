@@ -131,6 +131,9 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
         unsigned line;
         if (bfd_find_nearest_line(
                     currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
+            if (func == nullptr) {
+                return std::nullopt;
+            }
             auto demangled = demangle_cxa(func);
             return demangled.empty() ? std::nullopt : std::make_optional(demangled);
         }
@@ -171,7 +174,10 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
             if (file != nullptr) {
                 return std::make_pair(std::string(file), std::make_optional(line));
             }
-            return std::make_pair(demangle_cxa(func), std::nullopt);
+            if (func != nullptr) {
+                return std::make_pair(demangle_cxa(func), std::nullopt);
+            }
+            return std::make_pair(std::string("<unknown function>"), std::nullopt);
         }
         if (info.dli_sname != nullptr) {
             return std::make_pair(demangle_cxa(info.dli_sname) + " <bfd_error>", std::nullopt);
