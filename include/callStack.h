@@ -36,8 +36,15 @@ public:
     /// Single bfd structure
     struct storedBfd {
         typedef bfd_boolean(deleter_t)(bfd*);
+
+        // Custom deleter that casts back to char* before delete[], matching the
+        // allocation type (new char[]) used for the BFD symbol table storage.
+        struct SymbolDeleter {
+            void operator()(asymbol** p) const { delete[] reinterpret_cast<char*>(p); }
+        };
+
         std::unique_ptr<bfd, deleter_t*> abfd;
-        std::unique_ptr<asymbol*[]> symbols;
+        std::unique_ptr<asymbol*[], SymbolDeleter> symbols;
         intptr_t offset;
 
         storedBfd(bfd* _abfd, deleter_t* _del) : abfd(_abfd, _del) {}
