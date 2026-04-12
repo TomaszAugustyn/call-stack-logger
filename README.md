@@ -47,6 +47,10 @@ make
 make run
 ```
 
+Each run appends to `trace.out` with a timestamped separator header, so consecutive runs are
+easy to distinguish. Output is flushed after each traced function entry to prevent data loss on
+abnormal termination. If `trace.out` cannot be opened, a warning is printed to `stderr`.
+
 ## :wrench: Building and running - legacy (Makefiles) ##
 
 ```bash

@@ -9,6 +9,7 @@
 
 #include "callStack.h"
 #include "format.h"
+#include "prettyTime.h"
 #include <stdio.h>
 #include <time.h>
 
@@ -25,6 +26,16 @@ __attribute__ ((constructor))
 NO_INSTRUMENT
 void trace_begin() {
     fp_trace = fopen("trace.out", "a");
+    if (fp_trace != nullptr) {
+        fprintf(fp_trace,
+                "\n========================================\n"
+                "=== New trace run: %s\n"
+                "========================================\n",
+                utils::pretty_time().c_str());
+        fflush(fp_trace);
+    } else {
+        fprintf(stderr, "[call-stack-logger] WARNING: Could not open trace.out for writing\n");
+    }
 }
 
 __attribute__ ((destructor))
@@ -46,6 +57,7 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         if (!resolved) { return; }
         current_stack_depth++;
         fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
+        fflush(fp_trace);
     }
 }
 
