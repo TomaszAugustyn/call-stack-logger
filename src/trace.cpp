@@ -10,8 +10,11 @@
 #include "callStack.h"
 #include "format.h"
 #include "prettyTime.h"
+#include <cstdlib>
+#include <fcntl.h>
 #include <mutex>
 #include <stdio.h>
+#include <unistd.h>
 
 // clang-format off
 #ifndef DISABLE_INSTRUMENTATION
@@ -41,7 +44,24 @@ NO_INSTRUMENT
 void trace_begin() {
     {
         std::lock_guard<std::mutex> lock(trace_mutex);
-        fp_trace = fopen("trace.out", "a");
+
+        // Output path is configurable via CSLG_OUTPUT_FILE environment variable.
+        // Defaults to "trace.out" in the current working directory.
+        const char* trace_path = std::getenv("CSLG_OUTPUT_FILE");
+        if (trace_path == nullptr || trace_path[0] == '\0') {
+            trace_path = "trace.out";
+        }
+
+        // Use open() with O_NOFOLLOW to prevent symlink-based file overwrite attacks,
+        // then wrap the file descriptor with fdopen() for buffered I/O.
+        int fd = open(trace_path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0644);
+        if (fd >= 0) {
+            fp_trace = fdopen(fd, "a");
+            if (fp_trace == nullptr) {
+                close(fd);
+            }
+        }
+
         if (fp_trace != nullptr) {
             // Use line-buffered mode: flushes automatically after each '\n' (every trace
             // line ends with '\n'). This provides crash-safety without the overhead of
@@ -54,7 +74,7 @@ void trace_begin() {
                     utils::pretty_time().c_str());
             fflush(fp_trace);
         } else {
-            fprintf(stderr, "[call-stack-logger] WARNING: Could not open trace.out for writing\n");
+            fprintf(stderr, "[call-stack-logger] WARNING: Could not open %s for writing\n", trace_path);
         }
     }
 }
