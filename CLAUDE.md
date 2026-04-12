@@ -297,11 +297,17 @@ make run                                # Run
    (`fp_trace`, BFD library) are protected by `std::mutex`; `localtime_r` replaces
    `std::localtime`. All threads currently write to a single shared trace file with serialized
    access. **Per-thread trace files are a future enhancement** for full multi-threaded support.
+   `s_bfd_mutex` is held for the entire `resolve()` call (covering initialization, loading,
+   section iteration, and `bfd_find_nearest_line`) since BFD is not thread-safe.
+   `fp_trace` is double-checked (outside lock as fast path, inside lock as authoritative check)
+   to prevent TOCTOU races with `trace_end()`.
 3. **Frame 6 constant:** The unwinder hard-codes frame depth 6 - must be recalculated if the
    call chain between `__cyg_profile_func_enter` and `unwind_nth_frame` changes.
-   Verified correct after all Phase 1 and Phase 2 changes (no commit touched the call chain).
+   Verified correct after all Phase 1, Phase 2, and Phase 3 changes (no commit touched the
+   call chain).
 4. **Append mode:** Trace output is opened with `O_APPEND | O_NOFOLLOW` - multiple runs
    accumulate, separated by timestamped headers; output is line-buffered (`_IOLBF`)
+   with `0600` permissions (owner read/write only)
 5. **Configurable output:** Set `CSLG_OUTPUT_FILE` environment variable to redirect trace
    output to a custom path (defaults to `"trace.out"`)
 6. **Performance overhead:** Every function call triggers symbol resolution via BFD; this tool
