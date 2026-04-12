@@ -82,19 +82,24 @@ instrumentation (which would cause infinite recursion and stack overflow).
 ### Trace File Lifecycle
 
 `trace.cpp` uses GCC `__attribute__((constructor))` and `__attribute__((destructor))` to
-open `trace.out` before `main()` runs and close it after the program exits. All trace output
-is appended to this file. Each run writes a timestamped separator header so consecutive runs
-are distinguishable. Output is flushed after each function entry to prevent data loss on
-abnormal termination. If the file cannot be opened, a warning is printed to `stderr`.
+open the trace output file before `main()` runs and close it after the program exits. The
+output path is configurable via the `CSLG_OUTPUT_FILE` environment variable (defaults to
+`"trace.out"` in the current working directory). The file is opened with `O_NOFOLLOW` to
+prevent symlink-based attacks and uses `0644` permissions. All trace output is appended to
+this file. Each run writes a timestamped separator header so consecutive runs are
+distinguishable. Output is line-buffered (`_IOLBF`) for crash safety without per-call
+`fflush` overhead. If the file cannot be opened, a warning is printed to `stderr`.
 
 ### Indentation / Nesting Depth
 
-A static `current_stack_depth` counter in `trace.cpp`:
+A `thread_local` `current_stack_depth` counter in `trace.cpp`:
 - Increments on each successfully resolved function entry
 - Decrements on function exit (only if the entry was resolved)
-- A fixed-size `frame_resolved_stack[]` array tracks per-frame whether the entry was resolved:
-  every `__cyg_profile_func_enter` pushes (resolved or not), every `__cyg_profile_func_exit`
-  pops, and depth is only adjusted for resolved frames
+- A fixed-size `frame_resolved_stack[2048]` array (also `thread_local`) tracks per-frame
+  whether the entry was resolved: every `__cyg_profile_func_enter` pushes (resolved or not),
+  every `__cyg_profile_func_exit` pops, and depth is only adjusted for resolved frames
+- An overflow counter handles the edge case when call depth exceeds `MAX_TRACE_DEPTH` (2048),
+  preventing stack desynchronization. Indentation remains correct at any depth.
 
 The `utils::format()` function in `format.h` uses this depth to produce tree-style indentation
 with `|  ` and `|_ ` prefixes.
@@ -286,16 +291,23 @@ make run                                # Run
 
 ## Design Decisions & Caveats
 
-1. **Linux-only:** Relies on `/proc/self/cmdline`, `/proc/self/exe`, `dladdr`, BFD, `_Unwind_*`
-2. **Not thread-safe:** `prettyTime.h` uses `std::localtime()` (static buffer);
-   `trace.cpp` uses static `current_stack_depth` and `fp_trace` without synchronization
+1. **Linux-only:** Relies on `/proc/self/cmdline`, `/proc/self/exe`, `dladdr`, BFD,
+   `_Unwind_*`, `localtime_r`, `O_NOFOLLOW`
+2. **Multithreaded-ready:** Per-thread call stack state uses `thread_local`; shared resources
+   (`fp_trace`, BFD library) are protected by `std::mutex`; `localtime_r` replaces
+   `std::localtime`. All threads currently write to a single shared trace file with serialized
+   access. **Per-thread trace files are a future enhancement** for full multi-threaded support.
 3. **Frame 6 constant:** The unwinder hard-codes frame depth 6 - must be recalculated if the
-   call chain between `__cyg_profile_func_enter` and `unwind_nth_frame` changes
-4. **Append mode:** `trace.out` is opened with `"a"` (append) - multiple runs accumulate,
-   separated by timestamped headers; output is flushed after each entry
-5. **Performance overhead:** Every function call triggers symbol resolution via BFD; this tool
-   is for debugging/tracing, not production use
-6. **Header-only utilities:** `format.h`, `prettyTime.h`, `unwinder.h` contain inline
+   call chain between `__cyg_profile_func_enter` and `unwind_nth_frame` changes.
+   Verified correct after all Phase 1 and Phase 2 changes (no commit touched the call chain).
+4. **Append mode:** Trace output is opened with `O_APPEND | O_NOFOLLOW` - multiple runs
+   accumulate, separated by timestamped headers; output is line-buffered (`_IOLBF`)
+5. **Configurable output:** Set `CSLG_OUTPUT_FILE` environment variable to redirect trace
+   output to a custom path (defaults to `"trace.out"`)
+6. **Performance overhead:** Every function call triggers symbol resolution via BFD; this tool
+   is for debugging/tracing, not production use. `format()` uses `snprintf` with a stack
+   buffer to avoid per-call heap allocation.
+7. **Header-only utilities:** `format.h`, `prettyTime.h`, `unwinder.h` contain inline
    implementations in headers (definitions in headers, not just declarations)
 
 ## Use Cases (from the article)
