@@ -105,7 +105,12 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         current_stack_depth++;
         {
             std::lock_guard<std::mutex> lock(trace_mutex);
-            fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
+            // Re-check under lock: trace_end() may have closed fp_trace between the
+            // outer check (line 94, no lock) and here. The outer check is a fast path
+            // to skip work when tracing is disabled; this is the authoritative check.
+            if (fp_trace != nullptr) {
+                fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
+            }
         }
     }
 }
