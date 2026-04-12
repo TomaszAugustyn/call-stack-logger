@@ -31,7 +31,7 @@ long to_ms(const std::chrono::time_point<T>& tp) {
 }
 
 // Format it in two parts: main part with date and time and part with milliseconds.
-std::string pretty_time() {
+inline std::string pretty_time() {
     auto tp = std::chrono::system_clock::now();
     std::time_t current_time = std::chrono::system_clock::to_time_t(tp);
 

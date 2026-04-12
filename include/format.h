@@ -18,7 +18,7 @@
 
 namespace utils {
 
-std::string format(const instrumentation::ResolvedFrame& frame, int current_stack_depth) {
+inline std::string format(const instrumentation::ResolvedFrame& frame, int current_stack_depth) {
 
     std::ostringstream res;
     res << "[" << frame.timestamp << "] ";
