@@ -63,5 +63,5 @@ endif()
 
 # Disable instrumentation if necessary
 if(DISABLE_INSTRUMENTATION)
-    set(CMAKE_CXX_FLAGS "-g -Wall -std=c++17 -DDISABLE_INSTRUMENTATION")
+    set(CMAKE_CXX_FLAGS "-g -Wall -rdynamic -DDISABLE_INSTRUMENTATION")
 endif()
