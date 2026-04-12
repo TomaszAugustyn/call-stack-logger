@@ -43,8 +43,11 @@ inline std::string pretty_time() {
     char buffer[128];
     int string_size = strftime(buffer, sizeof(buffer), LOGGER_PRETTY_TIME_FORMAT, &time_info_buf);
     auto ms = to_ms(tp) % 1000;
-    string_size +=
+    int ms_size =
             std::snprintf(buffer + string_size, sizeof(buffer) - string_size, LOGGER_PRETTY_MS_FORMAT, ms);
+    if (ms_size > 0) {
+        string_size += ms_size;
+    }
 
     return std::string(buffer, buffer + string_size);
 }
