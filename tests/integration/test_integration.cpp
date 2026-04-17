@@ -21,6 +21,9 @@
 #ifndef TRACED_PROGRAM_PATH
     #error "TRACED_PROGRAM_PATH must be defined by CMake"
 #endif
+#ifndef NONINSTRUMENTED_PROGRAM_PATH
+    #error "NONINSTRUMENTED_PROGRAM_PATH must be defined by CMake"
+#endif
 
 namespace {
 
@@ -237,4 +240,44 @@ TEST_F(IntegrationTest, ExactTraceLineCount) {
     EXPECT_EQ(entry_count, 10)
             << "Expected exactly 10 function entries; got " << entry_count
             << ". If count is much higher, std library functions may be leaking through.";
+}
+
+// Verify that a program compiled WITHOUT instrumentation flags produces no trace output.
+// This tests the behavior of DISABLE_INSTRUMENTATION=ON and validates that the split
+// compilation approach (library without -finstrument-functions) doesn't accidentally
+// produce trace entries when user code is also not instrumented.
+TEST(DisableInstrumentationTest, NoTraceOutputWithoutInstrumentation) {
+    // Create a unique temp file
+    char tmp_path[] = "/tmp/cslg_noinstr_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    ASSERT_GE(fd, 0) << "Failed to create temp file";
+    close(fd);
+
+    // Run the non-instrumented program
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(tmp_path)
+                    + "\" \"" + NONINSTRUMENTED_PROGRAM_PATH + "\"";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "noninstrumented_test_program failed with exit code " << ret;
+
+    // Read trace output — should contain no function entries
+    std::ifstream ifs(tmp_path);
+    std::string content((std::istreambuf_iterator<char>(ifs)),
+                         std::istreambuf_iterator<char>());
+    ifs.close();
+
+    // Count function entry lines
+    int entry_count = 0;
+    std::istringstream stream(content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.find("(called from:") != std::string::npos) {
+            entry_count++;
+        }
+    }
+
+    EXPECT_EQ(entry_count, 0)
+            << "Non-instrumented program should produce 0 function entries, got "
+            << entry_count << ". DISABLE_INSTRUMENTATION may be broken.";
+
+    unlink(tmp_path);
 }

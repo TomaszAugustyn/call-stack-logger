@@ -17,6 +17,20 @@ if(COVERAGE)
     target_link_options(traced_test_program PRIVATE --coverage)
 endif()
 
+# Non-instrumented version of the same program. Compiled WITHOUT INSTRUMENT_FLAGS
+# to verify that no trace output is produced when instrumentation is disabled.
+# This catches regressions in DISABLE_INSTRUMENTATION and split compilation.
+add_executable(noninstrumented_test_program traced_program.cpp)
+target_include_directories(noninstrumented_test_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_features(noninstrumented_test_program PRIVATE cxx_std_17)
+# No INSTRUMENT_FLAGS — simulates DISABLE_INSTRUMENTATION=ON
+target_link_libraries(noninstrumented_test_program callstacklogger)
+
+if(COVERAGE)
+    target_compile_options(noninstrumented_test_program PRIVATE --coverage)
+    target_link_options(noninstrumented_test_program PRIVATE --coverage)
+endif()
+
 # The integration test runner executes traced_test_program and parses output.
 # Compiled WITHOUT instrumentation — just gtest code.
 add_executable(integration_tests test_integration.cpp)
@@ -27,6 +41,7 @@ target_link_libraries(integration_tests gtest_main)
 # Pass the traced program path so tests can find and execute it
 target_compile_definitions(integration_tests PRIVATE
     TRACED_PROGRAM_PATH="$<TARGET_FILE:traced_test_program>"
+    NONINSTRUMENTED_PROGRAM_PATH="$<TARGET_FILE:noninstrumented_test_program>"
 )
 
 if(COVERAGE)
