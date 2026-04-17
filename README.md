@@ -1,5 +1,7 @@
 # Call Stack Logger #
 
+![CI](https://github.com/TomaszAugustyn/call-stack-logger/actions/workflows/ci.yml/badge.svg)
+
 Call Stack Logger uses function instrumentation to facilitate logging of
 every function call. Each nesting adds an ident, whereas returning from a
 function removes it. As the result call stack tree is produced at the runtime
@@ -39,6 +41,8 @@ cmake ..
 cmake -DLOG_ADDR=ON -DLOG_NOT_DEMANGLED=ON ..
 # or to compile your application with disabled instrumentation (no logging)
 cmake -DDISABLE_INSTRUMENTATION=ON ..
+# or to build with tests and code coverage
+cmake -DBUILD_TESTS=ON -DCOVERAGE=ON ..
 
 # Build
 make
@@ -53,8 +57,20 @@ If the trace file cannot be opened, a warning is printed to `stderr`.
 
 ## :gear: Configuration ##
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
+### CMake Options ###
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `LOG_ADDR` | `OFF` | Include function addresses in trace output |
+| `LOG_NOT_DEMANGLED` | `OFF` | Log functions even when demangling fails |
+| `DISABLE_INSTRUMENTATION` | `OFF` | Compile without any instrumentation hooks |
+| `BUILD_TESTS` | `OFF` | Build unit and integration tests (fetches Google Test) |
+| `COVERAGE` | `OFF` | Enable code coverage via GCC `--coverage` flag |
+
+### Environment Variables ###
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `CSLG_OUTPUT_FILE` | `trace.out` | Path to the trace output file |
 
 Example:
@@ -68,6 +84,40 @@ Call Stack Logger is **multithreaded-ready**: per-thread call stack tracking use
 storage, shared BFD operations and file output are protected by mutexes. All threads currently
 write to a single shared trace file with serialized access. Per-thread trace files are a planned
 future enhancement for full multi-threaded support.
+
+## :test_tube: Testing ##
+
+The project includes unit tests (for formatting and timestamp functions) and integration tests
+(that compile an instrumented program, execute it, and verify the trace output). Tests use
+the [Google Test](https://github.com/google/googletest) framework, fetched automatically via
+CMake FetchContent on first build.
+
+```bash
+mkdir build && cd build
+cmake -DBUILD_TESTS=ON ..
+make
+ctest --output-on-failure
+```
+
+To generate a code coverage report (requires `lcov`):
+```bash
+cmake -DBUILD_TESTS=ON -DCOVERAGE=ON ..
+make
+ctest --output-on-failure
+lcov --capture --directory . --output-file coverage.info --no-external
+genhtml coverage.info --output-directory coverage-report
+# Open coverage-report/index.html in a browser
+```
+
+The `callstacklogger` static library can also be linked into custom programs — link against
+it and compile your application code with `-finstrument-functions` to enable tracing.
+
+## :rocket: CI/CD ##
+
+GitHub Actions runs on every push and pull request to `master`:
+- Builds the project with tests enabled
+- Runs unit and integration tests
+- Generates code coverage report (uploaded as build artifact)
 
 ## :wrench: Building and running - legacy (Makefiles) ##
 

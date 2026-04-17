@@ -147,15 +147,28 @@ call-stack-logger/
 |   |-- types.h                 # ResolvedFrame struct definition
 |   |-- unwinder.h              # FrameUnwinder template, Callback, unwind_nth_frame()
 |-- src/
-|   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, executable)
+|   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, library + executable)
 |   |-- Makefile_legacy         # Legacy Makefile with same logic
 |   |-- callStack.cpp           # Core implementation: BFD loading, symbol resolution
 |   |-- trace.cpp               # __cyg_profile_func_enter/exit, trace file I/O
 |   |-- main.cpp                # Demo program exercising various C++ features
+|-- tests/                      # Unit and integration tests (BUILD_TESTS=ON)
+|   |-- CMakeLists.txt          # FetchContent for Google Test, add subdirs
+|   |-- unit/
+|   |   |-- CMakeLists.txt      # Unit test executable (no instrumentation)
+|   |   |-- test_format.cpp     # Tests for utils::format()
+|   |   |-- test_pretty_time.cpp # Tests for utils::pretty_time() and to_ms()
+|   |-- integration/
+|       |-- CMakeLists.txt      # Traced program + integration test runner
+|       |-- traced_program.cpp  # Small instrumented program for testing
+|       |-- test_integration.cpp # Tests that run traced_program, parse trace output
 |-- lib/                        # Empty dir (placeholder for external libs)
 |   |-- .gitignore              # Keeps dir in git but ignores contents
 |-- misc/
-    |-- call-stack-logger-capture.gif  # Demo capture for README
+|   |-- call-stack-logger-capture.gif  # Demo capture for README
+|-- .github/
+    |-- workflows/
+        |-- ci.yml              # GitHub Actions: build, test, code coverage
 ```
 
 ## Key Source Files In Detail
@@ -270,6 +283,57 @@ make run                                # Run
 ### System Requirement
 
 - **GNU Binutils dev package:** `sudo apt-get install binutils-dev` (provides `libbfd`)
+
+### Library Target
+
+The build produces a `callstacklogger` static library from `callStack.cpp` and `trace.cpp`.
+The `runDemo` executable and test programs link against this library. Custom programs can
+also link against it — compile application code with `-finstrument-functions` and the
+appropriate exclude-file-list, then link against `callstacklogger`.
+
+## Testing
+
+Tests are built when `BUILD_TESTS=ON` is passed to CMake. Google Test is fetched via
+FetchContent (downloaded once, cached for offline use).
+
+### Unit Tests (`tests/unit/`)
+
+Test pure/deterministic functions from the include headers:
+- `test_format.cpp` — tree indentation, address formatting, line numbers, buffer handling
+- `test_pretty_time.cpp` — timestamp format, length, milliseconds, `to_ms()` conversion
+
+### Integration Tests (`tests/integration/`)
+
+- `traced_program.cpp` — small instrumented program with varied call patterns (free functions,
+  static methods, templates, constructors, inline functions)
+- `test_integration.cpp` — executes `traced_test_program`, parses trace output, verifies:
+  function names resolved, nesting depth correct, caller info present, timestamp format,
+  run separator, CSLG_OUTPUT_FILE redirection
+
+### Running Tests
+
+```bash
+cmake -DBUILD_TESTS=ON ..
+make
+ctest --output-on-failure
+```
+
+### Code Coverage
+
+```bash
+cmake -DBUILD_TESTS=ON -DCOVERAGE=ON ..
+make
+ctest --output-on-failure
+lcov --capture --directory . --output-file coverage.info --no-external
+genhtml coverage.info --output-directory coverage-report
+```
+
+## CI/CD
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master`:
+- Builds with `BUILD_TESTS=ON` and `COVERAGE=ON` on Ubuntu
+- Runs unit and integration tests via `ctest`
+- Generates lcov HTML coverage report (uploaded as artifact)
 
 ## Code Style
 
