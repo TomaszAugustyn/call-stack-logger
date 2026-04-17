@@ -2,30 +2,15 @@
 
 # The traced test program is compiled WITH instrumentation, just like runDemo.
 # It links against callstacklogger and produces trace output when executed.
+# INSTRUMENT_FLAGS is set in src/CMakeLists.txt with compiler-specific flags.
 add_executable(traced_test_program traced_program.cpp)
 target_include_directories(traced_test_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(traced_test_program PRIVATE cxx_std_17)
 
-# Compiler-specific instrumentation flags (same logic as src/CMakeLists.txt).
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(traced_test_program PRIVATE
-        -g -Wall
-        -finstrument-functions
-        -finstrument-functions-exclude-file-list=${CPP_STD_INCLUDES}
-    )
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    # Clang: -finstrument-functions-after-inlining (see src/CMakeLists.txt for why
-    # plain -finstrument-functions cannot be used). Std library functions that survive
-    # inlining are filtered at runtime in resolve_function_name().
-    target_compile_options(traced_test_program PRIVATE
-        -g -Wall
-        -finstrument-functions-after-inlining
-    )
-endif()
+# Use the same INSTRUMENT_FLAGS as runDemo (set in src/CMakeLists.txt).
+target_compile_options(traced_test_program PRIVATE ${INSTRUMENT_FLAGS})
 
-# -rdynamic is a LINKER flag (exports all symbols to dynamic table for dladdr).
-# Must use target_link_options, not target_compile_options.
-target_link_options(traced_test_program PRIVATE -rdynamic)
+# -rdynamic is set globally in src/CMakeLists.txt via add_link_options.
 target_link_libraries(traced_test_program callstacklogger)
 
 if(COVERAGE)

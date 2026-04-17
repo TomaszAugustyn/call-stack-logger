@@ -84,6 +84,12 @@ bool is_std_library_symbol(const char* mangled_name) {
         return false;
     }
     const char* p = mangled_name + 2;
+    // Handle local entities: _ZZ<enclosing-function>E<entity>
+    // If the enclosing function is in std::, the local entity is too (e.g.,
+    // std::basic_string::_M_construct<>()::_Guard, mangled as _ZZNSt...).
+    if (*p == 'Z') {
+        p++;
+    }
     // Handle nested names: _ZN[cv-qualifiers]...
     // 'N' starts a nested name; K=const, V=volatile, r=restrict are cv-qualifiers.
     if (*p == 'N') {
