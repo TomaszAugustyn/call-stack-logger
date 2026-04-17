@@ -15,12 +15,19 @@
 #include <cstring>
 #include <string>
 
+#ifndef NO_INSTRUMENT
+    #define NO_INSTRUMENT __attribute__((no_instrument_function))
+#endif
+
 namespace utils {
 
 // Formats a ResolvedFrame into a trace log line with timestamp, optional address,
 // tree indentation, function name, and caller location.
 // Uses snprintf into a stack buffer instead of std::ostringstream to avoid heap
 // allocation on every traced function call.
+// NO_INSTRUMENT: this function is part of the instrumentation pipeline (called from
+// __cyg_profile_func_enter) and must not be instrumented itself.
+NO_INSTRUMENT
 inline std::string format(const instrumentation::ResolvedFrame& frame, int current_stack_depth) {
 
     constexpr size_t BUF_SIZE = 2048;

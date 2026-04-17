@@ -93,7 +93,15 @@ void trace_end() {
 
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
+    // Re-entrancy guard: the resolve/format pipeline calls std library functions
+    // (std::string, std::map, etc.) which may themselves be instrumented (especially
+    // with Clang, which lacks -finstrument-functions-exclude-file-list). Without this
+    // guard, those instrumented std library calls would trigger recursive
+    // __cyg_profile_func_enter, deadlocking on s_bfd_mutex.
+    static thread_local bool in_instrumentation = false;
+    if (in_instrumentation) { return; }
     if(fp_trace != nullptr) {
+        in_instrumentation = true;
         auto maybe_resolved = instrumentation::resolve(callee, caller);
         bool resolved = maybe_resolved.has_value();
         if (frame_resolved_top < MAX_TRACE_DEPTH - 1) {
@@ -103,17 +111,18 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             // Indentation (current_stack_depth) remains correct regardless.
             frame_overflow_count++;
         }
-        if (!resolved) { return; }
+        if (!resolved) { in_instrumentation = false; return; }
         current_stack_depth++;
         {
             std::lock_guard<std::mutex> lock(trace_mutex);
             // Re-check under lock: trace_end() may have closed fp_trace between the
-            // outer check (line 94, no lock) and here. The outer check is a fast path
-            // to skip work when tracing is disabled; this is the authoritative check.
+            // outer check and here. The outer check is a fast path to skip work when
+            // tracing is disabled; this is the authoritative check.
             if (fp_trace != nullptr) {
                 fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
             }
         }
+        in_instrumentation = false;
     }
 }
 

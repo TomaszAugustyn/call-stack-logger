@@ -13,6 +13,10 @@
 #include <ctime>
 #include <string>
 
+#ifndef NO_INSTRUMENT
+    #define NO_INSTRUMENT __attribute__((no_instrument_function))
+#endif
+
 namespace utils {
 
 // strftime format
@@ -22,7 +26,9 @@ namespace utils {
 #define LOGGER_PRETTY_MS_FORMAT ".%03ld"
 
 // Convert current time to milliseconds since unix epoch.
+// NO_INSTRUMENT: called from the instrumentation pipeline (resolve -> pretty_time -> to_ms).
 template <typename T>
+NO_INSTRUMENT
 long to_ms(const std::chrono::time_point<T>& tp) {
     using namespace std::chrono;
 
@@ -31,6 +37,8 @@ long to_ms(const std::chrono::time_point<T>& tp) {
 }
 
 // Format it in two parts: main part with date and time and part with milliseconds.
+// NO_INSTRUMENT: called from the instrumentation pipeline (resolve -> pretty_time).
+NO_INSTRUMENT
 inline std::string pretty_time() {
     auto tp = std::chrono::system_clock::now();
     std::time_t current_time = std::chrono::system_clock::to_time_t(tp);
