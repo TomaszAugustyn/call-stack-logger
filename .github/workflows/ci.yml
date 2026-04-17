@@ -7,7 +7,8 @@ on:
     branches: [ master ]
 
 jobs:
-  build-and-test:
+  gcc:
+    name: GCC (build, test, coverage)
     runs-on: ubuntu-latest
 
     steps:
@@ -39,3 +40,23 @@ jobs:
       with:
         name: coverage-report
         path: coverage-report/
+
+  clang:
+    name: Clang (build, test)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y clang binutils-dev libc6-dbg
+
+    - name: Configure CMake
+      run: cmake -B build -DBUILD_TESTS=ON -DCMAKE_CXX_COMPILER=clang++
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run unit and integration tests
+      run: cd build && ctest --output-on-failure
