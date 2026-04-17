@@ -41,14 +41,21 @@ public:
         // Custom deleter that casts back to char* before delete[], matching the
         // allocation type (new char[]) used for the BFD symbol table storage.
         struct SymbolDeleter {
-            void operator()(asymbol** p) const { delete[] reinterpret_cast<char*>(p); }
+            NO_INSTRUMENT void operator()(asymbol** p) const { delete[] reinterpret_cast<char*>(p); }
         };
 
         std::unique_ptr<bfd, deleter_t*> abfd;
         std::unique_ptr<asymbol*[], SymbolDeleter> symbols;
         intptr_t offset;
 
-        storedBfd(bfd* _abfd, deleter_t* _del) : abfd(_abfd, _del) {}
+        NO_INSTRUMENT storedBfd(bfd* _abfd, deleter_t* _del) : abfd(_abfd, _del) {}
+        // Explicit move operations and destructor with NO_INSTRUMENT prevent the
+        // compiler-generated special members from being instrumented during static
+        // cleanup of s_bfds. Declaring a destructor suppresses implicit move
+        // generation in C++, so move operations must be explicitly defaulted.
+        NO_INSTRUMENT storedBfd(storedBfd&&) = default;
+        NO_INSTRUMENT storedBfd& operator=(storedBfd&&) = default;
+        NO_INSTRUMENT ~storedBfd() = default;
     };
 
     NO_INSTRUMENT

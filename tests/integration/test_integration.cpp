@@ -196,3 +196,45 @@ TEST_F(IntegrationTest, CustomOutputPath) {
     // If we got here with non-empty content, redirection worked.
     EXPECT_FALSE(trace_content.empty()) << "Trace output file is empty — CSLG_OUTPUT_FILE may not work";
 }
+
+// Verify std library functions are excluded from the trace.
+// GCC excludes them at compile time via -finstrument-functions-exclude-file-list.
+// Clang excludes them at runtime via is_std_library_symbol() in resolve_function_name().
+// The traced_program calls func_with_stl() which uses std::vector and std::sort internally.
+TEST_F(IntegrationTest, StdLibraryFunctionsExcluded) {
+    for (const auto& line : trace_lines) {
+        // Only check function entry lines (contain "|_")
+        if (line.find("|_") == std::string::npos) {
+            continue;
+        }
+        EXPECT_EQ(line.find("|_ std::"), std::string::npos)
+                << "std:: function found in trace: " << line;
+        EXPECT_EQ(line.find("|_ __gnu_cxx::"), std::string::npos)
+                << "__gnu_cxx:: function found in trace: " << line;
+        EXPECT_EQ(line.find("|_ __cxxabiv1::"), std::string::npos)
+                << "__cxxabiv1:: function found in trace: " << line;
+    }
+}
+
+// Verify user function that calls STL is still traced.
+TEST_F(IntegrationTest, StlUsageFunctionPresent) {
+    EXPECT_NE(trace_content.find("func_with_stl"), std::string::npos)
+            << "func_with_stl not found — user functions using STL must still appear";
+}
+
+// Verify trace has exactly the expected number of function entries.
+// The traced program calls 10 user-defined functions. Without std library filtering,
+// Clang would produce hundreds of entries from template instantiations.
+TEST_F(IntegrationTest, ExactTraceLineCount) {
+    int entry_count = 0;
+    for (const auto& line : trace_lines) {
+        if (line.find("(called from:") != std::string::npos) {
+            entry_count++;
+        }
+    }
+    // Expected: main, func_a, func_b, func_c, static_method, TracedClass (ctor),
+    // instance_method, template_func, inline_func, func_with_stl = 10 entries.
+    EXPECT_EQ(entry_count, 10)
+            << "Expected exactly 10 function entries; got " << entry_count
+            << ". If count is much higher, std library functions may be leaking through.";
+}
