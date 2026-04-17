@@ -81,8 +81,9 @@ protected:
         close(fd);
         trace_file_path = tmp_path;
 
-        // Set environment variable and run traced program
-        std::string cmd = "CSLG_OUTPUT_FILE=" + trace_file_path + " " + TRACED_PROGRAM_PATH;
+        // Set environment variable and run traced program.
+        // Paths are quoted to handle build directories containing spaces.
+        std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_file_path + "\" \"" + TRACED_PROGRAM_PATH + "\"";
         int ret = system(cmd.c_str());
         ASSERT_EQ(ret, 0) << "traced_test_program failed with exit code " << ret;
 
