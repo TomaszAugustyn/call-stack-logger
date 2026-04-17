@@ -132,6 +132,8 @@ With optional address logging when `LOG_ADDR` is defined:
 ```
 call-stack-logger/
 |-- CMakeLists.txt              # Root CMake config (project definition, run target)
+|-- Dockerfile                  # Ubuntu 24.04 build environment
+|-- docker-compose.yml          # Build, test, coverage services
 |-- Makefile_legacy             # Legacy root Makefile (delegates to src/)
 |-- README.md                   # Project overview, build instructions
 |-- CONTRIBUTING.md             # Contribution guidelines

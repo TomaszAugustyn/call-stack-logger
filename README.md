@@ -112,6 +112,25 @@ genhtml coverage.info --output-directory coverage-report
 The `callstacklogger` static library can also be linked into custom programs — link against
 it and compile your application code with `-finstrument-functions` to enable tracing.
 
+## :whale: Docker ##
+
+Docker provides a reproducible build/test environment and is the recommended way to develop
+on non-Linux platforms (macOS, Windows).
+
+```bash
+# Build the project
+docker compose run build
+
+# Run all tests (unit + integration)
+docker compose run test
+
+# Generate code coverage report (output in coverage-report/index.html)
+docker compose run coverage
+```
+
+The Docker image is based on Ubuntu 24.04 with all required dependencies pre-installed,
+including `libc6-dbg` (debug symbols for libc, required for fast BFD symbol resolution).
+
 ## :rocket: CI/CD ##
 
 GitHub Actions runs on every push and pull request to `master`:
