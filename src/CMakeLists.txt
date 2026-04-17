@@ -6,7 +6,7 @@
 # GitHub: https://github.com/TomaszAugustyn/call-stack-logger
 # Contact Email: t.augustyn@poczta.fm
 
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.14)
 
 # Find C++ Standard Library header files to exclude them from instrumentation
 execute_process(
@@ -36,20 +36,27 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "-g -Wall -rdynamic -finstrument-functions -finstrument-functions-exclude-file-list=${CPP_STD_INCLUDES}")
 
-# Set include directories and link libraries
+# Set include directories
 include_directories("../include")
 link_directories("../lib")
-set(LIBS "-ldl -lbfd")
 
-# Set source files
-file(GLOB_RECURSE SOURCES "*.cpp")
+# Code coverage support (GCC --coverage flag)
+if(COVERAGE)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
+endif()
 
 # Set header files
 file(GLOB_RECURSE HEADERS "../include/*.h")
 
-# Add executable and link libraries
-add_executable(runDemo ${SOURCES} ${HEADERS})
-target_link_libraries(runDemo ${LIBS})
+# Static library from instrumentation source files.
+# All functions in these files have NO_INSTRUMENT attribute, so they are excluded
+# from instrumentation even though -finstrument-functions is applied.
+add_library(callstacklogger STATIC callStack.cpp trace.cpp ${HEADERS})
+target_link_libraries(callstacklogger -ldl -lbfd)
+
+# Demo executable links against the library
+add_executable(runDemo main.cpp)
+target_link_libraries(runDemo callstacklogger)
 
 # Set definition for "LOG_ADDR" option
 if(LOG_ADDR)
