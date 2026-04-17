@@ -1,6 +1,7 @@
 # Call Stack Logger #
 
-![CI](https://github.com/TomaszAugustyn/call-stack-logger/actions/workflows/ci.yml/badge.svg)
+![GCC](https://github.com/TomaszAugustyn/call-stack-logger/actions/workflows/ci.yml/badge.svg?branch=master&event=push)
+<!-- Badges show GCC (build+test+coverage) and Clang (build+test) CI status -->
 
 Call Stack Logger uses function instrumentation to facilitate logging of
 every function call. Each nesting adds an ident, whereas returning from a
@@ -35,8 +36,10 @@ cd call-stack-logger
 # Create build folder and go there
 mkdir build && cd build
 
-# Configure cmake with default logging
+# Configure cmake with default logging (GCC is the default compiler)
 cmake ..
+# or to build with Clang instead of GCC
+cmake -DCMAKE_CXX_COMPILER=clang++ ..
 # or for extended logging you can play with these flags
 cmake -DLOG_ADDR=ON -DLOG_NOT_DEMANGLED=ON ..
 # or to compile your application with disabled instrumentation (no logging)
@@ -118,25 +121,27 @@ Docker provides a reproducible build/test environment and is the recommended way
 on non-Linux platforms (macOS, Windows).
 
 ```bash
-# Build the project
+# Build the project (GCC, default)
 docker compose run build
 
-# Run all tests (unit + integration)
+# Run all tests (unit + integration) with GCC
 docker compose run test
+
+# Run all tests with Clang
+docker compose run test-clang
 
 # Generate code coverage report (output in coverage-report/index.html)
 docker compose run coverage
 ```
 
-The Docker image is based on Ubuntu 24.04 with all required dependencies pre-installed,
+The Docker image is based on Ubuntu 24.04 with GCC, Clang, and all required dependencies,
 including `libc6-dbg` (debug symbols for libc, required for fast BFD symbol resolution).
 
 ## :rocket: CI/CD ##
 
 GitHub Actions runs on every push and pull request to `master`:
-- Builds the project with tests enabled
-- Runs unit and integration tests
-- Generates code coverage report (uploaded as build artifact)
+- **GCC job:** Builds, runs unit and integration tests, generates code coverage report
+- **Clang job:** Builds and runs unit and integration tests
 
 ## :wrench: Building and running - legacy (Makefiles) ##
 

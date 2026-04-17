@@ -3,8 +3,8 @@
 ## Project Overview
 
 Call Stack Logger is a C++ instrumentation framework that traces a program's flow of execution
-at runtime by logging every function call. It leverages GCC's `-finstrument-functions` compiler
-flag to automatically insert profiling hooks into every function entry and exit. The output is a
+at runtime by logging every function call. It leverages GCC/Clang's `-finstrument-functions`
+compiler flag to automatically insert profiling hooks into every function entry and exit. The output is a
 hierarchical call-stack tree written to `trace.out`, showing timestamps, function names, source
 file locations, line numbers, and visual nesting depth.
 
@@ -358,7 +358,12 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master`:
 ## Design Decisions & Caveats
 
 1. **Linux-only:** Relies on `/proc/self/cmdline`, `/proc/self/exe`, `dladdr`, BFD,
-   `_Unwind_*`, `localtime_r`, `O_NOFOLLOW`
+   `_Unwind_*`, `localtime_r`, `O_NOFOLLOW`. Supports both GCC and Clang compilers.
+   GCC uses `-finstrument-functions` with exclude-file-list; Clang uses
+   `-finstrument-functions-after-inlining` (Clang lacks the exclude-file-list flag).
+   A thread_local re-entrancy guard in `__cyg_profile_func_enter` prevents recursive
+   instrumentation from std library functions (critical for Clang). Shutdown uses
+   `atexit()` to disable instrumentation before static destructors run.
 2. **Multithreaded-ready:** Per-thread call stack state uses `thread_local`; shared resources
    (`fp_trace`, BFD library) are protected by `std::mutex`; `localtime_r` replaces
    `std::localtime`. All threads currently write to a single shared trace file with serialized
