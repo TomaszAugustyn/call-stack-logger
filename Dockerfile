@@ -8,6 +8,7 @@ FROM ubuntu:24.04
 # - lcov: code coverage report generation
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
+    clang \
     cmake \
     make \
     binutils-dev \
