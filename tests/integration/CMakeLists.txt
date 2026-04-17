@@ -14,6 +14,9 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         -finstrument-functions-exclude-file-list=${CPP_STD_INCLUDES}
     )
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Clang: -finstrument-functions-after-inlining (see src/CMakeLists.txt for why
+    # plain -finstrument-functions cannot be used). Std library functions that survive
+    # inlining are filtered at runtime in resolve_function_name().
     target_compile_options(traced_test_program PRIVATE
         -g -Wall
         -finstrument-functions-after-inlining

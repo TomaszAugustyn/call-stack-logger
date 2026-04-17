@@ -42,8 +42,12 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_CXX_FLAGS "-g -Wall -rdynamic -finstrument-functions -finstrument-functions-exclude-file-list=${CPP_STD_INCLUDES}")
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    # Clang: -finstrument-functions-after-inlining only instruments functions that are
-    # not inlined, which naturally excludes most std library template instantiations.
+    # Clang: -finstrument-functions-after-inlining instruments functions after the inlining
+    # pass. Plain -finstrument-functions cannot be used because it forces out-of-line
+    # versions of constexpr std library functions (e.g., basic_string::_M_init_local_buf)
+    # that have no symbol in libstdc++.so, causing linker errors.
+    # Clang lacks -finstrument-functions-exclude-file-list, so std library functions that
+    # survive inlining are filtered at runtime in resolve_function_name() instead.
     # -rdynamic goes to link flags (Clang warns about it as a compile flag).
     set(CMAKE_CXX_FLAGS "-g -Wall -finstrument-functions-after-inlining")
     add_link_options(-rdynamic)
