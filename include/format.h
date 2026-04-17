@@ -70,7 +70,7 @@ inline std::string format(const instrumentation::ResolvedFrame& frame, int curre
                     *frame.caller_line_number);
         } else {
             n = std::snprintf(
-                    buf + pos, remaining, "%s  (called from: %s:???)",
+                    buf + pos, remaining, "%s  (called from: %s:\?\?\?)",
                     frame.callee_function_name.c_str(),
                     frame.caller_filename.c_str());
         }

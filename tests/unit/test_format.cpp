@@ -73,7 +73,7 @@ TEST(FormatTest, MissingLineNumberShowsQuestionMarks) {
     auto frame = make_frame("unknown_loc", "lib.so", std::nullopt);
     std::string result = utils::format(frame, 1);
 
-    EXPECT_NE(result.find("(called from: lib.so:???)"), std::string::npos);
+    EXPECT_NE(result.find("(called from: lib.so:\?\?\?)"), std::string::npos);
 }
 
 // Address present: addr: [0x...] appears before tree prefix.
