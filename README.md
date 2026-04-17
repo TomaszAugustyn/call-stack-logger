@@ -58,6 +58,22 @@ Each run appends to the trace output file with a timestamped separator header, s
 runs are easy to distinguish. Output is line-buffered for crash safety without per-call overhead.
 If the trace file cannot be opened, a warning is printed to `stderr`.
 
+### Compiler-specific instrumentation ###
+
+Both GCC and Clang produce identical trace output, but use different mechanisms to exclude
+standard library functions from instrumentation:
+
+| | GCC | Clang |
+|---|-----|-------|
+| **Instrumentation flag** | `-finstrument-functions` | `-finstrument-functions-after-inlining` |
+| **Std library exclusion** | Compile-time (`-finstrument-functions-exclude-file-list`) | Runtime (mangled name filter in `resolve_function_name()`) |
+
+Clang cannot use plain `-finstrument-functions` because it causes linker errors with constexpr
+libstdc++ functions that have no out-of-line definitions. The `-finstrument-functions-after-inlining`
+flag avoids this by instrumenting only after the inlining pass. Standard library functions that
+survive inlining are then filtered at runtime by checking the Itanium C++ ABI mangled name for
+known `std::`, `__gnu_cxx::`, and `__cxxabiv1::` prefixes.
+
 ## :gear: Configuration ##
 
 ### CMake Options ###

@@ -65,10 +65,32 @@ chain), the frame number (currently 6) in `callStack.cpp:209` MUST be recalculat
 
 ### Excluding Standard Library from Instrumentation
 
-The build system auto-discovers C++ standard library header paths using GCC's `cc1plus -v` and
-`cpp -v` commands, then passes them via `-finstrument-functions-exclude-file-list=<paths>`.
-The project's own instrumentation headers are also excluded to prevent infinite recursion:
-`callStack.h`, `unwinder.h`, `types.h`, `format.h`, `prettyTime.h`.
+Standard library functions (e.g., `std::sort`, `std::vector::push_back`) must be excluded
+from instrumentation — otherwise they flood the trace with internal implementation details.
+The project uses a **two-tier exclusion approach** depending on the compiler:
+
+**GCC (compile-time exclusion):** The build system auto-discovers C++ standard library header
+paths using `${CMAKE_CXX_COMPILER} -xc++ -E -v -`, then passes them via
+`-finstrument-functions-exclude-file-list=<paths>`. The project's own instrumentation headers
+are also excluded: `callStack.h`, `unwinder.h`, `types.h`, `format.h`, `prettyTime.h`.
+With this approach, GCC never inserts instrumentation hooks into std library functions.
+
+**Clang (runtime exclusion):** Clang does not support `-finstrument-functions-exclude-file-list`.
+Instead, std library template instantiations that survive the inlining pass receive hooks and
+trigger `__cyg_profile_func_enter` at runtime. The function `is_std_library_symbol()` in
+`callStack.cpp` (compiled under `#ifdef __clang__`) checks the Itanium C++ ABI mangled name
+for known std library prefixes before expensive BFD resolution:
+- `__cxa_*` — C++ ABI runtime functions
+- `_Z[N[cv]]St*` — `std::` functions and members
+- `_Z[N[cv]]S[absiod]*` — std substitutions (allocator, basic_string, string, etc.)
+- `_Z[N[cv]]9__gnu_cxx*` — GNU C++ extensions (`__normal_iterator`, etc.)
+- `_Z[N[cv]]10__cxxabiv1*` — C++ ABI internals
+- `_Z[N[cv]]11__gnu_debug*` — GNU debug-mode containers
+
+Where `[cv]` = optional cv-qualifiers (K=const, V=volatile, r=restrict).
+
+This filter runs inside `resolve_function_name()` right after `dladdr()` and before BFD
+loading, so filtered functions avoid the expensive BFD symbol resolution entirely.
 
 ### The NO_INSTRUMENT Macro
 
@@ -202,8 +224,10 @@ log line with optional address, tree indentation, function name, and caller loca
 **Note:** Uses `std::localtime()` which is not thread-safe.
 
 ### `src/callStack.cpp`
-The core implementation (~244 lines). Key functions:
+The core implementation. Key functions:
 - `demangle_cxa()` - Wraps `abi::__cxa_demangle` with RAII
+- `is_std_library_symbol()` - (Clang only, `#ifdef __clang__`) Checks Itanium C++ ABI mangled
+  names for std library prefixes; filters std:: functions before expensive BFD resolution
 - `bfdResolver::ensure_bfd_loaded()` - Opens BFD, reads symbol table, caches by base address
 - `bfdResolver::resolve_function_name()` - Resolves callee address to demangled function name
 - `bfdResolver::resolve_filename_and_line()` - Resolves caller address to source file and line
@@ -260,8 +284,9 @@ make run                                # Run
 
 | Flag | Purpose |
 |------|---------|
-| `-finstrument-functions` | Enable function entry/exit hooks |
-| `-finstrument-functions-exclude-file-list=...` | Exclude std lib and project headers |
+| `-finstrument-functions` | Enable function entry/exit hooks (GCC) |
+| `-finstrument-functions-after-inlining` | Enable hooks after inlining pass (Clang) |
+| `-finstrument-functions-exclude-file-list=...` | Exclude std lib and project headers (GCC only) |
 | `-rdynamic` | Export all symbols to dynamic symbol table (needed by `dladdr`) |
 | `-g` | Debug symbols (needed by BFD for line numbers) |
 | `-Wall` | All warnings |
@@ -353,17 +378,21 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master`:
 
 - `instrumentation::` - All symbol resolution and call stack logic
 - `utils::` - Formatting and time utilities
-- Anonymous namespace in `callStack.cpp` for `demangle_cxa()`
+- Anonymous namespace in `callStack.cpp` for `demangle_cxa()` and `is_std_library_symbol()`
+  (Clang only)
 
 ## Design Decisions & Caveats
 
 1. **Linux-only:** Relies on `/proc/self/cmdline`, `/proc/self/exe`, `dladdr`, BFD,
    `_Unwind_*`, `localtime_r`, `O_NOFOLLOW`. Supports both GCC and Clang compilers.
-   GCC uses `-finstrument-functions` with exclude-file-list; Clang uses
-   `-finstrument-functions-after-inlining` (Clang lacks the exclude-file-list flag).
-   A thread_local re-entrancy guard in `__cyg_profile_func_enter` prevents recursive
-   instrumentation from std library functions (critical for Clang). Shutdown uses
-   `atexit()` to disable instrumentation before static destructors run.
+   **Std library exclusion uses a two-tier approach:**
+   - GCC: compile-time via `-finstrument-functions-exclude-file-list` (auto-discovered paths)
+   - Clang: runtime via `is_std_library_symbol()` mangled name filter in `resolve_function_name()`
+   Clang uses `-finstrument-functions-after-inlining` because plain `-finstrument-functions`
+   causes linker errors with constexpr libstdc++ functions (e.g., `basic_string::_M_init_local_buf`
+   has no out-of-line symbol). A thread_local re-entrancy guard in `__cyg_profile_func_enter`
+   prevents recursive instrumentation from within the resolve pipeline (critical for Clang).
+   Shutdown uses `atexit()` to disable instrumentation before static destructors run.
 2. **Multithreaded-ready:** Per-thread call stack state uses `thread_local`; shared resources
    (`fp_trace`, BFD library) are protected by `std::mutex`; `localtime_r` replaces
    `std::localtime`. All threads currently write to a single shared trace file with serialized
