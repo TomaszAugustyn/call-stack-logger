@@ -8,33 +8,50 @@
 
 cmake_minimum_required(VERSION 3.14)
 
-# Find C++ Standard Library header files to exclude them from instrumentation
-execute_process(
-    COMMAND bash -c "`gcc -print-prog-name=cc1plus` -v < /dev/null 2>&1 \
-    | LC_ALL=C sed -ne '/starts here/,/End of/p' \
-    | grep -o '/[^\"]*' ; `gcc -print-prog-name=cpp` -v < /dev/null 2>&1 \
-    | LC_ALL=C sed -ne '/starts here/,/End of/p' \
-    | grep -o '/[^\"]*'"
-    COMMAND bash -c "cat"
-    COMMAND bash -c "sort"
-    COMMAND bash -c "uniq"
-    COMMAND bash -c "tr '\n' ','"
-    COMMAND bash -c "sed 's/\\(.*\\),/\\1 /'"
-    COMMAND bash -c "xargs"
-    OUTPUT_VARIABLE CPP_STD_INCLUDES
-)
-
-string(STRIP "${CPP_STD_INCLUDES}" CPP_STD_INCLUDES)
-
-# Exclude tracing functions themselves from instrumentation
-set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/format.h,include/prettyTime.h" CACHE STRING "")
-
-message(STATUS "CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}]")
-
 # Set C++ compiler and flags
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "-g -Wall -rdynamic -finstrument-functions -finstrument-functions-exclude-file-list=${CPP_STD_INCLUDES}")
+
+# Compiler-specific instrumentation flags.
+# GCC: uses -finstrument-functions with an exclude-file-list to prevent std library
+#   functions from being instrumented. The exclude list is auto-discovered from the
+#   compiler's include search paths.
+# Clang: uses -finstrument-functions-after-inlining (Clang does not support
+#   -finstrument-functions-exclude-file-list). This only instruments functions that
+#   survive inlining, naturally excluding most std library templates. A re-entrancy
+#   guard in __cyg_profile_func_enter handles any remaining edge cases.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # Discover C++ standard library header paths to exclude from instrumentation.
+    execute_process(
+        COMMAND bash -c "${CMAKE_CXX_COMPILER} -xc++ -E -v - < /dev/null 2>&1 \
+        | LC_ALL=C sed -ne '/starts here/,/End of/p' \
+        | grep -o '/[^\"]*'"
+        COMMAND bash -c "sort"
+        COMMAND bash -c "uniq"
+        COMMAND bash -c "tr '\n' ','"
+        COMMAND bash -c "sed 's/\\(.*\\),/\\1 /'"
+        COMMAND bash -c "xargs"
+        OUTPUT_VARIABLE CPP_STD_INCLUDES
+    )
+    string(STRIP "${CPP_STD_INCLUDES}" CPP_STD_INCLUDES)
+
+    # Also exclude the project's instrumentation headers from instrumentation.
+    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/format.h,include/prettyTime.h" CACHE STRING "")
+    message(STATUS "CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}]")
+
+    set(CMAKE_CXX_FLAGS "-g -Wall -rdynamic -finstrument-functions -finstrument-functions-exclude-file-list=${CPP_STD_INCLUDES}")
+
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Clang: -finstrument-functions-after-inlining only instruments functions that are
+    # not inlined, which naturally excludes most std library template instantiations.
+    # -rdynamic goes to link flags (Clang warns about it as a compile flag).
+    set(CMAKE_CXX_FLAGS "-g -Wall -finstrument-functions-after-inlining")
+    add_link_options(-rdynamic)
+
+else()
+    message(WARNING "Unsupported compiler: ${CMAKE_CXX_COMPILER_ID}. Function instrumentation may not work.")
+    set(CMAKE_CXX_FLAGS "-g -Wall -rdynamic")
+endif()
 
 # Set include directories
 include_directories("../include")

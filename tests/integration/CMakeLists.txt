@@ -4,12 +4,22 @@
 # It links against callstacklogger and produces trace output when executed.
 add_executable(traced_test_program traced_program.cpp)
 target_include_directories(traced_test_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_compile_options(traced_test_program PRIVATE
-    -g -Wall
-    -finstrument-functions
-    -finstrument-functions-exclude-file-list=${CPP_STD_INCLUDES}
-)
 target_compile_features(traced_test_program PRIVATE cxx_std_17)
+
+# Compiler-specific instrumentation flags (same logic as src/CMakeLists.txt).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(traced_test_program PRIVATE
+        -g -Wall
+        -finstrument-functions
+        -finstrument-functions-exclude-file-list=${CPP_STD_INCLUDES}
+    )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(traced_test_program PRIVATE
+        -g -Wall
+        -finstrument-functions-after-inlining
+    )
+endif()
+
 # -rdynamic is a LINKER flag (exports all symbols to dynamic table for dladdr).
 # Must use target_link_options, not target_compile_options.
 target_link_options(traced_test_program PRIVATE -rdynamic)

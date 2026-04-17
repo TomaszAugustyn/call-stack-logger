@@ -38,10 +38,29 @@ static thread_local int frame_resolved_top = -1;
 // Counts frames that exceeded MAX_TRACE_DEPTH. On exit, overflow frames are handled
 // before popping from the stack, keeping the stack in sync with the actual call stack.
 static thread_local int frame_overflow_count = 0;
+// Re-entrancy guard: prevents recursive instrumentation when the resolve/format pipeline
+// calls std library functions that may themselves be instrumented (especially with Clang).
+// Also set during trace_begin/trace_end to prevent deadlock on trace_mutex.
+static thread_local bool in_instrumentation = false;
+
+// Closes the trace file and permanently disables instrumentation. Called via atexit()
+// to ensure it runs before static object destructors (like s_bfds map). With Clang,
+// static destructors may be instrumented — without this early shutdown, instrumented
+// destructors would call resolve() on already-destroyed BFD objects.
+NO_INSTRUMENT
+static void trace_shutdown() {
+    in_instrumentation = true;  // Permanently disable — never cleared
+    std::lock_guard<std::mutex> lock(trace_mutex);
+    if(fp_trace != nullptr) {
+        fclose(fp_trace);
+        fp_trace = nullptr;
+    }
+}
 
 __attribute__ ((constructor))
 NO_INSTRUMENT
 void trace_begin() {
+    in_instrumentation = true;
     {
         std::lock_guard<std::mutex> lock(trace_mutex);
 
@@ -79,29 +98,30 @@ void trace_begin() {
             fprintf(stderr, "[call-stack-logger] WARNING: Could not open %s for writing\n", trace_path);
         }
     }
+    // Register shutdown via atexit so it runs before static destructors.
+    // This is critical for Clang where static destructors (like s_bfds map) may be
+    // instrumented — the shutdown must close the trace file and disable instrumentation
+    // before those destructors fire.
+    std::atexit(trace_shutdown);
+    in_instrumentation = false;
 }
 
 __attribute__ ((destructor))
 NO_INSTRUMENT
 void trace_end() {
-    std::lock_guard<std::mutex> lock(trace_mutex);
-    if(fp_trace != nullptr) {
-        fclose(fp_trace);
-        fp_trace = nullptr;
-    }
+    // Fallback cleanup in case atexit didn't run (e.g., _exit() or abort()).
+    trace_shutdown();
 }
 
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
-    // Re-entrancy guard: the resolve/format pipeline calls std library functions
-    // (std::string, std::map, etc.) which may themselves be instrumented (especially
-    // with Clang, which lacks -finstrument-functions-exclude-file-list). Without this
-    // guard, those instrumented std library calls would trigger recursive
-    // __cyg_profile_func_enter, deadlocking on s_bfd_mutex.
-    static thread_local bool in_instrumentation = false;
     if (in_instrumentation) { return; }
+    // Set the guard BEFORE any work and clear it AFTER all local variables (especially
+    // maybe_resolved, which is a std::optional<ResolvedFrame>) have been destroyed.
+    // With Clang, destructors of std library types may be instrumented, so
+    // in_instrumentation must remain true until all destructors have run.
+    in_instrumentation = true;
     if(fp_trace != nullptr) {
-        in_instrumentation = true;
         auto maybe_resolved = instrumentation::resolve(callee, caller);
         bool resolved = maybe_resolved.has_value();
         if (frame_resolved_top < MAX_TRACE_DEPTH - 1) {
@@ -111,23 +131,25 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             // Indentation (current_stack_depth) remains correct regardless.
             frame_overflow_count++;
         }
-        if (!resolved) { in_instrumentation = false; return; }
-        current_stack_depth++;
-        {
-            std::lock_guard<std::mutex> lock(trace_mutex);
-            // Re-check under lock: trace_end() may have closed fp_trace between the
-            // outer check and here. The outer check is a fast path to skip work when
-            // tracing is disabled; this is the authoritative check.
-            if (fp_trace != nullptr) {
-                fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
+        if (resolved) {
+            current_stack_depth++;
+            {
+                std::lock_guard<std::mutex> lock(trace_mutex);
+                // Re-check under lock: trace_end() may have closed fp_trace between the
+                // outer check and here. The outer check is a fast path to skip work when
+                // tracing is disabled; this is the authoritative check.
+                if (fp_trace != nullptr) {
+                    fprintf(fp_trace, "%s\n", utils::format(*maybe_resolved, current_stack_depth).c_str());
+                }
             }
         }
-        in_instrumentation = false;
-    }
+    } // maybe_resolved and lock_guard destructors run here, still under guard
+    in_instrumentation = false;
 }
 
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_exit(void *callee, void *caller) {
+    if (in_instrumentation) { return; }
     if (fp_trace != nullptr) {
         if (frame_overflow_count > 0) {
             // This exit corresponds to a frame that overflowed the stack.
