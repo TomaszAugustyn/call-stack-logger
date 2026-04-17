@@ -76,9 +76,9 @@ are also excluded: `callStack.h`, `unwinder.h`, `types.h`, `format.h`, `prettyTi
 With this approach, GCC never inserts instrumentation hooks into std library functions.
 
 **Clang (runtime exclusion):** Clang does not support `-finstrument-functions-exclude-file-list`.
-Instead, std library template instantiations that survive the inlining pass receive hooks and
-trigger `__cyg_profile_func_enter` at runtime. The function `is_std_library_symbol()` in
-`callStack.cpp` (compiled under `#ifdef __clang__`) checks the Itanium C++ ABI mangled name
+Instead, std library template instantiations compiled into the user's translation unit receive
+hooks and trigger `__cyg_profile_func_enter` at runtime. The function `is_std_library_symbol()`
+in `callStack.cpp` (compiled under `#ifdef __clang__`) checks the Itanium C++ ABI mangled name
 for known std library prefixes before expensive BFD resolution:
 - `__cxa_*` — C++ ABI runtime functions
 - `_Z[N[cv]]St*` — `std::` functions and members
@@ -86,6 +86,7 @@ for known std library prefixes before expensive BFD resolution:
 - `_Z[N[cv]]9__gnu_cxx*` — GNU C++ extensions (`__normal_iterator`, etc.)
 - `_Z[N[cv]]10__cxxabiv1*` — C++ ABI internals
 - `_Z[N[cv]]11__gnu_debug*` — GNU debug-mode containers
+- `_ZZ` prefix — local entities inside std library functions (e.g., `_Guard` classes)
 
 Where `[cv]` = optional cv-qualifiers (K=const, V=volatile, r=restrict).
 
@@ -284,8 +285,7 @@ make run                                # Run
 
 | Flag | Purpose |
 |------|---------|
-| `-finstrument-functions` | Enable function entry/exit hooks (GCC) |
-| `-finstrument-functions-after-inlining` | Enable hooks after inlining pass (Clang) |
+| `-finstrument-functions` | Enable function entry/exit hooks (user code, both compilers) |
 | `-finstrument-functions-exclude-file-list=...` | Exclude std lib and project headers (GCC only) |
 | `-rdynamic` | Export all symbols to dynamic symbol table (needed by `dladdr`) |
 | `-g` | Debug symbols (needed by BFD for line numbers) |
@@ -388,11 +388,15 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master`:
    **Std library exclusion uses a two-tier approach:**
    - GCC: compile-time via `-finstrument-functions-exclude-file-list` (auto-discovered paths)
    - Clang: runtime via `is_std_library_symbol()` mangled name filter in `resolve_function_name()`
-   Clang uses `-finstrument-functions-after-inlining` because plain `-finstrument-functions`
-   causes linker errors with constexpr libstdc++ functions (e.g., `basic_string::_M_init_local_buf`
-   has no out-of-line symbol). A thread_local re-entrancy guard in `__cyg_profile_func_enter`
-   prevents recursive instrumentation from within the resolve pipeline (critical for Clang).
-   Shutdown uses `atexit()` to disable instrumentation before static destructors run.
+   Both compilers use plain `-finstrument-functions` for user code. The callstacklogger library
+   is compiled WITHOUT instrumentation flags (split compilation) because all its functions
+   have `NO_INSTRUMENT`. This avoids linker errors with constexpr libstdc++ functions (e.g.,
+   `basic_string::_M_init_local_buf`) that have no out-of-line symbol in libstdc++.so — the
+   library uses `std::string` extensively but doesn't need instrumentation. A thread_local
+   re-entrancy guard in
+   `__cyg_profile_func_enter` prevents recursive instrumentation from within the resolve
+   pipeline (critical for Clang). Shutdown uses `atexit()` to disable instrumentation before
+   static destructors run.
 2. **Multithreaded-ready:** Per-thread call stack state uses `thread_local`; shared resources
    (`fp_trace`, BFD library) are protected by `std::mutex`; `localtime_r` replaces
    `std::localtime`. All threads currently write to a single shared trace file with serialized

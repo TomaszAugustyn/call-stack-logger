@@ -60,19 +60,21 @@ If the trace file cannot be opened, a warning is printed to `stderr`.
 
 ### Compiler-specific instrumentation ###
 
-Both GCC and Clang produce identical trace output, but use different mechanisms to exclude
-standard library functions from instrumentation:
+Both GCC and Clang use `-finstrument-functions` for user code and produce identical trace
+output. The `callstacklogger` library itself is compiled without instrumentation flags (all its
+functions have the `NO_INSTRUMENT` attribute). Standard library exclusion differs by compiler:
 
 | | GCC | Clang |
 |---|-----|-------|
-| **Instrumentation flag** | `-finstrument-functions` | `-finstrument-functions-after-inlining` |
 | **Std library exclusion** | Compile-time (`-finstrument-functions-exclude-file-list`) | Runtime (mangled name filter in `resolve_function_name()`) |
 
-Clang cannot use plain `-finstrument-functions` because it causes linker errors with constexpr
-libstdc++ functions that have no out-of-line definitions. The `-finstrument-functions-after-inlining`
-flag avoids this by instrumenting only after the inlining pass. Standard library functions that
-survive inlining are then filtered at runtime by checking the Itanium C++ ABI mangled name for
-known `std::`, `__gnu_cxx::`, and `__cxxabiv1::` prefixes.
+GCC auto-discovers std library header paths and excludes them at compile time. Clang does
+not support the exclude-file-list flag, so std library functions are filtered at runtime by
+checking the Itanium C++ ABI mangled name for known `std::`, `__gnu_cxx::`, and
+`__cxxabiv1::` prefixes.
+
+When linking `callstacklogger` into custom programs, compile your application code with
+`-finstrument-functions` (and GCC's exclude-file-list if using GCC) to enable tracing.
 
 ## :gear: Configuration ##
 

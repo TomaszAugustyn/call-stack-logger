@@ -67,6 +67,14 @@ else()
     set(INSTRUMENT_FLAGS "")
 endif()
 
+# Disable instrumentation: adds the preprocessor define and clears INSTRUMENT_FLAGS
+# so that no user code target receives -finstrument-functions.
+# Must be set before add_subdirectory so child scopes inherit the correct values.
+if(DISABLE_INSTRUMENTATION)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDISABLE_INSTRUMENTATION")
+    set(INSTRUMENT_FLAGS "")
+endif()
+
 # ============================================================================
 # Targets
 # ============================================================================
@@ -81,9 +89,4 @@ add_custom_target(run
 if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
-endif()
-
-# Disable instrumentation if necessary
-if(DISABLE_INSTRUMENTATION)
-    set(CMAKE_CXX_FLAGS "-g -Wall -DDISABLE_INSTRUMENTATION")
 endif()

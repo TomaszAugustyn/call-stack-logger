@@ -2,15 +2,14 @@
 
 # The traced test program is compiled WITH instrumentation, just like runDemo.
 # It links against callstacklogger and produces trace output when executed.
-# INSTRUMENT_FLAGS is set in src/CMakeLists.txt with compiler-specific flags.
 add_executable(traced_test_program traced_program.cpp)
 target_include_directories(traced_test_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(traced_test_program PRIVATE cxx_std_17)
 
-# Use the same INSTRUMENT_FLAGS as runDemo (set in src/CMakeLists.txt).
+# Use the same INSTRUMENT_FLAGS as runDemo (set in root CMakeLists.txt).
 target_compile_options(traced_test_program PRIVATE ${INSTRUMENT_FLAGS})
 
-# -rdynamic is set globally in src/CMakeLists.txt via add_link_options.
+# -rdynamic is set globally in root CMakeLists.txt via add_link_options.
 target_link_libraries(traced_test_program callstacklogger)
 
 if(COVERAGE)
