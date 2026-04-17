@@ -37,3 +37,6 @@ build/*
 
 # Project specific
 src/gccdump.s
+
+# Code coverage reports
+coverage-report/

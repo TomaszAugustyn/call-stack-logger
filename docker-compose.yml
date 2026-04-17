@@ -1,0 +1,40 @@
+services:
+  # Build the project (library + demo executable)
+  build:
+    build: .
+    volumes:
+      - .:/workspace
+    command: >
+      bash -c "
+        cmake -B build &&
+        cmake --build build -j$$(nproc)
+      "
+
+  # Build with tests and run all tests (unit + integration)
+  test:
+    build: .
+    volumes:
+      - .:/workspace
+    command: >
+      bash -c "
+        cmake -B build -DBUILD_TESTS=ON &&
+        cmake --build build -j$$(nproc) &&
+        cd build && ctest --output-on-failure
+      "
+
+  # Build with tests + coverage, run tests, generate HTML coverage report
+  coverage:
+    build: .
+    volumes:
+      - .:/workspace
+    command: >
+      bash -c "
+        cmake -B build -DBUILD_TESTS=ON -DCOVERAGE=ON -DCMAKE_BUILD_TYPE=Debug &&
+        cmake --build build -j$$(nproc) &&
+        cd build && ctest --output-on-failure &&
+        lcov --capture --directory . --output-file coverage.info --no-external &&
+        lcov --remove coverage.info '*/tests/*' '*/_deps/*' --output-file coverage.info &&
+        genhtml coverage.info --output-directory /workspace/coverage-report &&
+        echo '' &&
+        echo '=== Coverage report generated at coverage-report/index.html ==='
+      "
