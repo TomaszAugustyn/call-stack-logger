@@ -102,16 +102,66 @@ loading, so filtered functions avoid the expensive BFD symbol resolution entirel
 Applied to all functions in the instrumentation/resolution pipeline to prevent recursive
 instrumentation (which would cause infinite recursion and stack overflow).
 
-### Trace File Lifecycle
+### Trace File Lifecycle — Per-Thread Files
 
-`trace.cpp` uses GCC `__attribute__((constructor))` and `__attribute__((destructor))` to
-open the trace output file before `main()` runs and close it after the program exits. The
-output path is configurable via the `CSLG_OUTPUT_FILE` environment variable (defaults to
-`"trace.out"` in the current working directory). The file is opened with `O_NOFOLLOW` to
-prevent symlink-based attacks and uses `0644` permissions. All trace output is appended to
-this file. Each run writes a timestamped separator header so consecutive runs are
-distinguishable. Output is line-buffered (`_IOLBF`) for crash safety without per-call
-`fflush` overhead. If the file cannot be opened, a warning is printed to `stderr`.
+`trace.cpp` gives every thread its own independent trace file:
+- **Main thread** writes to `CSLG_OUTPUT_FILE` (fallback `trace.out`).
+- **Worker threads** write to `<base>_tid_<gettid>` where `<gettid>` is the Linux
+  kernel thread ID from `syscall(SYS_gettid)`.
+
+The main thread's file is opened eagerly in `trace_begin()` (via
+`__attribute__((constructor))`, before `main()` runs). Worker threads lazily open their
+file on the first `__cyg_profile_func_enter` call for that thread.
+
+All files are opened with `O_NOFOLLOW` (prevents symlink attacks) and `0600` permissions.
+Output is line-buffered (`_IOLBF`) for crash safety without per-call `fflush` overhead.
+
+Each file's header identifies the owning thread:
+```
+================================================================
+=== New trace run: 17-04-2026 15:18:12.255, thread ID: 12345 ===
+================================================================
+```
+
+The framing `=` lines are sized to match the middle line's length.
+
+**State organization** (`trace.cpp`):
+- `PerThreadState` struct: bundles all thread-local state — `in_instrumentation` guard
+  (declared first so it's destroyed last), `current_stack_depth`, `frame_resolved_stack`,
+  `frame_overflow_count`, `cached_tid`, and a `PerThreadTraceFile` RAII wrapper around
+  the thread's FILE*. One `thread_local` instance: `t_state`.
+- `TraceGlobals` struct: bundles process-wide state — `main_tid`, `base_path`,
+  `open_files_mutex`, `open_files` registry (vector of `PerThreadTraceFile*`),
+  and three atomic flags (`trace_ready`, `shutdown_started`, `shutdown_complete`).
+  Accessed via a Meyers-singleton function `g_trace()` because the struct contains
+  `std::string` and `std::vector` which need dynamic initialization — a plain file-scope
+  static would not be fully constructed when `trace_begin()` (a constructor function)
+  runs, causing a segfault on assignment.
+
+**Write path: zero cross-thread synchronization.** Each thread calls `get_thread_fp()`
+to obtain its own `FILE*` (lazy-opened on first use) and writes directly without any
+mutex. The only mutex (`open_files_mutex`) is taken only during open (once per thread)
+and during shutdown.
+
+**Shutdown coordination**:
+- `atexit(trace_shutdown)` registered in `trace_begin()` — runs BEFORE static
+  destructors (critical for Clang where those destructors may be instrumented).
+- `trace_shutdown()` drains the `open_files` registry: fclose every FILE* and null
+  the pointer. Idempotent via a CAS on `shutdown_started`.
+- Per-thread `PerThreadTraceFile` has a destructor that runs on thread exit. It takes
+  the `open_files_mutex`, re-checks `fp != nullptr` under the lock (handles a racing
+  shutdown), closes fp, and removes itself from the registry.
+- Double-close is impossible: both shutdown and the destructor null `fp` under the
+  same mutex and re-check after acquiring it.
+
+**Shutdown race (accepted trade-off):** a worker may be mid-`fprintf` when main runs
+`trace_shutdown`. Worst case is a torn final line or a silent write to a just-closed
+fd (`EBADF`, no crash). Line-buffered mode bounds corruption to at most one line per
+thread. Workers observe `shutdown_complete` inside `get_thread_fp()` within one cache
+coherence delay of the store. A per-file mutex was considered but rejected as
+overengineering for a debugging tool.
+
+`fork()` is not supported.
 
 ### Indentation / Nesting Depth
 
@@ -328,6 +378,9 @@ FetchContent (downloaded once, cached for offline use).
 Test pure/deterministic functions from the include headers:
 - `test_format.cpp` — tree indentation, address formatting, line numbers, buffer handling
 - `test_pretty_time.cpp` — timestamp format, length, milliseconds, `to_ms()` conversion
+- `test_trace_file_path.cpp` — `utils::resolve_base_trace_path()` (env var handling with
+  null/empty/absolute/relative/special-char paths) and `utils::build_trace_filename()`
+  (main vs worker thread suffix, small and LONG_MAX TIDs)
 
 ### Integration Tests (`tests/integration/`)
 
@@ -337,10 +390,27 @@ Test pure/deterministic functions from the include headers:
   function names resolved, nesting depth correct, caller info present, timestamp format,
   run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
   exact trace line count (catches std library pollution regressions)
-- Built as two targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`) and
-  `noninstrumented_test_program` (compiled WITHOUT — simulates `DISABLE_INSTRUMENTATION`).
+- Built as three targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
+  `noninstrumented_test_program` (compiled WITHOUT — simulates
+  `DISABLE_INSTRUMENTATION`), and `threaded_traced_test_program` (spawns 4 worker
+  threads via `std::thread`, exercises per-thread trace files).
   The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs the
   non-instrumented version and verifies zero trace entries are produced.
+- `threaded_traced_program.cpp` — spawns 4 worker threads (each calling a
+  `worker_top → worker_mid → worker_leaf` chain), then runs `main_only_post_join()`
+  on the main thread after join. Prints `MAIN_TID=<n>` to stdout so the test fixture
+  can verify the main file's header thread ID.
+- `ThreadedIntegrationTest` fixture (11 tests) uses `mkdtemp()` for a unique temp
+  directory per test, runs the threaded program with `CSLG_OUTPUT_FILE=<tmpdir>/…`,
+  enumerates all produced files, and verifies: main file exists, N=4 worker files
+  exist with distinct numeric TIDs in filenames, every file has the run-separator
+  header with the "thread ID: <n>" suffix, main's header contains the MAIN_TID from
+  stdout, each worker's header TID matches its filename suffix, worker files contain
+  the full `worker_top/mid/leaf` chain, main-only post-join calls appear only in
+  the main file (no cross-contamination), no std library pollution in worker files
+  (important on Clang — `std::thread` internals would explode the trace without
+  the runtime filter), all worker files have identical function entry counts
+  (proves deterministic per-thread traces).
 
 ### Running Tests
 
@@ -411,14 +481,21 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master`:
    `__cyg_profile_func_enter` prevents recursive instrumentation from within the resolve
    pipeline (critical for Clang). Shutdown uses `atexit()` to disable instrumentation before
    static destructors run.
-2. **Multithreaded-ready:** Per-thread call stack state uses `thread_local`; shared resources
-   (`fp_trace`, BFD library) are protected by `std::mutex`; `localtime_r` replaces
-   `std::localtime`. All threads currently write to a single shared trace file with serialized
-   access. **Per-thread trace files are a future enhancement** for full multi-threaded support.
-   `s_bfd_mutex` is held for the entire `resolve()` call (covering initialization, loading,
-   section iteration, and `bfd_find_nearest_line`) since BFD is not thread-safe.
-   `fp_trace` is double-checked (outside lock as fast path, inside lock as authoritative check)
-   to prevent TOCTOU races with `trace_end()`.
+2. **Full multi-threaded support:** Each thread writes to its own independent trace
+   file. Main → `CSLG_OUTPUT_FILE` (or `trace.out`); workers → `<base>_tid_<gettid>`
+   where `<gettid>` is the Linux kernel TID from `syscall(SYS_gettid)` (cached per
+   thread in `t_state.cached_tid` to avoid a syscall per trace call).
+   Per-thread state lives in the `PerThreadState` thread_local struct; per-thread
+   `FILE*` lives in an RAII `PerThreadTraceFile` member whose destructor runs on
+   thread exit. **Zero mutex on the hot write path** — each thread writes to its own
+   FILE*. `open_files_mutex` is taken only during open (once per thread) and during
+   shutdown (to drain the registry). `s_bfd_mutex` is still held for the entire
+   `resolve()` call because BFD is not thread-safe — but file I/O is fully parallel.
+   Shutdown race with in-flight writes is an accepted trade-off: worst case is one
+   torn line per thread, bounded by line-buffered output and the `shutdown_complete`
+   atomic flag that workers observe within one cache coherence delay. `fork()` is
+   not supported — child inherits parent's thread_local FILE* pointers.
+   `localtime_r` replaces `std::localtime` for thread-safe timestamp formatting.
 3. **Frame 6 constant:** The unwinder hard-codes frame depth 6 - must be recalculated if the
    call chain between `__cyg_profile_func_enter` and `unwind_nth_frame` changes.
    Verified correct after all Phase 1, Phase 2, and Phase 3 changes (no commit touched the

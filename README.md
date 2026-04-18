@@ -101,10 +101,34 @@ CSLG_OUTPUT_FILE=/tmp/my_trace.out ./build/runDemo
 
 ## :shield: Thread Safety ##
 
-Call Stack Logger is **multithreaded-ready**: per-thread call stack tracking uses `thread_local`
-storage, shared BFD operations and file output are protected by mutexes. All threads currently
-write to a single shared trace file with serialized access. Per-thread trace files are a planned
-future enhancement for full multi-threaded support.
+Call Stack Logger has **full multi-threaded support**: each thread writes to its own
+independent trace file. The main thread writes to `CSLG_OUTPUT_FILE` (or `trace.out`
+fallback), and every worker thread writes to `<base>_tid_<gettid>` — e.g., if
+`CSLG_OUTPUT_FILE=/tmp/prog.out`, a worker with kernel TID 12345 writes to
+`/tmp/prog.out_tid_12345`. The numeric TID matches what `ps -L`, `top -H`, and
+`/proc/<pid>/task/<tid>` show, making it easy to correlate a trace file with a specific
+thread.
+
+Each file starts with a header that includes the owning thread's ID:
+```
+================================================================
+=== New trace run: 17-04-2026 15:18:12.255, thread ID: 12345 ===
+================================================================
+```
+
+Per-thread state (`thread_local` call stack, re-entrancy guard) and per-thread `FILE*`
+mean the hot write path has **zero cross-thread synchronization** — each thread writes
+to its own file descriptor. BFD symbol resolution is still serialized by a mutex (BFD is
+not thread-safe), but file I/O is fully parallel.
+
+**Shutdown race (documented trade-off):** at program exit, the main thread closes all
+trace files. If a worker is mid-`fprintf` when this happens, the worst case is one
+torn line or one silent write to a just-closed fd (`EBADF`, no crash). Line-buffered
+mode bounds corruption to at most one line per thread. This is acceptable for a
+debugging tool and avoids a mutex on the hot write path.
+
+`fork()` is not supported — the child process inherits the parent's `thread_local`
+state including `FILE*` pointers pointing to inherited file descriptors.
 
 ## :test_tube: Testing ##
 
