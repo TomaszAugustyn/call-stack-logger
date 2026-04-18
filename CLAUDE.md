@@ -332,10 +332,15 @@ Test pure/deterministic functions from the include headers:
 ### Integration Tests (`tests/integration/`)
 
 - `traced_program.cpp` — small instrumented program with varied call patterns (free functions,
-  static methods, templates, constructors, inline functions)
+  static methods, templates, constructors, inline functions, STL usage via `func_with_stl()`)
 - `test_integration.cpp` — executes `traced_test_program`, parses trace output, verifies:
   function names resolved, nesting depth correct, caller info present, timestamp format,
-  run separator, CSLG_OUTPUT_FILE redirection
+  run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
+  exact trace line count (catches std library pollution regressions)
+- Built as two targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`) and
+  `noninstrumented_test_program` (compiled WITHOUT — simulates `DISABLE_INSTRUMENTATION`).
+  The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs the
+  non-instrumented version and verifies zero trace entries are produced.
 
 ### Running Tests
 
@@ -347,13 +352,22 @@ ctest --output-on-failure
 
 ### Code Coverage
 
+Requires `lcov` 2.0+ (Ubuntu 24.04, Fedora 40+). Older lcov versions use different flags.
+
 ```bash
-cmake -DBUILD_TESTS=ON -DCOVERAGE=ON ..
-make
-ctest --output-on-failure
-lcov --capture --directory . --output-file coverage.info --no-external
+cmake -B build -DBUILD_TESTS=ON -DCOVERAGE=ON
+cmake --build build
+cd build && ctest --output-on-failure && cd ..
+lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch
+lcov --remove coverage.info '/usr/*' '*/tests/*' '*/_deps/*' --output-file coverage.info
 genhtml coverage.info --output-directory coverage-report
 ```
+
+Notes:
+- `--ignore-errors mismatch` bypasses lcov 2.0 strict checks that fail on gtest code.
+- `--no-external` is NOT used: in lcov 2.0 it uses `--directory` as the base for
+  "external" checks, which would wrongly exclude our `src/` files (outside `build/`).
+  Instead, explicitly filter system headers via `--remove '/usr/*'`.
 
 ## CI/CD
 

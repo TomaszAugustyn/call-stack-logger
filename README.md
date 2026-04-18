@@ -120,12 +120,13 @@ make
 ctest --output-on-failure
 ```
 
-To generate a code coverage report (requires `lcov`):
+To generate a code coverage report (requires `lcov` 2.0+):
 ```bash
-cmake -DBUILD_TESTS=ON -DCOVERAGE=ON ..
-make
-ctest --output-on-failure
-lcov --capture --directory . --output-file coverage.info --no-external
+cmake -B build -DBUILD_TESTS=ON -DCOVERAGE=ON
+cmake --build build
+cd build && ctest --output-on-failure && cd ..
+lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch
+lcov --remove coverage.info '/usr/*' '*/tests/*' '*/_deps/*' --output-file coverage.info
 genhtml coverage.info --output-directory coverage-report
 # Open coverage-report/index.html in a browser
 ```
