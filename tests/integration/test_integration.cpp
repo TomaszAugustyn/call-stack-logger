@@ -15,13 +15,18 @@
  * correctly end-to-end.
  */
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <dirent.h>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -32,6 +37,9 @@
 #endif
 #ifndef NONINSTRUMENTED_PROGRAM_PATH
     #error "NONINSTRUMENTED_PROGRAM_PATH must be defined by CMake"
+#endif
+#ifndef THREADED_TRACED_PROGRAM_PATH
+    #error "THREADED_TRACED_PROGRAM_PATH must be defined by CMake"
 #endif
 
 namespace {
@@ -289,4 +297,267 @@ TEST(DisableInstrumentationTest, NoTraceOutputWithoutInstrumentation) {
             << entry_count << ". DISABLE_INSTRUMENTATION may be broken.";
 
     unlink(tmp_path);
+}
+
+// ============================================================================
+// Multi-threaded integration tests — exercise per-thread trace files.
+// The threaded traced program spawns 4 worker threads, each producing its own
+// <base>_tid_<tid> file. Main produces <base> (no _tid_ suffix).
+// ============================================================================
+
+namespace {
+
+// Remove a directory and all its contents (one level deep — we don't nest).
+void remove_dir_tree(const std::string& dir) {
+    DIR* d = opendir(dir.c_str());
+    if (d == nullptr) return;
+    struct dirent* entry;
+    while ((entry = readdir(d)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+        std::string full = dir + "/" + name;
+        unlink(full.c_str());
+    }
+    closedir(d);
+    rmdir(dir.c_str());
+}
+
+// List regular files in a directory (non-recursive).
+std::vector<std::string> list_files_in(const std::string& dir) {
+    std::vector<std::string> files;
+    DIR* d = opendir(dir.c_str());
+    if (d == nullptr) return files;
+    struct dirent* entry;
+    while ((entry = readdir(d)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+        files.push_back(name);
+    }
+    closedir(d);
+    return files;
+}
+
+// Extract the numeric TID suffix from a filename matching "<base>_tid_<n>".
+// Returns -1 if the pattern doesn't match.
+long parse_tid_suffix(const std::string& filename, const std::string& base_name) {
+    const std::string marker = base_name + "_tid_";
+    if (filename.compare(0, marker.size(), marker) != 0) return -1;
+    const std::string tail = filename.substr(marker.size());
+    if (tail.empty()) return -1;
+    for (char c : tail) {
+        if (c < '0' || c > '9') return -1;
+    }
+    return std::stol(tail);
+}
+
+} // namespace
+
+class ThreadedIntegrationTest : public ::testing::Test {
+protected:
+    std::string tmpdir;
+    std::string base_filename = "thread_trace.out";
+    std::string main_trace_path;
+    long main_tid_from_stdout = -1;
+
+    // filename -> full file content (per file)
+    std::map<std::string, std::string> contents;
+    // filename -> vector of lines
+    std::map<std::string, std::vector<std::string>> lines_by_file;
+    // All worker filenames (everything matching <base>_tid_<n>)
+    std::vector<std::string> worker_filenames;
+
+    void SetUp() override {
+        // Unique temp directory per test (mkdtemp) so we don't collide with prior runs.
+        char tmpl[] = "/tmp/cslg_threaded_XXXXXX";
+        char* d = mkdtemp(tmpl);
+        ASSERT_NE(d, nullptr) << "mkdtemp failed";
+        tmpdir = d;
+        main_trace_path = tmpdir + "/" + base_filename;
+
+        // Run the threaded program; capture stdout (which prints MAIN_TID=<n>).
+        const std::string stdout_path = tmpdir + "/stdout.txt";
+        std::string cmd = "CSLG_OUTPUT_FILE=\"" + main_trace_path
+                        + "\" \"" + THREADED_TRACED_PROGRAM_PATH + "\" > \""
+                        + stdout_path + "\"";
+        int ret = system(cmd.c_str());
+        ASSERT_EQ(ret, 0) << "threaded_traced_test_program failed, exit=" << ret;
+
+        // Parse MAIN_TID=<n> from stdout.
+        std::ifstream sifs(stdout_path);
+        std::string sline;
+        while (std::getline(sifs, sline)) {
+            const std::string marker = "MAIN_TID=";
+            if (sline.compare(0, marker.size(), marker) == 0) {
+                main_tid_from_stdout = std::stol(sline.substr(marker.size()));
+                break;
+            }
+        }
+        sifs.close();
+        ASSERT_GT(main_tid_from_stdout, 0)
+                << "Could not parse MAIN_TID from program stdout";
+
+        // Enumerate trace files in the tmpdir and read them all.
+        for (const std::string& name : list_files_in(tmpdir)) {
+            if (name == base_filename) {
+                // main trace file
+            } else if (parse_tid_suffix(name, base_filename) >= 0) {
+                worker_filenames.push_back(name);
+            } else {
+                continue;  // skip stdout.txt, etc.
+            }
+            std::ifstream ifs(tmpdir + "/" + name);
+            std::string content((std::istreambuf_iterator<char>(ifs)),
+                                 std::istreambuf_iterator<char>());
+            contents[name] = content;
+            std::istringstream iss(content);
+            std::vector<std::string> v;
+            std::string line;
+            while (std::getline(iss, line)) v.push_back(line);
+            lines_by_file[name] = std::move(v);
+        }
+    }
+
+    void TearDown() override {
+        if (!tmpdir.empty()) {
+            remove_dir_tree(tmpdir);
+        }
+    }
+};
+
+TEST_F(ThreadedIntegrationTest, MainFileExists) {
+    ASSERT_TRUE(contents.count(base_filename) > 0)
+            << "Main trace file '" << base_filename << "' not found in " << tmpdir;
+    EXPECT_FALSE(contents[base_filename].empty()) << "Main trace file is empty";
+}
+
+TEST_F(ThreadedIntegrationTest, WorkerFilesExist) {
+    // Program spawns 4 worker threads; expect 4 worker files.
+    EXPECT_EQ(worker_filenames.size(), 4u)
+            << "Expected 4 worker files, got " << worker_filenames.size();
+}
+
+TEST_F(ThreadedIntegrationTest, WorkerFilenamesContainDistinctTids) {
+    std::vector<long> tids;
+    for (const auto& name : worker_filenames) {
+        long tid = parse_tid_suffix(name, base_filename);
+        ASSERT_GT(tid, 0) << "Worker filename TID suffix invalid: " << name;
+        tids.push_back(tid);
+    }
+    std::sort(tids.begin(), tids.end());
+    EXPECT_TRUE(std::unique(tids.begin(), tids.end()) == tids.end())
+            << "Duplicate TIDs in worker filenames";
+}
+
+TEST_F(ThreadedIntegrationTest, EachFileHasRunSeparator) {
+    // Main file + all worker files must contain the run-separator header with
+    // the "thread ID: <n>" suffix.
+    std::regex header_pattern(R"(=== New trace run: .+, thread ID: \d+ ===)");
+    ASSERT_TRUE(contents.count(base_filename) > 0);
+    EXPECT_TRUE(std::regex_search(contents[base_filename], header_pattern))
+            << "Main file missing header: " << base_filename;
+    for (const auto& name : worker_filenames) {
+        EXPECT_TRUE(std::regex_search(contents[name], header_pattern))
+                << "Worker file missing header: " << name;
+    }
+}
+
+TEST_F(ThreadedIntegrationTest, MainHeaderContainsMainTid) {
+    // Main file's header must contain "thread ID: <main_tid_from_stdout>".
+    ASSERT_TRUE(contents.count(base_filename) > 0);
+    std::string expected = "thread ID: " + std::to_string(main_tid_from_stdout);
+    EXPECT_NE(contents[base_filename].find(expected), std::string::npos)
+            << "Main file header does not contain expected main TID. "
+            << "Expected substring: '" << expected << "'";
+}
+
+TEST_F(ThreadedIntegrationTest, WorkerHeaderTidMatchesFilename) {
+    // Each worker file's _tid_<n> filename suffix must match the "thread ID: <n>"
+    // value in its own header — proves filename and in-file identification agree.
+    for (const auto& name : worker_filenames) {
+        long file_tid = parse_tid_suffix(name, base_filename);
+        std::string expected = "thread ID: " + std::to_string(file_tid);
+        EXPECT_NE(contents[name].find(expected), std::string::npos)
+                << "Worker file " << name << " header TID doesn't match filename ("
+                << file_tid << "). Expected substring: '" << expected << "'";
+    }
+}
+
+TEST_F(ThreadedIntegrationTest, EachFileHasValidTimestampFormat) {
+    // Same timestamp regex as single-threaded test, applied to every file.
+    std::regex ts_pattern(R"(\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\])");
+    // Main may have the header but no function entries if its tracing only covers
+    // main_only_post_join(); we check for the timestamp on the entry line instead.
+    auto assert_has_ts = [&](const std::string& file_name) {
+        bool found = false;
+        for (const auto& line : lines_by_file[file_name]) {
+            if (std::regex_search(line, ts_pattern)) { found = true; break; }
+        }
+        EXPECT_TRUE(found) << "File " << file_name << " has no line with expected timestamp format";
+    };
+    assert_has_ts(base_filename);
+    for (const auto& name : worker_filenames) assert_has_ts(name);
+}
+
+TEST_F(ThreadedIntegrationTest, MainFilePostJoinCalls) {
+    // main_only_post_join() is called only from main after all workers joined.
+    // It must appear in the main file.
+    ASSERT_TRUE(contents.count(base_filename) > 0);
+    EXPECT_NE(contents[base_filename].find("main_only_post_join"), std::string::npos)
+            << "Main file missing main_only_post_join";
+}
+
+TEST_F(ThreadedIntegrationTest, WorkerFilesDoNotHaveMainPostJoinContent) {
+    // main_only_post_join is main-only; must NOT appear in any worker file.
+    for (const auto& name : worker_filenames) {
+        EXPECT_EQ(contents[name].find("main_only_post_join"), std::string::npos)
+                << "Worker file " << name << " unexpectedly contains main_only_post_join";
+    }
+}
+
+TEST_F(ThreadedIntegrationTest, WorkerFilesContainWorkerCallChain) {
+    // Each worker file should contain the worker_top / worker_mid / worker_leaf chain.
+    for (const auto& name : worker_filenames) {
+        EXPECT_NE(contents[name].find("worker_top"), std::string::npos)
+                << "Worker file " << name << " missing worker_top";
+        EXPECT_NE(contents[name].find("worker_mid"), std::string::npos)
+                << "Worker file " << name << " missing worker_mid";
+        EXPECT_NE(contents[name].find("worker_leaf"), std::string::npos)
+                << "Worker file " << name << " missing worker_leaf";
+    }
+}
+
+TEST_F(ThreadedIntegrationTest, NoStdPollutionInWorkerFiles) {
+    // Verify the runtime std library filter works per-file (critical: std::thread
+    // internals on Clang would explode every worker trace without this).
+    for (const auto& name : worker_filenames) {
+        for (const auto& line : lines_by_file[name]) {
+            if (line.find("|_") == std::string::npos) continue;
+            EXPECT_EQ(line.find("|_ std::"), std::string::npos)
+                    << "std:: leaked in worker " << name << ": " << line;
+            EXPECT_EQ(line.find("|_ __gnu_cxx::"), std::string::npos)
+                    << "__gnu_cxx:: leaked in worker " << name << ": " << line;
+            EXPECT_EQ(line.find("|_ __cxxabiv1::"), std::string::npos)
+                    << "__cxxabiv1:: leaked in worker " << name << ": " << line;
+        }
+    }
+}
+
+TEST_F(ThreadedIntegrationTest, AllWorkerFilesHaveEqualUserFunctionCount) {
+    // Every worker runs the same call chain (worker_top → worker_mid → worker_leaf),
+    // so every worker file should have the same number of function entries.
+    std::vector<int> counts;
+    for (const auto& name : worker_filenames) {
+        int c = 0;
+        for (const auto& line : lines_by_file[name]) {
+            if (line.find("(called from:") != std::string::npos) c++;
+        }
+        counts.push_back(c);
+    }
+    ASSERT_FALSE(counts.empty());
+    for (size_t i = 1; i < counts.size(); ++i) {
+        EXPECT_EQ(counts[i], counts[0])
+                << "Worker file " << worker_filenames[i] << " has "
+                << counts[i] << " entries, but " << worker_filenames[0]
+                << " has " << counts[0];
+    }
 }

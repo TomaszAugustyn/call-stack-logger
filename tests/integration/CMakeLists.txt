@@ -39,6 +39,20 @@ if(COVERAGE)
     target_link_options(noninstrumented_test_program PRIVATE --coverage)
 endif()
 
+# Multi-threaded traced test program. Exercises per-thread trace files by spawning
+# worker threads, each of which produces its own <base>_tid_<tid> file.
+find_package(Threads REQUIRED)
+add_executable(threaded_traced_test_program threaded_traced_program.cpp)
+target_include_directories(threaded_traced_test_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_features(threaded_traced_test_program PRIVATE cxx_std_17)
+target_compile_options(threaded_traced_test_program PRIVATE ${INSTRUMENT_FLAGS})
+target_link_libraries(threaded_traced_test_program callstacklogger Threads::Threads)
+
+if(COVERAGE)
+    target_compile_options(threaded_traced_test_program PRIVATE --coverage)
+    target_link_options(threaded_traced_test_program PRIVATE --coverage)
+endif()
+
 # The integration test runner executes traced_test_program and parses output.
 # Compiled WITHOUT instrumentation — just gtest code.
 add_executable(integration_tests test_integration.cpp)
@@ -46,10 +60,11 @@ target_include_directories(integration_tests PRIVATE ${CMAKE_SOURCE_DIR}/include
 target_compile_features(integration_tests PRIVATE cxx_std_17)
 target_link_libraries(integration_tests gtest_main)
 
-# Pass the traced program path so tests can find and execute it
+# Pass the traced program paths so tests can find and execute them
 target_compile_definitions(integration_tests PRIVATE
     TRACED_PROGRAM_PATH="$<TARGET_FILE:traced_test_program>"
     NONINSTRUMENTED_PROGRAM_PATH="$<TARGET_FILE:noninstrumented_test_program>"
+    THREADED_TRACED_PROGRAM_PATH="$<TARGET_FILE:threaded_traced_test_program>"
 )
 
 if(COVERAGE)
