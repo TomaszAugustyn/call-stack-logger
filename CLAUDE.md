@@ -219,6 +219,7 @@ call-stack-logger/
 |   |-- callStack.h             # bfdResolver struct, get_call_stack(), resolve() API
 |   |-- format.h                # utils::format() - formats ResolvedFrame into string
 |   |-- prettyTime.h            # utils::pretty_time() - timestamp with milliseconds
+|   |-- traceFilePath.h         # utils::resolve_base_trace_path + build_trace_filename
 |   |-- types.h                 # ResolvedFrame struct definition
 |   |-- unwinder.h              # FrameUnwinder template, Callback, unwind_nth_frame()
 |-- src/
@@ -233,10 +234,12 @@ call-stack-logger/
 |   |   |-- CMakeLists.txt      # Unit test executable (no instrumentation)
 |   |   |-- test_format.cpp     # Tests for utils::format()
 |   |   |-- test_pretty_time.cpp # Tests for utils::pretty_time() and to_ms()
+|   |   |-- test_trace_file_path.cpp # Tests for resolve_base_trace_path + build_trace_filename
 |   |-- integration/
-|       |-- CMakeLists.txt      # Traced program + integration test runner
-|       |-- traced_program.cpp  # Small instrumented program for testing
-|       |-- test_integration.cpp # Tests that run traced_program, parse trace output
+|       |-- CMakeLists.txt      # Traced programs + integration test runner
+|       |-- traced_program.cpp  # Instrumented single-threaded program for testing
+|       |-- threaded_traced_program.cpp # Instrumented multi-threaded program (per-thread files)
+|       |-- test_integration.cpp # Single-threaded + multi-threaded integration tests
 |-- lib/                        # Empty dir (placeholder for external libs)
 |   |-- .gitignore              # Keeps dir in git but ignores contents
 |-- misc/
@@ -273,6 +276,16 @@ log line with optional address, tree indentation, function name, and caller loca
 ### `include/prettyTime.h`
 `utils::pretty_time()` returns current time as `"DD-MM-YYYY HH:MM:SS.mmm"` string.
 **Note:** Uses `std::localtime()` which is not thread-safe.
+
+### `include/traceFilePath.h`
+Two pure `NO_INSTRUMENT inline` helpers used by `trace.cpp` to compute per-thread trace
+file paths:
+- `utils::resolve_base_trace_path(const char* env_value)` — returns `env_value` if
+  non-null/non-empty, else `DEFAULT_TRACE_FILENAME` ("trace.out")
+- `utils::build_trace_filename(base, is_main, tid)` — returns `base` unchanged for the
+  main thread, or `base + "_tid_<tid>"` for worker threads
+
+Pure: no globals, no I/O, no syscalls — unit-tested in `test_trace_file_path.cpp`.
 
 ### `src/callStack.cpp`
 The core implementation. Key functions:

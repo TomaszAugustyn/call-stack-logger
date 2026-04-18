@@ -92,11 +92,13 @@ When linking `callstacklogger` into custom programs, compile your application co
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CSLG_OUTPUT_FILE` | `trace.out` | Path to the trace output file |
+| `CSLG_OUTPUT_FILE` | `trace.out` | Path to the trace output file for the main thread. Worker threads append `_tid_<gettid>` to this path (e.g., `/tmp/my_trace.out_tid_12345`). |
 
 Example:
 ```bash
 CSLG_OUTPUT_FILE=/tmp/my_trace.out ./build/runDemo
+# Single-threaded program → /tmp/my_trace.out
+# Multi-threaded program → /tmp/my_trace.out + /tmp/my_trace.out_tid_<N> per worker
 ```
 
 ## :shield: Thread Safety ##
