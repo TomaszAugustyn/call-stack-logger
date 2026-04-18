@@ -11,6 +11,7 @@
 #include "format.h"
 #include "prettyTime.h"
 #include "traceFilePath.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <fcntl.h>
@@ -30,14 +31,16 @@
 // This value can be increased if needed — the memory cost is MAX_TRACE_DEPTH bytes per thread.
 static constexpr int MAX_TRACE_DEPTH = 2048;
 
-// Per-thread RAII wrapper around the thread's FILE*. Shutdown coordination (destructor
-// and registry interaction) is added in step 4; for now it just owns the FILE*.
+// Per-thread RAII wrapper around the thread's FILE*. On thread exit, the destructor
+// closes the file and removes this instance from the global registry. Coordinates
+// with trace_shutdown() via g_trace().open_files_mutex to prevent double-close.
 struct PerThreadTraceFile {
     FILE* fp = nullptr;
     bool open_attempted = false;   // avoid retry after open failure
-    bool registered = false;       // set true once added to g_trace.open_files
+    bool registered = false;       // set true once added to g_trace().open_files
 
     NO_INSTRUMENT PerThreadTraceFile() = default;
+    NO_INSTRUMENT ~PerThreadTraceFile();   // defined after TraceGlobals
 
     PerThreadTraceFile(const PerThreadTraceFile&) = delete;
     PerThreadTraceFile& operator=(const PerThreadTraceFile&) = delete;
@@ -123,9 +126,10 @@ void write_run_separator_header(FILE* fp, pid_t tid) {
 
 // Opens this thread's trace file (lazy for workers, eager for main via trace_begin).
 // Idempotent: if open has already been attempted (success or failure), returns
-// immediately. On success, installs the FILE*, switches to line-buffered mode, and
-// writes the run-separator header. Registry insertion into g_trace.open_files is
-// added in step 4 (shutdown coordination).
+// immediately. On success, installs the FILE*, switches to line-buffered mode, writes
+// the run-separator header, and registers this PerThreadTraceFile* in the global
+// open_files registry so trace_shutdown() can close it if the thread is still alive
+// at program exit.
 NO_INSTRUMENT
 void open_this_thread_file(PerThreadState& self) {
     if (self.trace_file.open_attempted) {
@@ -134,8 +138,9 @@ void open_this_thread_file(PerThreadState& self) {
     self.trace_file.open_attempted = true;
 
     const pid_t tid = current_tid();
-    const bool is_main = (tid == g_trace().main_tid);
-    const std::string path = utils::build_trace_filename(g_trace().base_path, is_main, tid);
+    TraceGlobals& g = g_trace();
+    const bool is_main = (tid == g.main_tid);
+    const std::string path = utils::build_trace_filename(g.base_path, is_main, tid);
 
     // Same security-hardening flags as the original trace_begin(): O_NOFOLLOW to
     // prevent symlink attacks, 0600 permissions so traces (which can leak internal
@@ -158,6 +163,21 @@ void open_this_thread_file(PerThreadState& self) {
     setvbuf(fp, NULL, _IOLBF, 0);
     self.trace_file.fp = fp;
     write_run_separator_header(fp, tid);
+
+    // Register this file so trace_shutdown() can close it at program exit if the
+    // thread is still alive. If shutdown has already completed (edge case: a new
+    // thread starts tracing after atexit fired), close immediately instead of
+    // leaking the fd.
+    {
+        std::lock_guard<std::mutex> lock(g.open_files_mutex);
+        if (g.shutdown_complete.load(std::memory_order_relaxed)) {
+            fclose(fp);
+            self.trace_file.fp = nullptr;
+            return;
+        }
+        g.open_files.push_back(&self.trace_file);
+        self.trace_file.registered = true;
+    }
 }
 
 // Returns the FILE* for the current thread, opening it on first use. Returns nullptr
@@ -179,9 +199,9 @@ FILE* get_thread_fp() {
 
 } // namespace
 
-// Closes the trace file(s) and permanently disables instrumentation. Called via
-// atexit() so it runs BEFORE static destructors (like s_bfds). Step 4 extends this to
-// iterate the per-thread file registry.
+// Closes all per-thread trace files and permanently disables instrumentation.
+// Called via atexit() so it runs BEFORE static destructors (like s_bfds). Idempotent
+// via g.shutdown_started CAS.
 //
 // Shutdown race: a worker may be mid-fprintf when this runs. We accept the race —
 // worst case is a torn final line or a silent write to a just-closed fd (EBADF, no
@@ -192,13 +212,67 @@ NO_INSTRUMENT
 static void trace_shutdown() {
     t_state.in_instrumentation = true;  // Permanently disable on main — never cleared
 
-    // Close just the main thread's file for now. Step 4 adds full registry drain.
-    if (t_state.trace_file.fp != nullptr) {
-        fclose(t_state.trace_file.fp);
-        t_state.trace_file.fp = nullptr;
+    TraceGlobals& g = g_trace();
+
+    // Idempotent: if another call already started shutdown, do nothing.
+    bool expected = false;
+    if (!g.shutdown_started.compare_exchange_strong(expected, true)) {
+        return;
     }
 
-    g_trace().shutdown_complete.store(true, std::memory_order_release);
+    // Drain the registry: close every file still open. Null the fp so late TLS
+    // destructors (for threads that exit after this point) see null and skip.
+    {
+        std::lock_guard<std::mutex> lock(g.open_files_mutex);
+        for (PerThreadTraceFile* f : g.open_files) {
+            if (f != nullptr && f->fp != nullptr) {
+                fclose(f->fp);
+                f->fp = nullptr;
+            }
+        }
+        g.open_files.clear();
+    }
+
+    g.shutdown_complete.store(true, std::memory_order_release);
+}
+
+// PerThreadTraceFile destructor: closes this thread's file when the thread exits.
+// Coordinates with trace_shutdown() via open_files_mutex and the fp null-check:
+//   - If the thread exits BEFORE shutdown: this destructor closes fp, removes self
+//     from registry.
+//   - If the thread exits AFTER shutdown: trace_shutdown() already closed fp and
+//     nulled it, and cleared the registry. This destructor sees fp == nullptr and
+//     does nothing — no double-close.
+NO_INSTRUMENT
+PerThreadTraceFile::~PerThreadTraceFile() {
+    // Set the re-entrancy guard permanently — the thread is about to die, and any
+    // instrumented callee inside fclose/erase (possible with Clang) must be a no-op.
+    t_state.in_instrumentation = true;
+
+    if (fp == nullptr) {
+        return;  // fast path — either never opened or already closed by shutdown
+    }
+
+    TraceGlobals& g = g_trace();
+    std::lock_guard<std::mutex> lock(g.open_files_mutex);
+
+    // Re-check under lock: trace_shutdown() may have raced and already closed us.
+    if (fp == nullptr) {
+        return;
+    }
+
+    fclose(fp);
+    fp = nullptr;
+
+    if (registered) {
+        // Erase self from the registry. We hold a pointer to this, but after this
+        // destructor the storage is gone, so leaving a dangling pointer would be bad.
+        auto it = std::find(g.open_files.begin(), g.open_files.end(), this);
+        if (it != g.open_files.end()) {
+            g.open_files.erase(it);
+        }
+        registered = false;
+    }
 }
 
 __attribute__ ((constructor))
