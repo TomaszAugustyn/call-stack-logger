@@ -39,6 +39,18 @@ if(COVERAGE)
     target_link_options(noninstrumented_test_program PRIVATE --coverage)
 endif()
 
+# Exercises the public get_call_stack() API (on-demand stack capture).
+# Compiled WITHOUT INSTRUMENT_FLAGS — it calls the API directly, no hooks needed.
+add_executable(callstack_api_program callstack_api_program.cpp)
+target_include_directories(callstack_api_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_features(callstack_api_program PRIVATE cxx_std_17)
+target_link_libraries(callstack_api_program callstacklogger)
+
+if(COVERAGE)
+    target_compile_options(callstack_api_program PRIVATE --coverage)
+    target_link_options(callstack_api_program PRIVATE --coverage)
+endif()
+
 # Multi-threaded traced test program. Exercises per-thread trace files by spawning
 # worker threads, each of which produces its own <base>_tid_<tid> file.
 find_package(Threads REQUIRED)
@@ -65,6 +77,7 @@ target_compile_definitions(integration_tests PRIVATE
     TRACED_PROGRAM_PATH="$<TARGET_FILE:traced_test_program>"
     NONINSTRUMENTED_PROGRAM_PATH="$<TARGET_FILE:noninstrumented_test_program>"
     THREADED_TRACED_PROGRAM_PATH="$<TARGET_FILE:threaded_traced_test_program>"
+    CALLSTACK_API_PROGRAM_PATH="$<TARGET_FILE:callstack_api_program>"
 )
 
 if(COVERAGE)

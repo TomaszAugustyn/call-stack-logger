@@ -41,6 +41,9 @@
 #ifndef THREADED_TRACED_PROGRAM_PATH
     #error "THREADED_TRACED_PROGRAM_PATH must be defined by CMake"
 #endif
+#ifndef CALLSTACK_API_PROGRAM_PATH
+    #error "CALLSTACK_API_PROGRAM_PATH must be defined by CMake"
+#endif
 
 namespace {
 
@@ -559,5 +562,89 @@ TEST_F(ThreadedIntegrationTest, AllWorkerFilesHaveEqualUserFunctionCount) {
                 << "Worker file " << worker_filenames[i] << " has "
                 << counts[i] << " entries, but " << worker_filenames[0]
                 << " has " << counts[0];
+    }
+}
+
+// ============================================================================
+// Graceful-degradation test — CSLG_OUTPUT_FILE points to an unwritable path.
+// The program must still run to completion and emit a stderr warning.
+// ============================================================================
+
+TEST(BadOutputPathTest, OpenFailureIsNonFatalAndWarns) {
+    // Use a path inside a non-existent directory — open() returns ENOENT.
+    // The traced program must run normally and emit a stderr warning rather
+    // than crashing or blocking indefinitely.
+    char stderr_tmpl[] = "/tmp/cslg_bad_stderr_XXXXXX";
+    int fd = mkstemp(stderr_tmpl);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    const std::string bad_path = "/nonexistent_cslg_dir/trace.out";
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + bad_path + "\" \""
+                    + TRACED_PROGRAM_PATH + "\" 2> \"" + stderr_tmpl + "\"";
+    int ret = system(cmd.c_str());
+    EXPECT_EQ(ret, 0) << "traced_test_program exited non-zero with bad path: " << ret;
+
+    std::ifstream ifs(stderr_tmpl);
+    std::string err_content((std::istreambuf_iterator<char>(ifs)),
+                              std::istreambuf_iterator<char>());
+    ifs.close();
+    unlink(stderr_tmpl);
+
+    // Expect the warning emitted by open_this_thread_file() on open() failure.
+    EXPECT_NE(err_content.find("[call-stack-logger] WARNING"), std::string::npos)
+            << "Expected stderr warning on open failure. stderr was:\n" << err_content;
+    EXPECT_NE(err_content.find(bad_path), std::string::npos)
+            << "Expected the attempted path in the warning. stderr was:\n" << err_content;
+
+    // No trace file should have been created at the bad path (the parent
+    // directory doesn't exist, so nothing to clean up).
+}
+
+// ============================================================================
+// Public API test — exercises instrumentation::get_call_stack()
+// ============================================================================
+
+// Run the callstack API program, capture stdout, and verify the emitted stack
+// contains the expected ancestor functions.
+TEST(CallStackApiTest, GetCallStackResolvesAncestors) {
+    char stdout_tmpl[] = "/tmp/cslg_cs_stdout_XXXXXX";
+    int fd = mkstemp(stdout_tmpl);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    std::string cmd = std::string("\"") + CALLSTACK_API_PROGRAM_PATH
+                    + "\" > \"" + stdout_tmpl + "\"";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "callstack_api_program failed, exit=" << ret;
+
+    std::ifstream ifs(stdout_tmpl);
+    std::string content((std::istreambuf_iterator<char>(ifs)),
+                         std::istreambuf_iterator<char>());
+    ifs.close();
+    unlink(stdout_tmpl);
+
+    // The program prints each frame as "FRAME: <name>". Verify the three
+    // ancestor functions are present in order of appearance in the stack
+    // (get_call_stack() returns innermost → outermost).
+    auto pos_leaf = content.find("FRAME: print_stack_from_leaf");
+    auto pos_mid  = content.find("FRAME: callstack_mid");
+    auto pos_top  = content.find("FRAME: callstack_top");
+    auto pos_main = content.find("FRAME: main");
+
+    EXPECT_NE(pos_leaf, std::string::npos) << "print_stack_from_leaf not in stack. Output:\n" << content;
+    EXPECT_NE(pos_mid,  std::string::npos) << "callstack_mid not in stack";
+    EXPECT_NE(pos_top,  std::string::npos) << "callstack_top not in stack";
+    EXPECT_NE(pos_main, std::string::npos) << "main not in stack";
+
+    // Ordering (innermost first):
+    if (pos_leaf != std::string::npos && pos_mid != std::string::npos) {
+        EXPECT_LT(pos_leaf, pos_mid) << "Expected leaf to appear before mid";
+    }
+    if (pos_mid != std::string::npos && pos_top != std::string::npos) {
+        EXPECT_LT(pos_mid, pos_top) << "Expected mid to appear before top";
+    }
+    if (pos_top != std::string::npos && pos_main != std::string::npos) {
+        EXPECT_LT(pos_top, pos_main) << "Expected top to appear before main";
     }
 }
