@@ -1,4 +1,13 @@
 /*
+ * Copyright © 2020-2026 Tomasz Augustyn
+ * All rights reserved.
+ *
+ * Project Name: Call Stack Logger
+ * GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+ * Contact Email: t.augustyn@poczta.fm
+ */
+
+/*
  * Unit tests for utils::format() in include/format.h
  *
  * Tests the trace line formatting function with various ResolvedFrame

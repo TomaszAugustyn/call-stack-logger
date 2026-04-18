@@ -1,3 +1,11 @@
+#
+# Copyright © 2020-2026 Tomasz Augustyn
+# All rights reserved.
+#
+# Project Name: Call Stack Logger
+# GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+# Contact Email: t.augustyn@poczta.fm
+
 # Fetch Google Test framework.
 # Downloaded once during cmake configuration and cached in build/_deps/.
 # Subsequent builds work fully offline.

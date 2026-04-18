@@ -1,4 +1,13 @@
 /*
+ * Copyright © 2020-2026 Tomasz Augustyn
+ * All rights reserved.
+ *
+ * Project Name: Call Stack Logger
+ * GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+ * Contact Email: t.augustyn@poczta.fm
+ */
+
+/*
  * Traced test program — compiled WITH -finstrument-functions.
  *
  * Contains a variety of call patterns to exercise the instrumentation:

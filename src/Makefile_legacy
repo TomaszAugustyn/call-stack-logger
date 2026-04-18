@@ -1,5 +1,5 @@
 #
-# Copyright © 2020-2023 Tomasz Augustyn
+# Copyright © 2020-2026 Tomasz Augustyn
 # All rights reserved.
 #
 # Project Name: Call Stack Logger

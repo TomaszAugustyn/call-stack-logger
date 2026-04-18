@@ -1,3 +1,11 @@
+#
+# Copyright © 2020-2026 Tomasz Augustyn
+# All rights reserved.
+#
+# Project Name: Call Stack Logger
+# GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+# Contact Email: t.augustyn@poczta.fm
+
 # Integration tests — compile a traced program and verify its output.
 
 # The traced test program is compiled WITH instrumentation, just like runDemo.

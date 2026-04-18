@@ -1,3 +1,11 @@
+#
+# Copyright © 2020-2026 Tomasz Augustyn
+# All rights reserved.
+#
+# Project Name: Call Stack Logger
+# GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+# Contact Email: t.augustyn@poczta.fm
+
 # Unit tests — compiled WITHOUT instrumentation flags.
 # Tests pure/deterministic functions from the include/ headers.
 

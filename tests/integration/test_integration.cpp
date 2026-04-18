@@ -1,4 +1,13 @@
 /*
+ * Copyright © 2020-2026 Tomasz Augustyn
+ * All rights reserved.
+ *
+ * Project Name: Call Stack Logger
+ * GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+ * Contact Email: t.augustyn@poczta.fm
+ */
+
+/*
  * Integration tests for Call Stack Logger.
  *
  * Executes the traced_test_program and parses its trace output file to verify

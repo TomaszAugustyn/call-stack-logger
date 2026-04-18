@@ -1,4 +1,13 @@
 /*
+ * Copyright © 2020-2026 Tomasz Augustyn
+ * All rights reserved.
+ *
+ * Project Name: Call Stack Logger
+ * GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+ * Contact Email: t.augustyn@poczta.fm
+ */
+
+/*
  * Unit tests for utils::pretty_time() and utils::to_ms() in include/prettyTime.h
  *
  * Tests timestamp formatting, pattern correctness, and millisecond conversion.
