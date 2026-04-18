@@ -182,7 +182,14 @@ void open_this_thread_file(PerThreadState& self) {
 
 // Returns the FILE* for the current thread, opening it on first use. Returns nullptr
 // if trace is not ready, shutdown has completed, or the open failed earlier.
-NO_INSTRUMENT
+//
+// IMPORTANT: declared `inline` so it is NOT a separate stack frame between
+// __cyg_profile_func_enter and the resolve pipeline. The unwinder in callStack.cpp
+// hardcodes frame depth 6 (see the comment there). A small NO_INSTRUMENT function in
+// an anonymous namespace is normally inlined by GCC/Clang anyway, but making it
+// explicit prevents a future compiler/optimization change from silently breaking
+// the caller-location resolution.
+NO_INSTRUMENT inline
 FILE* get_thread_fp() {
     TraceGlobals& g = g_trace();
     if (!g.trace_ready.load(std::memory_order_acquire)) {

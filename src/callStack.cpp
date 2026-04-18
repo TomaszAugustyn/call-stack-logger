@@ -313,6 +313,12 @@ std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* ca
     // * 1st - A::foo() --> function we are interested in
     //
     // Otherwise, if this call flow is altered, frame number must be recalculated.
+    //
+    // After impl multi-threaded support: __cyg_profile_func_enter now calls
+    // get_thread_fp() which could become a new frame between it and resolve().
+    // get_thread_fp() is declared `inline` in trace.cpp precisely to prevent
+    // that — it must stay inlined or this constant becomes wrong.
+    // If frame numbers ever go off, check that first.
     Callback callback(caller_address);
     unwind_nth_frame(callback, 6);
 
