@@ -239,7 +239,8 @@ call-stack-logger/
 |       |-- CMakeLists.txt      # Traced programs + integration test runner
 |       |-- traced_program.cpp  # Instrumented single-threaded program for testing
 |       |-- threaded_traced_program.cpp # Instrumented multi-threaded program (per-thread files)
-|       |-- test_integration.cpp # Single-threaded + multi-threaded integration tests
+|       |-- callstack_api_program.cpp # Non-instrumented; exercises get_call_stack() API
+|       |-- test_integration.cpp # All integration tests (single/multi-threaded + API)
 |-- lib/                        # Empty dir (placeholder for external libs)
 |   |-- .gitignore              # Keeps dir in git but ignores contents
 |-- misc/
@@ -403,12 +404,23 @@ Test pure/deterministic functions from the include headers:
   function names resolved, nesting depth correct, caller info present, timestamp format,
   run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
   exact trace line count (catches std library pollution regressions)
-- Built as three targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
+- Built as four targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
   `noninstrumented_test_program` (compiled WITHOUT — simulates
-  `DISABLE_INSTRUMENTATION`), and `threaded_traced_test_program` (spawns 4 worker
-  threads via `std::thread`, exercises per-thread trace files).
-  The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs the
-  non-instrumented version and verifies zero trace entries are produced.
+  `DISABLE_INSTRUMENTATION`), `threaded_traced_test_program` (spawns 4 worker
+  threads via `std::thread`, exercises per-thread trace files), and
+  `callstack_api_program` (compiled WITHOUT `INSTRUMENT_FLAGS`; exercises the
+  public on-demand `instrumentation::get_call_stack()` API by walking a known
+  nested chain and printing each resolved frame).
+  The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs
+  the non-instrumented version and verifies zero trace entries are produced.
+- `CallStackApiTest.GetCallStackResolvesAncestors` — runs `callstack_api_program`,
+  captures stdout, verifies the on-demand stack contains the expected ancestor
+  functions (`print_stack_from_leaf → callstack_mid → callstack_top → main`) in
+  innermost-first order.
+- `BadOutputPathTest.OpenFailureIsNonFatalAndWarns` — runs `traced_test_program`
+  with `CSLG_OUTPUT_FILE` pointing to a non-existent directory, captures stderr,
+  verifies the program exits 0 (graceful degradation) and emits the documented
+  `[call-stack-logger] WARNING` with the attempted path.
 - `threaded_traced_program.cpp` — spawns 4 worker threads (each calling a
   `worker_top → worker_mid → worker_leaf` chain), then runs `main_only_post_join()`
   on the main thread after join. Prints `MAIN_TID=<n>` to stdout so the test fixture

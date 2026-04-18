@@ -1,4 +1,13 @@
 /*
+ * Copyright © 2020-2026 Tomasz Augustyn
+ * All rights reserved.
+ *
+ * Project Name: Call Stack Logger
+ * GitHub: https://github.com/TomaszAugustyn/call-stack-logger
+ * Contact Email: t.augustyn@poczta.fm
+ */
+
+/*
  * Exercises the public `instrumentation::get_call_stack()` API.
  *
  * Walks a small, known nested call chain and at the leaf calls get_call_stack(),

@@ -160,6 +160,29 @@ genhtml coverage.info --output-directory coverage-report
 The `callstacklogger` static library can also be linked into custom programs — link against
 it and compile your application code with `-finstrument-functions` to enable tracing.
 
+### On-demand call-stack capture ###
+
+In addition to the automatic per-call tracing driven by `-finstrument-functions`, the
+library exposes a public API for capturing the current call stack on demand:
+
+```cpp
+#include "callStack.h"
+
+void my_function() {
+    auto frames = instrumentation::get_call_stack();
+    for (const auto& frame : frames) {
+        if (frame.has_value()) {
+            std::cout << frame->callee_function_name << "\n";
+        }
+    }
+}
+```
+
+`get_call_stack()` returns a `std::vector<std::optional<ResolvedFrame>>` (innermost
+frame first). Unlike the automatic instrumentation, this does NOT require
+`-finstrument-functions` — it uses `backtrace()` + BFD resolution at the point of call.
+Useful for logging a stack snapshot from an error handler or logging site.
+
 ## :whale: Docker ##
 
 Docker provides a reproducible build/test environment and is the recommended way to develop
