@@ -53,7 +53,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     string(STRIP "${CPP_STD_INCLUDES}" CPP_STD_INCLUDES)
 
     # Also exclude the project's instrumentation headers from instrumentation.
-    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/format.h,include/prettyTime.h" CACHE STRING "")
+    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/format.h,include/prettyTime.h,include/traceFilePath.h" CACHE STRING "")
     message(STATUS "CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}]")
 
     set(INSTRUMENT_FLAGS -finstrument-functions
