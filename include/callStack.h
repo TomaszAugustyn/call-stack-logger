@@ -61,8 +61,21 @@ public:
     NO_INSTRUMENT
     static bool ensure_bfd_loaded(Dl_info& _info);
 
+    /// Resolves callee + caller using the unwinder to find the actual user-code
+    /// caller from inside the instrumentation pipeline. The `caller_address`
+    /// parameter is the call site passed by `__cyg_profile_func_enter`; the
+    /// unwinder walks up the fixed depth of the resolve pipeline to reach the
+    /// real caller. Use this from instrumentation hooks.
     NO_INSTRUMENT
     static std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address);
+
+    /// Resolves callee + caller using both addresses verbatim — does NOT run the
+    /// unwinder. Use this when the caller is the actual user-code call site
+    /// (e.g. from `get_call_stack()`, where backtrace() already provides the
+    /// per-frame return addresses).
+    NO_INSTRUMENT
+    static std::optional<ResolvedFrame> resolve_no_unwind(
+            void* callee_address, void* caller_address);
 
 private:
     NO_INSTRUMENT

@@ -24,6 +24,7 @@
 #include <gtest/gtest.h>
 #include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
@@ -647,6 +648,52 @@ TEST(CallStackApiTest, GetCallStackResolvesAncestors) {
     if (pos_top != std::string::npos && pos_main != std::string::npos) {
         EXPECT_LT(pos_top, pos_main) << "Expected top to appear before main";
     }
+
+    // Verify per-frame caller info is correct (regression guard for the bug where
+    // bfdResolver::resolve's hard-coded 6-frame unwind made every frame report the
+    // SAME caller, regardless of which frame was being described).
+    //
+    // Each "FRAME: <fn> | CALLER: <file>:<line>" line should reference the source
+    // file (callstack_api_program.cpp) for at least the inner ancestors, and the
+    // caller_filename should differ across frames — at minimum, NOT all frames
+    // should map to the exact same line number.
+    std::regex caller_pattern(R"(CALLER: ([^:]+):(\d+|\?))");
+    std::vector<std::string> caller_locs;
+    auto begin = std::sregex_iterator(content.begin(), content.end(), caller_pattern);
+    auto end = std::sregex_iterator();
+    for (auto it = begin; it != end; ++it) {
+        caller_locs.push_back((*it)[1].str() + ":" + (*it)[2].str());
+    }
+    ASSERT_GE(caller_locs.size(), 3u) << "expected at least 3 caller entries, got " << caller_locs.size();
+
+    // At least one of the inner-frame callers should reference the test program's
+    // own source file. (We don't assert on every frame because the outermost main
+    // frame's caller is in libc and we don't always have line info there.)
+    bool found_program_source = false;
+    for (const auto& loc : caller_locs) {
+        if (loc.find("callstack_api_program.cpp") != std::string::npos) {
+            found_program_source = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_program_source)
+            << "Expected at least one CALLER to reference callstack_api_program.cpp. "
+               "If every frame reports the same fixed caller location, this is the "
+               "old hard-coded-unwind bug. Output:\n" << content;
+
+    // Distinct caller locations across frames — guards specifically against "every
+    // frame has the same caller" pathology. Only check among frames that resolved
+    // to a numeric line (skip the libc/unresolved tail).
+    std::set<std::string> distinct_locs;
+    for (const auto& loc : caller_locs) {
+        if (loc.find(":?") == std::string::npos) {
+            distinct_locs.insert(loc);
+        }
+    }
+    EXPECT_GT(distinct_locs.size(), 1u)
+            << "All resolved caller locations are identical (" << caller_locs.size()
+            << " entries, " << distinct_locs.size() << " distinct) — likely the "
+               "hard-coded-unwind bug has regressed. Output:\n" << content;
 }
 
 // ============================================================================

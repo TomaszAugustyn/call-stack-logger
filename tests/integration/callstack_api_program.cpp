@@ -28,7 +28,14 @@ void print_stack_from_leaf() {
     auto stack = instrumentation::get_call_stack();
     for (const auto& maybe : stack) {
         if (maybe.has_value()) {
-            std::cout << "FRAME: " << maybe->callee_function_name << "\n";
+            std::cout << "FRAME: " << maybe->callee_function_name
+                      << " | CALLER: " << maybe->caller_filename << ":";
+            if (maybe->caller_line_number) {
+                std::cout << *maybe->caller_line_number;
+            } else {
+                std::cout << "?";
+            }
+            std::cout << "\n";
         } else {
             std::cout << "FRAME: <unresolved>\n";
         }

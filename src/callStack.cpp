@@ -285,7 +285,8 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
     return std::make_pair("<not sectioned address>", std::nullopt);
 }
 
-std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* caller_address) {
+std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
+        void* callee_address, void* caller_address) {
     // Lock covers ALL BFD operations: initialization, loading, symbol/section iteration,
     // and bfd_find_nearest_line(). BFD library is not thread-safe — concurrent calls on
     // the same bfd* object corrupt internal state. This lock serializes all BFD access.
@@ -303,31 +304,36 @@ std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* ca
     resolved.callee_address = std::make_optional(callee_address);
 #endif
 
-    // If the code is not changed 6th frame is constant as the execution flow
-    // starting from 6th frame to the top of the stack will look e.g. as follows:
-    // * 6th - instrumentation::FrameUnwinder::unwind_nth_frame
-    // * 5th - bfdResolver::resolve instrumentation::unwind_nth_frame
-    // * 4th - instrumentation::bfdResolver::resolve
-    // * 3rd - instrumentation::resolve
-    // * 2nd - __cyg_profile_func_enter
-    // * 1st - A::foo() --> function we are interested in
-    //
-    // Otherwise, if this call flow is altered, frame number must be recalculated.
-    //
-    // After impl multi-threaded support: __cyg_profile_func_enter now calls
-    // get_thread_fp() which could become a new frame between it and resolve().
-    // get_thread_fp() is declared `inline` in trace.cpp precisely to prevent
-    // that — it must stay inlined or this constant becomes wrong.
-    // If frame numbers ever go off, check that first.
-    Callback callback(caller_address);
-    unwind_nth_frame(callback, 6);
-
-    auto pair = resolve_filename_and_line(callback.caller);
+    auto pair = resolve_filename_and_line(caller_address);
     resolved.caller_filename = pair.first;
     resolved.caller_line_number = pair.second;
     resolved.timestamp = utils::pretty_time();
 
     return std::make_optional(resolved);
+}
+
+std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* caller_address) {
+    // The caller_address passed by __cyg_profile_func_enter is the call site INSIDE the
+    // instrumentation pipeline (resolve → __cyg_profile_func_enter → ...) — not the actual
+    // user-code caller. Walk up the fixed depth of the pipeline to find the real one.
+    //
+    // If this code is not changed, walking 6 frames up from FrameUnwinder::unwind_nth_frame
+    // lands at the user-code caller of the instrumented function. The chain looks like:
+    //   1: FrameUnwinder::unwind_nth_frame
+    //   2: instrumentation::unwind_nth_frame
+    //   3: bfdResolver::resolve
+    //   4: instrumentation::resolve
+    //   5: __cyg_profile_func_enter
+    //   6: A::foo()  — the function being instrumented (callee)
+    //   7: caller of A::foo() — captured here (one beyond the 6 increments)
+    //
+    // If this call flow ever changes the constant must be recalculated. After multi-thread
+    // support landed, __cyg_profile_func_enter calls get_thread_fp(), which could add a
+    // frame between it and resolve(); get_thread_fp() is declared `inline` in trace.cpp
+    // precisely to prevent that. If frame numbers ever go off, check inlining first.
+    Callback callback(caller_address);
+    unwind_nth_frame(callback, 6);
+    return resolve_no_unwind(callee_address, callback.caller);
 }
 
 std::vector<std::optional<ResolvedFrame>> get_call_stack() {
@@ -344,9 +350,29 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
     stack.resize(static_cast<size_t>(num));
     std::vector<std::optional<ResolvedFrame>> res;
     res.reserve(static_cast<size_t>(num));
-    // NOTE i = 0 corresponds to get_call_stack and is omitted
-    for (size_t i = 1; i < static_cast<size_t>(num); ++i) {
-        res.push_back(bfdResolver::resolve(stack[i], stack[i - 1]));
+
+    // backtrace() fills stack[i] with the return address from frame i.
+    // stack[0] is inside get_call_stack itself — omit it.
+    // For each ancestor i (>= 1):
+    //   - stack[i] is an address INSIDE frame i's function — use it as the callee
+    //     for function-name resolution.
+    //   - The call site INTO frame i's function lives in frame i+1's body, just
+    //     before the resume point at stack[i+1]. Subtract 1 byte to point inside
+    //     the call instruction (matching what the unwinder's ip_before_instruction
+    //     adjustment does for the instrumentation flow).
+    //   - For the outermost frame there is no parent, so caller falls back to
+    //     stack[i] itself; resolve will report the function's own location.
+    //
+    // Use bfdResolver::resolve_no_unwind here — we have the actual addresses, no
+    // need to ask the unwinder to compute them (which would land at one fixed
+    // location regardless of i, producing the wrong caller info for every frame).
+    const size_t n = static_cast<size_t>(num);
+    for (size_t i = 1; i < n; ++i) {
+        void* caller = stack[i];
+        if (i + 1 < n) {
+            caller = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(stack[i + 1]) - 1);
+        }
+        res.push_back(bfdResolver::resolve_no_unwind(stack[i], caller));
     }
     return res;
 }

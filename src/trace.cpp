@@ -128,8 +128,8 @@ void write_run_separator_header(FILE* fp, pid_t tid) {
     std::string middle = "=== New trace run: " + utils::pretty_time()
                        + ", thread ID: " + std::to_string(tid) + " ===";
     std::string frame(middle.size(), '=');
+    // No fflush needed: setvbuf(_IOLBF) is already in effect, so each '\n' flushes.
     fprintf(fp, "\n%s\n%s\n%s\n", frame.c_str(), middle.c_str(), frame.c_str());
-    fflush(fp);
 }
 
 // Opens this thread's trace file (lazy for workers, eager for main via trace_begin).
