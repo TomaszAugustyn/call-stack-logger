@@ -438,6 +438,19 @@ Test pure/deterministic functions from the include headers:
   with `CSLG_OUTPUT_FILE` pointing to a non-existent directory, captures stderr,
   verifies the program exits 0 (graceful degradation) and emits the documented
   `[call-stack-logger] WARNING` with the attempted path.
+- `LogAddrFlagTest` (2 tests) and `LogNotDemangledFlagTest` (1 test) exercise the
+  build-time CMake options `-DLOG_ADDR=ON` and `-DLOG_NOT_DEMANGLED=ON`. Each flag
+  has its own library variant in `tests/integration/CMakeLists.txt` —
+  `callstacklogger_log_addr` / `callstacklogger_log_not_demangled` — built from the
+  same sources with the corresponding macro defined, and a `traced_test_program_<variant>`
+  that links it. `LogAddrFlagTest.AddressPrefixAppearsInTrace` asserts every entry in
+  the variant's trace has the `addr: [0x<hex>]` prefix, while
+  `LogAddrFlagTest.NoAddressPrefixWithoutFlag` is a negative test on the default
+  build to guard against the macro accidentally becoming always-on.
+  `LogNotDemangledFlagTest.ProducesNormalTraceOutput` is a smoke test only — it
+  verifies the macro wires through and produces a valid trace, since the actual
+  differential behavior (logging frames where `dladdr` returns `dli_sname == nullptr`)
+  is hard to trigger deterministically without a stripped/JITted callee.
 - `threaded_traced_program.cpp` — spawns 4 worker threads (each calling a
   `worker_top → worker_mid → worker_leaf` chain), then runs `main_only_post_join()`
   on the main thread after join. Prints `MAIN_TID=<n>` to stdout so the test fixture

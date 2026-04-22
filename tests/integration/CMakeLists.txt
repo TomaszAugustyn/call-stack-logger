@@ -55,6 +55,33 @@ if(COVERAGE)
     target_link_options(threaded_traced_test_program PRIVATE --coverage)
 endif()
 
+# Library variants for testing build-time flags. Each rebuilds the library sources
+# with one of the gated #defines so we can exercise the corresponding code path
+# without polluting the main build (the main library is built without these flags).
+foreach(variant IN ITEMS log_addr log_not_demangled)
+    string(TOUPPER "${variant}" variant_upper)
+    add_library(callstacklogger_${variant} STATIC
+        ${CMAKE_SOURCE_DIR}/src/callStack.cpp
+        ${CMAKE_SOURCE_DIR}/src/trace.cpp)
+    target_include_directories(callstacklogger_${variant} PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>)
+    target_compile_definitions(callstacklogger_${variant} PUBLIC ${variant_upper})
+    target_compile_options(callstacklogger_${variant} INTERFACE -g)
+    target_link_options(callstacklogger_${variant} INTERFACE -rdynamic)
+    target_link_libraries(callstacklogger_${variant} PUBLIC -ldl -lbfd)
+
+    add_executable(traced_test_program_${variant} traced_program.cpp)
+    target_compile_features(traced_test_program_${variant} PRIVATE cxx_std_17)
+    target_compile_options(traced_test_program_${variant} PRIVATE ${INSTRUMENT_FLAGS})
+    target_link_libraries(traced_test_program_${variant} PRIVATE callstacklogger_${variant})
+
+    if(COVERAGE)
+        target_compile_options(callstacklogger_${variant} PRIVATE --coverage)
+        target_compile_options(traced_test_program_${variant} PRIVATE --coverage)
+        target_link_options(traced_test_program_${variant} PRIVATE --coverage)
+    endif()
+endforeach()
+
 # The integration test runner executes traced_test_program and parses output.
 # Compiled WITHOUT instrumentation — just gtest code.
 add_executable(integration_tests test_integration.cpp)
@@ -68,6 +95,8 @@ target_compile_definitions(integration_tests PRIVATE
     NONINSTRUMENTED_PROGRAM_PATH="$<TARGET_FILE:noninstrumented_test_program>"
     THREADED_TRACED_PROGRAM_PATH="$<TARGET_FILE:threaded_traced_test_program>"
     CALLSTACK_API_PROGRAM_PATH="$<TARGET_FILE:callstack_api_program>"
+    TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
+    TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH="$<TARGET_FILE:traced_test_program_log_not_demangled>"
 )
 
 if(COVERAGE)

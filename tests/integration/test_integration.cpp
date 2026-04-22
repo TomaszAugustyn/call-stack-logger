@@ -648,3 +648,91 @@ TEST(CallStackApiTest, GetCallStackResolvesAncestors) {
         EXPECT_LT(pos_top, pos_main) << "Expected top to appear before main";
     }
 }
+
+// ============================================================================
+// Build-flag tests — exercise the LOG_ADDR and LOG_NOT_DEMANGLED CMake options
+// via library variants built with each macro defined.
+// ============================================================================
+
+namespace {
+
+// Run a traced program under CSLG_OUTPUT_FILE=<tmp>, return file contents.
+std::string run_and_capture_trace(const char* program_path) {
+    char tmp[] = "/tmp/cslg_flag_test_XXXXXX";
+    int fd = mkstemp(tmp);
+    EXPECT_GE(fd, 0) << "mkstemp failed";
+    if (fd < 0) return {};
+    close(fd);
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(tmp)
+                    + "\" \"" + program_path + "\" > /dev/null 2>&1";
+    int ret = system(cmd.c_str());
+    EXPECT_EQ(ret, 0) << program_path << " failed, exit=" << ret;
+
+    std::ifstream ifs(tmp);
+    std::string content((std::istreambuf_iterator<char>(ifs)),
+                         std::istreambuf_iterator<char>());
+    ifs.close();
+    unlink(tmp);
+    return content;
+}
+
+} // namespace
+
+// Behavioral test: with -DLOG_ADDR=ON, every traced line must include the
+// "addr: [0x...]" prefix between the timestamp and the function name.
+TEST(LogAddrFlagTest, AddressPrefixAppearsInTrace) {
+    std::string content = run_and_capture_trace(TRACED_PROGRAM_LOG_ADDR_PATH);
+    ASSERT_FALSE(content.empty()) << "trace file is empty";
+
+    // Pattern: "[<timestamp>] addr: [0x<hex>] ..." — the address should be a
+    // non-zero hex value of pointer width (16 chars on x86_64).
+    std::regex addr_pattern(R"(\] addr: \[0x[0-9a-f]+\] )");
+
+    int total_entries = 0;
+    int with_address = 0;
+    std::istringstream stream(content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.find("(called from:") == std::string::npos) continue;
+        ++total_entries;
+        if (std::regex_search(line, addr_pattern)) ++with_address;
+    }
+
+    ASSERT_GT(total_entries, 0) << "no function entries in trace";
+    EXPECT_EQ(with_address, total_entries)
+            << "Expected every entry to have 'addr: [0x...]' prefix when "
+            << "LOG_ADDR is defined. Got " << with_address << "/" << total_entries
+            << ". Sample line:\n" << line;
+}
+
+// Negative test: the default-built (no LOG_ADDR) traced_test_program must NOT
+// include the address prefix. This guards against the macro accidentally
+// becoming always-on.
+TEST(LogAddrFlagTest, NoAddressPrefixWithoutFlag) {
+    std::string content = run_and_capture_trace(TRACED_PROGRAM_PATH);
+    ASSERT_FALSE(content.empty()) << "trace file is empty";
+
+    std::regex addr_pattern(R"(\] addr: \[0x)");
+    EXPECT_FALSE(std::regex_search(content, addr_pattern))
+            << "Default build should not include 'addr: [0x' — LOG_ADDR macro "
+               "may be leaking into the default callstacklogger target.";
+}
+
+// Smoke test: with -DLOG_NOT_DEMANGLED=ON, the program still compiles, runs,
+// and produces normal trace output. The flag's actual differential behavior
+// (logging frames where dladdr returns dli_sname == nullptr) is hard to trigger
+// deterministically — so this test only verifies the macro wires through and
+// doesn't break the trace pipeline.
+TEST(LogNotDemangledFlagTest, ProducesNormalTraceOutput) {
+    std::string content = run_and_capture_trace(TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH);
+    ASSERT_FALSE(content.empty()) << "trace file is empty";
+
+    // Standard sanity checks — same as the default build's expectations.
+    EXPECT_NE(content.find("=== New trace run:"), std::string::npos)
+            << "missing run separator";
+    EXPECT_NE(content.find("(called from:"), std::string::npos)
+            << "no function entries";
+    EXPECT_NE(content.find("main"), std::string::npos)
+            << "main not in trace";
+}
