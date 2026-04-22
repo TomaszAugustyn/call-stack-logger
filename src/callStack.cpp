@@ -216,7 +216,7 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
         const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd.offset : 0) -
                 static_cast<intptr_t>(section->vma);
 
-        if (offset < 0 || static_cast<size_t>(offset) > section->size) {
+        if (offset < 0 || static_cast<size_t>(offset) >= section->size) {
             section = section->next;
             continue;
         }
@@ -260,7 +260,7 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
         const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd.offset : 0) -
                 static_cast<intptr_t>(section->vma);
 
-        if (offset < 0 || static_cast<size_t>(offset) > section->size) {
+        if (offset < 0 || static_cast<size_t>(offset) >= section->size) {
             section = section->next;
             continue;
         }

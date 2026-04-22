@@ -325,12 +325,14 @@ void trace_begin() {
     t_state.in_instrumentation = false;
 }
 
-__attribute__ ((destructor))
-NO_INSTRUMENT
-void trace_end() {
-    // Fallback cleanup in case atexit didn't run (e.g., _exit() or abort()).
-    trace_shutdown();
-}
+// Note: there used to be a trace_end() __attribute__((destructor)) here as a
+// "fallback for _exit/abort". That comment was incorrect — _exit and abort do
+// NOT run static destructors either, so trace_end never actually fired in the
+// scenarios it claimed to cover. It only ever ran alongside the atexit-registered
+// trace_shutdown (which already does the work), and accessed g_trace() at
+// static-destruction time where the singleton may already be destroyed. Removed
+// to eliminate the dead code and the theoretical UAF. Line-buffered output plus
+// the kernel's close-on-exit guarantees cover the cases that trace_end did not.
 
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
