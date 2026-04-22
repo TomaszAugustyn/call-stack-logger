@@ -143,6 +143,14 @@ to obtain its own `FILE*` (lazy-opened on first use) and writes directly without
 mutex. The only mutex (`open_files_mutex`) is taken only during open (once per thread)
 and during shutdown.
 
+The `fp` field inside `PerThreadTraceFile` is `std::atomic<FILE*>` with
+`memory_order_relaxed` reads/writes — required because the owning thread reads it
+lock-free on the hot path while shutdown on another thread may concurrently null it
+through the open_files registry pointer. Without `std::atomic` this would be a data
+race per the C++ memory model (UB). Relaxed ordering is sufficient (no piggy-backed
+data dependency on the pointer value), and on x86_64 / ARM64 the codegen is identical
+to a plain `mov` / `LDR` — no hot-path overhead.
+
 **Shutdown coordination**:
 - `atexit(trace_shutdown)` registered in `trace_begin()` — runs BEFORE static
   destructors (critical for Clang where those destructors may be instrumented).

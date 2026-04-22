@@ -34,8 +34,16 @@ static constexpr int MAX_TRACE_DEPTH = 2048;
 // Per-thread RAII wrapper around the thread's FILE*. On thread exit, the destructor
 // closes the file and removes this instance from the global registry. Coordinates
 // with trace_shutdown() via g_trace().open_files_mutex to prevent double-close.
+//
+// `fp` is std::atomic because the owning thread reads it lock-free on the hot path
+// (get_thread_fp() / __cyg_profile_func_exit) while shutdown on another thread may
+// concurrently null it via the open_files registry pointer. Without atomic, this is
+// a data race per the C++ memory model — even if benign on x86_64 in practice.
+// Relaxed ordering is sufficient: there is no piggy-backed data dependency on fp,
+// just the pointer value itself. Codegen on x86_64 / ARM64 is a single mov/LDR —
+// no measurable hot-path overhead.
 struct PerThreadTraceFile {
-    FILE* fp = nullptr;
+    std::atomic<FILE*> fp{nullptr};
     bool open_attempted = false;   // avoid retry after open failure
     bool registered = false;       // set true once added to g_trace().open_files
 
@@ -161,7 +169,7 @@ void open_this_thread_file(PerThreadState& self) {
     // Line-buffered mode: flushes after each '\n' (every trace line). Crash-safe
     // without per-call fflush overhead.
     setvbuf(fp, NULL, _IOLBF, 0);
-    self.trace_file.fp = fp;
+    self.trace_file.fp.store(fp, std::memory_order_relaxed);
     write_run_separator_header(fp, tid);
 
     // Register this file so trace_shutdown() can close it at program exit if the
@@ -172,7 +180,7 @@ void open_this_thread_file(PerThreadState& self) {
         std::lock_guard<std::mutex> lock(g.open_files_mutex);
         if (g.shutdown_complete.load(std::memory_order_relaxed)) {
             fclose(fp);
-            self.trace_file.fp = nullptr;
+            self.trace_file.fp.store(nullptr, std::memory_order_relaxed);
             return;
         }
         g.open_files.push_back(&self.trace_file);
@@ -201,7 +209,7 @@ FILE* get_thread_fp() {
     if (!t_state.trace_file.open_attempted) {
         open_this_thread_file(t_state);
     }
-    return t_state.trace_file.fp;
+    return t_state.trace_file.fp.load(std::memory_order_relaxed);
 }
 
 } // namespace
@@ -227,14 +235,18 @@ static void trace_shutdown() {
         return;
     }
 
-    // Drain the registry: close every file still open. Null the fp so late TLS
-    // destructors (for threads that exit after this point) see null and skip.
+    // Drain the registry: close every file still open. Atomically swap each fp to
+    // nullptr so late TLS destructors (for threads that exit after this point) see
+    // null and skip. exchange ensures any worker loading fp after our store sees
+    // nullptr; workers that already loaded the old fp may briefly write to a closing
+    // FILE* — the documented shutdown-race trade-off.
     {
         std::lock_guard<std::mutex> lock(g.open_files_mutex);
         for (PerThreadTraceFile* f : g.open_files) {
-            if (f != nullptr && f->fp != nullptr) {
-                fclose(f->fp);
-                f->fp = nullptr;
+            if (f == nullptr) continue;
+            FILE* fp = f->fp.exchange(nullptr, std::memory_order_relaxed);
+            if (fp != nullptr) {
+                fclose(fp);
             }
         }
         g.open_files.clear();
@@ -256,20 +268,24 @@ PerThreadTraceFile::~PerThreadTraceFile() {
     // instrumented callee inside fclose/erase (possible with Clang) must be a no-op.
     t_state.in_instrumentation = true;
 
-    if (fp == nullptr) {
-        return;  // fast path — either never opened or already closed by shutdown
+    // Fast path (racy load is fine): either never opened or already closed by
+    // shutdown. With atomic + relaxed, this is well-defined; without atomic it
+    // would be UB even if shutdown ran on a different thread.
+    if (fp.load(std::memory_order_relaxed) == nullptr) {
+        return;
     }
 
     TraceGlobals& g = g_trace();
     std::lock_guard<std::mutex> lock(g.open_files_mutex);
 
     // Re-check under lock: trace_shutdown() may have raced and already closed us.
-    if (fp == nullptr) {
+    // Use exchange so we both observe and claim the fp atomically.
+    FILE* old = fp.exchange(nullptr, std::memory_order_relaxed);
+    if (old == nullptr) {
         return;
     }
 
-    fclose(fp);
-    fp = nullptr;
+    fclose(old);
 
     if (registered) {
         // Erase self from the registry. We hold a pointer to this, but after this
@@ -350,7 +366,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
     if (t_state.in_instrumentation) { return; }
     // Read fp once — don't call get_thread_fp() here since we never want lazy open
     // from an exit handler (there was no matching enter).
-    if (t_state.trace_file.fp != nullptr) {
+    if (t_state.trace_file.fp.load(std::memory_order_relaxed) != nullptr) {
         if (t_state.frame_overflow_count > 0) {
             // This exit corresponds to a frame that overflowed the stack.
             // Assume it was resolved (the common case at extreme depth) and
