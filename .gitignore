@@ -37,6 +37,9 @@ build-disabled/*
 # IDE specific dirs
 .vscode
 
+# Claude-specific dir
+.claude/*
+
 # Project specific
 src/gccdump.s
 

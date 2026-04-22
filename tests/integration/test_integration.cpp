@@ -708,8 +708,14 @@ TEST(LogAddrFlagTest, AddressPrefixAppearsInTrace) {
 
 // Negative test: the default-built (no LOG_ADDR) traced_test_program must NOT
 // include the address prefix. This guards against the macro accidentally
-// becoming always-on.
+// becoming always-on. Skipped when the build was configured with
+// -DLOG_ADDR=ON, in which case the "default" callstacklogger ALSO has
+// LOG_ADDR PUBLIC and the negative assertion would false-fail.
 TEST(LogAddrFlagTest, NoAddressPrefixWithoutFlag) {
+#ifdef CSLG_DEFAULT_HAS_LOG_ADDR
+    GTEST_SKIP() << "Skipped: configured with -DLOG_ADDR=ON, so the default "
+                    "callstacklogger target also defines LOG_ADDR.";
+#else
     std::string content = run_and_capture_trace(TRACED_PROGRAM_PATH);
     ASSERT_FALSE(content.empty()) << "trace file is empty";
 
@@ -717,6 +723,7 @@ TEST(LogAddrFlagTest, NoAddressPrefixWithoutFlag) {
     EXPECT_FALSE(std::regex_search(content, addr_pattern))
             << "Default build should not include 'addr: [0x' — LOG_ADDR macro "
                "may be leaking into the default callstacklogger target.";
+#endif
 }
 
 // Smoke test: with -DLOG_NOT_DEMANGLED=ON, the program still compiles, runs,

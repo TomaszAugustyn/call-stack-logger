@@ -61,10 +61,10 @@ endif()
 foreach(variant IN ITEMS log_addr log_not_demangled)
     string(TOUPPER "${variant}" variant_upper)
     add_library(callstacklogger_${variant} STATIC
-        ${CMAKE_SOURCE_DIR}/src/callStack.cpp
-        ${CMAKE_SOURCE_DIR}/src/trace.cpp)
+        ${PROJECT_SOURCE_DIR}/src/callStack.cpp
+        ${PROJECT_SOURCE_DIR}/src/trace.cpp)
     target_include_directories(callstacklogger_${variant} PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>)
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
     target_compile_definitions(callstacklogger_${variant} PUBLIC ${variant_upper})
     target_compile_options(callstacklogger_${variant} INTERFACE -g)
     target_link_options(callstacklogger_${variant} INTERFACE -rdynamic)
@@ -85,7 +85,7 @@ endforeach()
 # The integration test runner executes traced_test_program and parses output.
 # Compiled WITHOUT instrumentation — just gtest code.
 add_executable(integration_tests test_integration.cpp)
-target_include_directories(integration_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_compile_features(integration_tests PRIVATE cxx_std_17)
 target_link_libraries(integration_tests gtest_main)
 
@@ -98,6 +98,17 @@ target_compile_definitions(integration_tests PRIVATE
     TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
     TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH="$<TARGET_FILE:traced_test_program_log_not_demangled>"
 )
+
+# When the user passes -DLOG_ADDR=ON or -DLOG_NOT_DEMANGLED=ON globally, the
+# default callstacklogger target also defines that macro PUBLIC — so tests that
+# expect the DEFAULT build to NOT have the macro must skip themselves to avoid
+# false failures.
+if(LOG_ADDR)
+    target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_ADDR)
+endif()
+if(LOG_NOT_DEMANGLED)
+    target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_NOT_DEMANGLED)
+endif()
 
 if(COVERAGE)
     target_compile_options(integration_tests PRIVATE --coverage)

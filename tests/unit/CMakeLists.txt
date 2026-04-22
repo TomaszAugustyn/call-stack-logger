@@ -15,7 +15,7 @@ add_executable(unit_tests
     test_trace_file_path.cpp
 )
 
-target_include_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_compile_features(unit_tests PRIVATE cxx_std_17)
 target_link_libraries(unit_tests gtest_main)
 
