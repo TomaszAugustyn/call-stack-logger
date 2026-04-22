@@ -13,6 +13,14 @@ project(call-stack-logger)
 option(BUILD_TESTS "Build unit and integration tests" OFF)
 option(COVERAGE "Enable code coverage (requires GCC)" OFF)
 
+# True when this project is built standalone (not via add_subdirectory/FetchContent
+# from a parent project). Guards the demo executable and the `run` target.
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    set(CSLG_TOP_LEVEL TRUE)
+else()
+    set(CSLG_TOP_LEVEL FALSE)
+endif()
+
 # ============================================================================
 # Compiler flags and instrumentation setup (project-wide)
 # ============================================================================
@@ -22,8 +30,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Base flags — no instrumentation (applied to all targets including library).
 set(CMAKE_CXX_FLAGS "-g -Wall")
 
-# -rdynamic exports all symbols to the dynamic symbol table (needed by dladdr).
-add_link_options(-rdynamic)
+# Note: -rdynamic is attached to the callstacklogger target as an INTERFACE link
+# option, so any executable that links against callstacklogger automatically gets
+# it. This lets users integrate via add_subdirectory without per-target boilerplate.
 
 # Code coverage support (GCC --coverage flag)
 if(COVERAGE)
@@ -80,11 +89,9 @@ endif()
 # ============================================================================
 add_subdirectory(src)
 
-set(EXECUTABLE runDemo)
-
-add_custom_target(run
-    COMMAND ${EXECUTABLE}
-)
+if(CSLG_TOP_LEVEL)
+    add_custom_target(run COMMAND runDemo)
+endif()
 
 if(BUILD_TESTS)
     enable_testing()

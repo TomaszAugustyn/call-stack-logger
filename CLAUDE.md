@@ -375,12 +375,29 @@ make run                                # Run
 
 - **GNU Binutils dev package:** `sudo apt-get install binutils-dev` (provides `libbfd`)
 
-### Library Target
+### Library Targets
 
-The build produces a `callstacklogger` static library from `callStack.cpp` and `trace.cpp`.
-The `runDemo` executable and test programs link against this library. Custom programs can
-also link against it — compile application code with `-finstrument-functions` and the
-appropriate exclude-file-list, then link against `callstacklogger`.
+The build produces three CMake targets:
+
+- `callstacklogger` (static library, plus alias `callstacklogger::callstacklogger`) —
+  the library itself (`callStack.cpp` + `trace.cpp`). As an INTERFACE it propagates
+  `-g`, `-rdynamic`, the include path, and `-ldl -lbfd` to consumers. Link plain
+  `callstacklogger` when you want the on-demand `get_call_stack()` API without
+  per-call `-finstrument-functions` hooks.
+- `callstacklogger_instrumented` (INTERFACE, plus alias `callstacklogger::instrumented`) —
+  bundles `INSTRUMENT_FLAGS` (compile-time `-finstrument-functions` plus GCC's
+  exclude-file-list) and links `callstacklogger`. **The single target users link to get
+  full tracing.**
+- `runDemo` (executable) — only built when the project is top-level (`CSLG_TOP_LEVEL`).
+  Skipped when cslg is pulled in via `add_subdirectory` or FetchContent so user projects
+  don't get it built as a side effect.
+
+External users integrate by `FetchContent_MakeAvailable` or `add_subdirectory` and then:
+```cmake
+target_link_libraries(my_app PRIVATE callstacklogger::instrumented)
+```
+No per-target `target_compile_options` or `-rdynamic` boilerplate needed — everything
+propagates through the INTERFACE. See README "Integrating into your own project".
 
 ## Testing
 

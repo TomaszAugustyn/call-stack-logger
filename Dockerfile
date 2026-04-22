@@ -6,6 +6,8 @@ FROM ubuntu:24.04
 # - libc6-dbg: debug symbols for libc (required for BFD to resolve shared library symbols
 #   without extremely slow fallback searches through many .build-id paths)
 # - lcov: code coverage report generation
+# - git: required by CMake FetchContent (used both internally for Google Test and by
+#   user projects that integrate call-stack-logger via FetchContent_Declare).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     clang \
@@ -14,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils-dev \
     libc6-dbg \
     lcov \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

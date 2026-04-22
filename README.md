@@ -73,8 +73,115 @@ not support the exclude-file-list flag, so std library functions are filtered at
 checking the Itanium C++ ABI mangled name for known `std::`, `__gnu_cxx::`, and
 `__cxxabiv1::` prefixes.
 
-When linking `callstacklogger` into custom programs, compile your application code with
-`-finstrument-functions` (and GCC's exclude-file-list if using GCC) to enable tracing.
+## :jigsaw: Integrating into your own project ##
+
+Call Stack Logger ships a CMake target (`callstacklogger::instrumented`) that carries
+every flag needed for tracing — `-finstrument-functions`, `-g`, `-rdynamic`, the GCC
+std-library exclude-file-list, and the library itself (`-ldl -lbfd`). A user project
+only needs to link against it; no per-target `target_compile_options` boilerplate.
+
+### Prerequisites ###
+
+Same as building Call Stack Logger standalone:
+- Linux, GCC or Clang with C++17 support
+- `binutils-dev` installed (`sudo apt-get install binutils-dev`)
+- `libc6-dbg` recommended (fast BFD symbol resolution for libc frames)
+
+### Method 1 — FetchContent (recommended) ###
+
+No manual checkout required. CMake downloads Call Stack Logger on first configure.
+
+In your project's `CMakeLists.txt`:
+
+```cmake
+cmake_minimum_required(VERSION 3.14)
+project(my_app LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+include(FetchContent)
+FetchContent_Declare(
+    call-stack-logger
+    GIT_REPOSITORY https://github.com/TomaszAugustyn/call-stack-logger.git
+    GIT_TAG        master  # or pin to a specific tag/commit
+)
+FetchContent_MakeAvailable(call-stack-logger)
+
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE callstacklogger::instrumented)
+```
+
+### Method 2 — Git submodule ###
+
+For projects that prefer to vendor the source (pinned version, offline builds):
+
+```bash
+git submodule add https://github.com/TomaszAugustyn/call-stack-logger.git third_party/call-stack-logger
+git submodule update --init --recursive
+```
+
+Then in your `CMakeLists.txt`:
+
+```cmake
+cmake_minimum_required(VERSION 3.14)
+project(my_app LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_subdirectory(third_party/call-stack-logger)
+
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE callstacklogger::instrumented)
+```
+
+### Build and run ###
+
+No changes to your source code are required — the compiler's `-finstrument-functions`
+flag inserts hooks into every function automatically.
+
+```bash
+cmake -B build
+cmake --build build -j$(nproc)
+./build/my_app              # runs your app and writes ./trace.out
+cat trace.out
+```
+
+To redirect the trace somewhere else, set `CSLG_OUTPUT_FILE`:
+
+```bash
+CSLG_OUTPUT_FILE=/tmp/my_app_trace.out ./build/my_app
+```
+
+See [Environment Variables](#gear-configuration) for multi-threaded output naming.
+
+### Available CMake targets ###
+
+| Target | What it adds to your executable |
+|--------|----------------------------------|
+| `callstacklogger::instrumented` | `-finstrument-functions` (with GCC's exclude-file-list), `-g`, `-rdynamic`, library, `-ldl -lbfd`, include path. **Use this for per-call tracing (the common case).** |
+| `callstacklogger::callstacklogger` | Library only: `-g`, `-rdynamic`, `-ldl -lbfd`, include path — no `-finstrument-functions`. Use this when you want just the on-demand [`get_call_stack()`](#on-demand-call-stack-capture) API without per-call hooks. |
+
+### Disabling tracing in a build ###
+
+To compile your project without any instrumentation hooks (e.g. for release builds):
+
+```bash
+cmake -B build -DDISABLE_INSTRUMENTATION=ON
+```
+
+This clears the instrumentation flags from `callstacklogger::instrumented` and defines
+`DISABLE_INSTRUMENTATION` across the tree, so the `__cyg_profile_func_enter/exit`
+hooks compile out entirely.
+
+### Selective instrumentation ###
+
+If you want per-target control — e.g., trace only one executable in a multi-target
+project — link `callstacklogger::instrumented` only on the targets you want traced,
+and link `callstacklogger::callstacklogger` (or nothing) on the others. Because
+`-finstrument-functions` is on the `instrumented` target's INTERFACE, it only reaches
+the consumers you choose.
 
 ## :gear: Configuration ##
 
@@ -156,9 +263,6 @@ lcov --remove coverage.info '/usr/*' '*/tests/*' '*/_deps/*' --output-file cover
 genhtml coverage.info --output-directory coverage-report
 # Open coverage-report/index.html in a browser
 ```
-
-The `callstacklogger` static library can also be linked into custom programs — link against
-it and compile your application code with `-finstrument-functions` to enable tracing.
 
 ### On-demand call-stack capture ###
 

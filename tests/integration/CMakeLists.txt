@@ -8,31 +8,24 @@
 
 # Integration tests — compile a traced program and verify its output.
 
-# The traced test program is compiled WITH instrumentation, just like runDemo.
-# It links against callstacklogger and produces trace output when executed.
+# Traced programs link callstacklogger_instrumented (adds INSTRUMENT_FLAGS and
+# transitively the callstacklogger library, include dir, and -rdynamic).
+# Non-instrumented programs link plain callstacklogger — same library, no flags.
 add_executable(traced_test_program traced_program.cpp)
-target_include_directories(traced_test_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(traced_test_program PRIVATE cxx_std_17)
-
-# Use the same INSTRUMENT_FLAGS as runDemo (set in root CMakeLists.txt).
-target_compile_options(traced_test_program PRIVATE ${INSTRUMENT_FLAGS})
-
-# -rdynamic is set globally in root CMakeLists.txt via add_link_options.
-target_link_libraries(traced_test_program callstacklogger)
+target_link_libraries(traced_test_program PRIVATE callstacklogger_instrumented)
 
 if(COVERAGE)
     target_compile_options(traced_test_program PRIVATE --coverage)
     target_link_options(traced_test_program PRIVATE --coverage)
 endif()
 
-# Non-instrumented version of the same program. Compiled WITHOUT INSTRUMENT_FLAGS
-# to verify that no trace output is produced when instrumentation is disabled.
-# This catches regressions in DISABLE_INSTRUMENTATION and split compilation.
+# Non-instrumented version of the same program. Links plain callstacklogger so no
+# INSTRUMENT_FLAGS are applied. Catches regressions in DISABLE_INSTRUMENTATION
+# and split compilation.
 add_executable(noninstrumented_test_program traced_program.cpp)
-target_include_directories(noninstrumented_test_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(noninstrumented_test_program PRIVATE cxx_std_17)
-# No INSTRUMENT_FLAGS — simulates DISABLE_INSTRUMENTATION=ON
-target_link_libraries(noninstrumented_test_program callstacklogger)
+target_link_libraries(noninstrumented_test_program PRIVATE callstacklogger)
 
 if(COVERAGE)
     target_compile_options(noninstrumented_test_program PRIVATE --coverage)
@@ -40,11 +33,10 @@ if(COVERAGE)
 endif()
 
 # Exercises the public get_call_stack() API (on-demand stack capture).
-# Compiled WITHOUT INSTRUMENT_FLAGS — it calls the API directly, no hooks needed.
+# Links plain callstacklogger — no per-call hooks needed.
 add_executable(callstack_api_program callstack_api_program.cpp)
-target_include_directories(callstack_api_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(callstack_api_program PRIVATE cxx_std_17)
-target_link_libraries(callstack_api_program callstacklogger)
+target_link_libraries(callstack_api_program PRIVATE callstacklogger)
 
 if(COVERAGE)
     target_compile_options(callstack_api_program PRIVATE --coverage)
@@ -55,10 +47,8 @@ endif()
 # worker threads, each of which produces its own <base>_tid_<tid> file.
 find_package(Threads REQUIRED)
 add_executable(threaded_traced_test_program threaded_traced_program.cpp)
-target_include_directories(threaded_traced_test_program PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(threaded_traced_test_program PRIVATE cxx_std_17)
-target_compile_options(threaded_traced_test_program PRIVATE ${INSTRUMENT_FLAGS})
-target_link_libraries(threaded_traced_test_program callstacklogger Threads::Threads)
+target_link_libraries(threaded_traced_test_program PRIVATE callstacklogger_instrumented Threads::Threads)
 
 if(COVERAGE)
     target_compile_options(threaded_traced_test_program PRIVATE --coverage)
