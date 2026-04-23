@@ -1,0 +1,12 @@
+# LeakSanitizer suppressions for Call Stack Logger test runs.
+#
+# libbfd (GNU binutils) holds internal symbol-table / object-file caches
+# in static storage that are not released until program exit. LSan reports
+# these as "direct leaks" on Clang (GCC's libasan is more lenient). They
+# are not leaks in cslg's code — we keep the BFD handles open intentionally
+# (s_bfds map) because every trace event reuses them.
+#
+# Usage:
+#   LSAN_OPTIONS=suppressions=$PWD/tests/lsan-suppressions.txt ./your_test
+leak:libbfd
+leak:bfd_

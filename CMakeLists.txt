@@ -13,6 +13,50 @@ project(call-stack-logger)
 option(BUILD_TESTS "Build unit and integration tests" OFF)
 option(COVERAGE "Enable code coverage (requires GCC)" OFF)
 
+# Sanitizers: opt-in, for debugging / CI runs. Flags are applied PRIVATE to every
+# cslg target (library + demo + tests) so external users who link callstacklogger
+# never inherit sanitizer flags — they link a clean library regardless.
+#
+# Accepted values:
+#   ""                    — no sanitizer (default)
+#   "address"             — AddressSanitizer (ASan) + LeakSanitizer
+#   "undefined"           — UndefinedBehaviorSanitizer (UBSan)
+#   "address+undefined"   — ASan and UBSan combined (they compose)
+#   "thread"              — ThreadSanitizer (TSan) — mutually exclusive with ASan
+#
+# MSan intentionally not supported: it needs an MSan-instrumented libstdc++/libc
+# to avoid false positives across std::string/std::vector etc.
+set(SANITIZE "" CACHE STRING "Sanitizer: address | undefined | address+undefined | thread")
+set_property(CACHE SANITIZE PROPERTY STRINGS "" "address" "undefined" "address+undefined" "thread")
+
+set(CSLG_SANITIZER_FLAGS "")
+if(SANITIZE)
+    if(SANITIZE STREQUAL "address")
+        list(APPEND CSLG_SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer)
+    elseif(SANITIZE STREQUAL "undefined")
+        list(APPEND CSLG_SANITIZER_FLAGS -fsanitize=undefined -fno-sanitize-recover=undefined)
+    elseif(SANITIZE STREQUAL "address+undefined")
+        list(APPEND CSLG_SANITIZER_FLAGS -fsanitize=address -fsanitize=undefined
+             -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
+    elseif(SANITIZE STREQUAL "thread")
+        list(APPEND CSLG_SANITIZER_FLAGS -fsanitize=thread -fno-omit-frame-pointer)
+    else()
+        message(FATAL_ERROR "Unknown SANITIZE value: ${SANITIZE}. "
+                "Valid: address | undefined | address+undefined | thread")
+    endif()
+    message(STATUS "Sanitizers enabled: ${SANITIZE} (${CSLG_SANITIZER_FLAGS})")
+endif()
+
+# Helper: apply sanitizer flags to a target as PRIVATE compile + link options.
+# PRIVATE is load-bearing — INTERFACE would propagate to external users who
+# link callstacklogger, which we deliberately do NOT want.
+function(cslg_apply_sanitizers target)
+    if(CSLG_SANITIZER_FLAGS)
+        target_compile_options(${target} PRIVATE ${CSLG_SANITIZER_FLAGS})
+        target_link_options(${target} PRIVATE ${CSLG_SANITIZER_FLAGS})
+    endif()
+endfunction()
+
 # True when this project is built standalone (not via add_subdirectory/FetchContent
 # from a parent project). Guards the demo executable and the `run` target.
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)

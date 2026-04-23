@@ -18,6 +18,7 @@ add_executable(unit_tests
 target_include_directories(unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_compile_features(unit_tests PRIVATE cxx_std_17)
 target_link_libraries(unit_tests gtest_main)
+cslg_apply_sanitizers(unit_tests)
 
 if(COVERAGE)
     target_compile_options(unit_tests PRIVATE --coverage)

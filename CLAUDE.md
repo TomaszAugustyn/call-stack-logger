@@ -502,6 +502,33 @@ Notes:
   "external" checks, which would wrongly exclude our `src/` files (outside `build/`).
   Instead, explicitly filter system headers via `--remove '/usr/*'`.
 
+### Sanitizers
+
+The `SANITIZE` CMake option applies ASan/UBSan/TSan to every cslg-owned target
+(library + demo + test programs). The flags are attached as **PRIVATE** compile and
+link options via the `cslg_apply_sanitizers(target)` helper defined at the root
+`CMakeLists.txt` — never as INTERFACE on `callstacklogger`. This is deliberate:
+external users who integrate via `add_subdirectory` / FetchContent must not inherit
+sanitizer flags, otherwise their production builds would get sanitized at link time.
+
+Accepted values: `address`, `undefined`, `address+undefined`, `thread`. ASan and TSan
+are mutually exclusive. MSan is not supported (needs a fully MSan-instrumented
+libstdc++/libc). Invocation:
+```bash
+cmake -B build-asan -DBUILD_TESTS=ON -DSANITIZE=address+undefined
+cmake -B build-tsan -DBUILD_TESTS=ON -DSANITIZE=thread
+```
+
+LSan reports from inside `libbfd` (GNU binutils keeps static symbol-table / object-file
+caches live to program exit — not a leak in cslg's code) are silenced via
+`tests/lsan-suppressions.txt`. Pass it with
+`LSAN_OPTIONS=suppressions=.../tests/lsan-suppressions.txt`. Our own allocations are
+still caught. The Clang builds need `libclang-rt-18-dev` (added to the Dockerfile) —
+GCC ships its sanitizer runtimes with `g++`.
+
+docker compose services: `sanitize-asan` and `sanitize-tsan` run the full test suite
+under the respective sanitizer.
+
 ## CI/CD
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master`:

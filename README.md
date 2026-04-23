@@ -216,6 +216,7 @@ the consumers you choose.
 | `DISABLE_INSTRUMENTATION` | `OFF` | Compile without any instrumentation hooks |
 | `BUILD_TESTS` | `OFF` | Build unit and integration tests (fetches Google Test) |
 | `COVERAGE` | `OFF` | Enable code coverage via GCC `--coverage` flag |
+| `SANITIZE` | (empty) | Enable a sanitizer for all cslg-owned targets: `address`, `undefined`, `address+undefined`, or `thread`. See [Sanitizers](#bug-sanitizers). |
 
 ### Environment Variables ###
 
@@ -309,6 +310,40 @@ frame first). Unlike the automatic instrumentation, this does NOT require
 `-finstrument-functions` — it uses `backtrace()` + BFD resolution at the point of call.
 Useful for logging a stack snapshot from an error handler or logging site.
 
+## :bug: Sanitizers ##
+
+For debugging, the build supports AddressSanitizer (ASan), UndefinedBehaviorSanitizer
+(UBSan), and ThreadSanitizer (TSan) via the `SANITIZE` CMake option. Flags are applied
+**PRIVATE** to every cslg-owned target (library, `runDemo`, test programs) — external
+users who integrate via `add_subdirectory` / FetchContent never inherit sanitizer
+flags, so your production integrations are unaffected.
+
+```bash
+# ASan + UBSan (combined; catches memory errors + UB)
+cmake -B build-asan -DBUILD_TESTS=ON -DSANITIZE=address+undefined
+cmake --build build-asan && cd build-asan && \
+  LSAN_OPTIONS=suppressions=../tests/lsan-suppressions.txt ctest --output-on-failure
+
+# TSan (mutually exclusive with ASan)
+cmake -B build-tsan -DBUILD_TESTS=ON -DSANITIZE=thread
+cmake --build build-tsan && cd build-tsan && ctest --output-on-failure
+```
+
+Or via Docker:
+```bash
+docker compose run sanitize-asan   # ASan + UBSan + LSan
+docker compose run sanitize-tsan   # TSan
+```
+
+The `tests/lsan-suppressions.txt` suppression file silences LeakSanitizer reports
+coming from inside `libbfd` (GNU binutils keeps its symbol-table / object-file caches
+live for the program lifetime — this isn't a leak in cslg's code, it's BFD's design).
+Cslg-owned allocations are still caught by LSan.
+
+MSan is intentionally unsupported — it requires an MSan-instrumented libstdc++/libc,
+which is impractical without a full toolchain rebuild, and produces enormous noise
+otherwise.
+
 ## :whale: Docker ##
 
 Docker provides a reproducible build/test environment and is the recommended way to develop
@@ -326,6 +361,12 @@ docker compose run test-clang
 
 # Generate code coverage report (output in coverage-report/index.html)
 docker compose run coverage
+
+# Run under AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer
+docker compose run sanitize-asan
+
+# Run under ThreadSanitizer
+docker compose run sanitize-tsan
 ```
 
 The Docker image is based on Ubuntu 24.04 with GCC, Clang, and all required dependencies,

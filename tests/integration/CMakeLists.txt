@@ -14,6 +14,7 @@
 add_executable(traced_test_program traced_program.cpp)
 target_compile_features(traced_test_program PRIVATE cxx_std_17)
 target_link_libraries(traced_test_program PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(traced_test_program)
 
 if(COVERAGE)
     target_compile_options(traced_test_program PRIVATE --coverage)
@@ -26,6 +27,7 @@ endif()
 add_executable(noninstrumented_test_program traced_program.cpp)
 target_compile_features(noninstrumented_test_program PRIVATE cxx_std_17)
 target_link_libraries(noninstrumented_test_program PRIVATE callstacklogger)
+cslg_apply_sanitizers(noninstrumented_test_program)
 
 if(COVERAGE)
     target_compile_options(noninstrumented_test_program PRIVATE --coverage)
@@ -37,6 +39,7 @@ endif()
 add_executable(callstack_api_program callstack_api_program.cpp)
 target_compile_features(callstack_api_program PRIVATE cxx_std_17)
 target_link_libraries(callstack_api_program PRIVATE callstacklogger)
+cslg_apply_sanitizers(callstack_api_program)
 
 if(COVERAGE)
     target_compile_options(callstack_api_program PRIVATE --coverage)
@@ -49,6 +52,7 @@ find_package(Threads REQUIRED)
 add_executable(threaded_traced_test_program threaded_traced_program.cpp)
 target_compile_features(threaded_traced_test_program PRIVATE cxx_std_17)
 target_link_libraries(threaded_traced_test_program PRIVATE callstacklogger_instrumented Threads::Threads)
+cslg_apply_sanitizers(threaded_traced_test_program)
 
 if(COVERAGE)
     target_compile_options(threaded_traced_test_program PRIVATE --coverage)
@@ -75,6 +79,9 @@ foreach(variant IN ITEMS log_addr log_not_demangled)
     target_compile_options(traced_test_program_${variant} PRIVATE ${INSTRUMENT_FLAGS})
     target_link_libraries(traced_test_program_${variant} PRIVATE callstacklogger_${variant})
 
+    cslg_apply_sanitizers(callstacklogger_${variant})
+    cslg_apply_sanitizers(traced_test_program_${variant})
+
     if(COVERAGE)
         target_compile_options(callstacklogger_${variant} PRIVATE --coverage)
         target_compile_options(traced_test_program_${variant} PRIVATE --coverage)
@@ -88,6 +95,7 @@ add_executable(integration_tests test_integration.cpp)
 target_include_directories(integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_compile_features(integration_tests PRIVATE cxx_std_17)
 target_link_libraries(integration_tests gtest_main)
+cslg_apply_sanitizers(integration_tests)
 
 # Pass the traced program paths so tests can find and execute them
 target_compile_definitions(integration_tests PRIVATE

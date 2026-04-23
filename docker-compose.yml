@@ -50,3 +50,34 @@ services:
         echo '' &&
         echo '=== Coverage report generated at coverage-report/index.html ==='
       "
+
+  # AddressSanitizer + UndefinedBehaviorSanitizer run (GCC).
+  # LSan suppression file bypasses BFD-internal caches that persist to exit.
+  sanitize-asan:
+    build: .
+    volumes:
+      - .:/workspace
+    environment:
+      ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1"
+      UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+      LSAN_OPTIONS: "suppressions=/workspace/tests/lsan-suppressions.txt:print_suppressions=0"
+    command: >
+      bash -c "
+        cmake -B build-asan -DBUILD_TESTS=ON -DSANITIZE=address+undefined &&
+        cmake --build build-asan -j$$(nproc) &&
+        cd build-asan && ctest --output-on-failure
+      "
+
+  # ThreadSanitizer run (GCC). Mutually exclusive with ASan.
+  sanitize-tsan:
+    build: .
+    volumes:
+      - .:/workspace
+    environment:
+      TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
+    command: >
+      bash -c "
+        cmake -B build-tsan -DBUILD_TESTS=ON -DSANITIZE=thread &&
+        cmake --build build-tsan -j$$(nproc) &&
+        cd build-tsan && ctest --output-on-failure
+      "
