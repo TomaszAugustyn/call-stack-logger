@@ -331,9 +331,17 @@ cmake --build build-tsan && cd build-tsan && ctest --output-on-failure
 
 Or via Docker:
 ```bash
-docker compose run sanitize-asan   # ASan + UBSan + LSan
-docker compose run sanitize-tsan   # TSan
+docker compose run sanitize-asan         # GCC   — ASan + UBSan + LSan
+docker compose run sanitize-tsan         # GCC   — TSan
+docker compose run sanitize-asan-clang   # Clang — ASan + UBSan + LSan
+docker compose run sanitize-tsan-clang   # Clang — TSan
 ```
+
+The GCC sanitizer services are also run in CI on every push and pull request so
+regressions in memory safety, UB, or thread safety fail the build automatically.
+The Clang services exist for local spot-checks — Clang's LSan is stricter than
+GCC's, so running them periodically validates the suppression file is accurate
+as toolchain versions drift.
 
 The `tests/lsan-suppressions.txt` suppression file silences LeakSanitizer reports
 coming from inside `libbfd` (GNU binutils keeps its symbol-table / object-file caches
@@ -362,11 +370,15 @@ docker compose run test-clang
 # Generate code coverage report (output in coverage-report/index.html)
 docker compose run coverage
 
-# Run under AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer
+# Run under AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer (GCC)
 docker compose run sanitize-asan
 
-# Run under ThreadSanitizer
+# Run under ThreadSanitizer (GCC)
 docker compose run sanitize-tsan
+
+# Same, but with Clang (for occasional cross-checking — not run in CI)
+docker compose run sanitize-asan-clang
+docker compose run sanitize-tsan-clang
 ```
 
 The Docker image is based on Ubuntu 24.04 with GCC, Clang, and all required dependencies,
@@ -375,8 +387,12 @@ including `libc6-dbg` (debug symbols for libc, required for fast BFD symbol reso
 ## :rocket: CI/CD ##
 
 GitHub Actions runs on every push and pull request to `master`:
-- **GCC job:** Builds, runs unit and integration tests, generates code coverage report
-- **Clang job:** Builds and runs unit and integration tests
+- **GCC (build, test, coverage):** Builds, runs unit and integration tests, generates lcov HTML report (uploaded as an artifact).
+- **Clang (build, test):** Builds and runs unit and integration tests.
+- **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer. Fails on any memory error, UB, or non-suppressed leak.
+- **Sanitize (GCC, TSan):** Builds with `SANITIZE=thread` and runs the full test suite under ThreadSanitizer.
+
+Clang sanitizer runs are intentionally NOT part of CI — GCC covers the core sweep, and Clang's LSan behaviour drifts across toolchain versions which would add maintenance noise. They remain available locally via `docker compose run sanitize-asan-clang` / `sanitize-tsan-clang`.
 
 ## :wrench: Building and running - legacy (Makefiles) ##
 

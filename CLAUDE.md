@@ -526,15 +526,24 @@ caches live to program exit — not a leak in cslg's code) are silenced via
 still caught. The Clang builds need `libclang-rt-18-dev` (added to the Dockerfile) —
 GCC ships its sanitizer runtimes with `g++`.
 
-docker compose services: `sanitize-asan` and `sanitize-tsan` run the full test suite
+docker compose services: `sanitize-asan` and `sanitize-tsan` (GCC), plus
+`sanitize-asan-clang` and `sanitize-tsan-clang` (Clang). All run the full test suite
 under the respective sanitizer.
+
+GitHub Actions CI runs the two GCC sanitizer services on every push and PR:
+`sanitize-asan` (ASan + UBSan + LSan) and `sanitize-tsan` (TSan). Clang sanitizer
+runs are not part of CI to keep the maintenance surface small — they remain
+available locally via docker-compose.
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master`:
-- Builds with `BUILD_TESTS=ON` and `COVERAGE=ON` on Ubuntu
-- Runs unit and integration tests via `ctest`
-- Generates lcov HTML coverage report (uploaded as artifact)
+GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with four jobs:
+- **gcc**: builds with `BUILD_TESTS=ON` and `COVERAGE=ON`, runs tests via `ctest`, generates and uploads the lcov HTML coverage report.
+- **clang**: builds with `-DCMAKE_CXX_COMPILER=clang++`, runs tests.
+- **sanitize-asan**: builds with `SANITIZE=address+undefined`, runs tests under ASan + UBSan + LSan (libbfd suppression via `${{ github.workspace }}/tests/lsan-suppressions.txt`).
+- **sanitize-tsan**: builds with `SANITIZE=thread`, runs tests under TSan.
+
+Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across toolchain versions and would add maintenance noise. Available locally via docker-compose.
 
 ## Code Style
 
