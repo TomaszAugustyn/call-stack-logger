@@ -64,3 +64,51 @@ jobs:
 
     - name: Run unit and integration tests
       run: cd build && ctest --output-on-failure
+
+  sanitize-asan:
+    name: Sanitize (GCC, ASan + UBSan + LSan)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y binutils-dev libc6-dbg
+
+    - name: Configure CMake
+      run: cmake -B build -DBUILD_TESTS=ON -DSANITIZE=address+undefined
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run unit and integration tests under ASan + UBSan + LSan
+      env:
+        ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        # libbfd keeps its symbol-table / object-file caches live to program exit;
+        # these are not leaks in cslg's code — see tests/lsan-suppressions.txt.
+        LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan-suppressions.txt:print_suppressions=0
+      run: cd build && ctest --output-on-failure
+
+  sanitize-tsan:
+    name: Sanitize (GCC, TSan)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y binutils-dev libc6-dbg
+
+    - name: Configure CMake
+      run: cmake -B build -DBUILD_TESTS=ON -DSANITIZE=thread
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run unit and integration tests under TSan
+      env:
+        TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+      run: cd build && ctest --output-on-failure

@@ -81,3 +81,35 @@ services:
         cmake --build build-tsan -j$$(nproc) &&
         cd build-tsan && ctest --output-on-failure
       "
+
+  # Clang variants of the sanitizer runs. GCC already covers the core sweep in CI,
+  # these services exist for local spot-checks (Clang's LSan is stricter than GCC's
+  # so it validates the libbfd suppression file, and Clang's TSan uses a different
+  # runtime — worth occasional cross-checking).
+  sanitize-asan-clang:
+    build: .
+    volumes:
+      - .:/workspace
+    environment:
+      ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1"
+      UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+      LSAN_OPTIONS: "suppressions=/workspace/tests/lsan-suppressions.txt:print_suppressions=0"
+    command: >
+      bash -c "
+        cmake -B build-asan-clang -DBUILD_TESTS=ON -DSANITIZE=address+undefined -DCMAKE_CXX_COMPILER=clang++ &&
+        cmake --build build-asan-clang -j$$(nproc) &&
+        cd build-asan-clang && ctest --output-on-failure
+      "
+
+  sanitize-tsan-clang:
+    build: .
+    volumes:
+      - .:/workspace
+    environment:
+      TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
+    command: >
+      bash -c "
+        cmake -B build-tsan-clang -DBUILD_TESTS=ON -DSANITIZE=thread -DCMAKE_CXX_COMPILER=clang++ &&
+        cmake --build build-tsan-clang -j$$(nproc) &&
+        cd build-tsan-clang && ctest --output-on-failure
+      "
