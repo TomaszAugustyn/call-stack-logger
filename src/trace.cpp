@@ -505,6 +505,14 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_exit(void *callee, void *caller) {
     if (t_state.in_instrumentation) { return; }
+#ifdef LOG_ELAPSED
+    // Set the re-entrancy guard because below we call std::chrono::steady_clock::now()
+    // and pwrite() — calls that are safe in trace.cpp (compiled without instrumentation)
+    // but want protection from any exotic indirect instrumentation path. Without
+    // LOG_ELAPSED the exit handler is mutex-free and I/O-free, so we keep the
+    // zero-overhead guarantee by skipping these stores entirely.
+    t_state.in_instrumentation = true;
+#endif
     // Read fp once — don't call get_thread_fp() here since we never want lazy open
     // from an exit handler (there was no matching enter).
     if (t_state.trace_file.fp.load(std::memory_order_relaxed) != nullptr) {
@@ -515,12 +523,47 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
             t_state.frame_overflow_count--;
             t_state.current_stack_depth--;
         } else if (t_state.frame_resolved_top >= 0) {
-            bool was_resolved = t_state.frame_resolved_stack[t_state.frame_resolved_top--];
+            // Save the index BEFORE decrement so LOG_ELAPSED can index into the
+            // per-frame time/offset arrays at the same slot the enter handler
+            // wrote to. Behavioral parity with the original post-decrement
+            // one-liner: frame_resolved_top is read, value observed, then
+            // decremented — no functional change for LOG_ELAPSED=OFF.
+            const int idx = t_state.frame_resolved_top;
+            const bool was_resolved = t_state.frame_resolved_stack[idx];
+            t_state.frame_resolved_top--;
             if (was_resolved) {
                 t_state.current_stack_depth--;
+#ifdef LOG_ELAPSED
+                // Compute elapsed and patch the matching line's placeholder.
+                const auto exit_time = std::chrono::steady_clock::now();
+                const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        exit_time - t_state.frame_enter_time[idx]).count();
+                // steady_clock is monotonic so elapsed shouldn't go negative,
+                // but clamp defensively so the uint64_t cast stays safe across
+                // any future clock-source quirks.
+                const std::uint64_t ns = (elapsed < 0) ? 0 :
+                        static_cast<std::uint64_t>(elapsed);
+                char buf[utils::DURATION_FIELD_WIDTH + 1];
+                utils::format_duration_12chars(ns, buf);
+                const int pfd = t_state.trace_file.patch_fd.load(std::memory_order_relaxed);
+                if (pfd >= 0) {
+                    // pwrite is atomic for our 12 bytes (well under PIPE_BUF) and
+                    // honors the explicit offset because patch_fd was opened WITHOUT
+                    // O_APPEND. Return value intentionally unchecked: the only
+                    // failure modes are racing shutdown closing pfd (EBADF, no
+                    // recovery possible) or a disk-I/O hardware error — in either
+                    // case the placeholder stays visible in the trace, which is
+                    // the documented degraded-but-readable mode.
+                    (void)pwrite(pfd, buf, utils::DURATION_FIELD_WIDTH,
+                                 t_state.frame_placeholder_offset[idx]);
+                }
+#endif
             }
         }
     }
+#ifdef LOG_ELAPSED
+    t_state.in_instrumentation = false;
+#endif
 }
 
 #endif
