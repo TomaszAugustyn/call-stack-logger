@@ -33,6 +33,9 @@
 build/*
 build-clang/*
 build-disabled/*
+build-elapsed/*
+build-elapsed-asan/*
+build-elapsed-tsan/*
 
 # IDE specific dirs
 .vscode
