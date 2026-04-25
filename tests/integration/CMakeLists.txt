@@ -62,7 +62,9 @@ endif()
 # Library variants for testing build-time flags. Each rebuilds the library sources
 # with one of the gated #defines so we can exercise the corresponding code path
 # without polluting the main build (the main library is built without these flags).
-foreach(variant IN ITEMS log_addr log_not_demangled)
+#
+# Single-flag variants (each gets exactly one macro defined):
+foreach(variant IN ITEMS log_addr log_not_demangled log_elapsed)
     string(TOUPPER "${variant}" variant_upper)
     add_library(callstacklogger_${variant} STATIC
         ${PROJECT_SOURCE_DIR}/src/callStack.cpp
@@ -89,6 +91,38 @@ foreach(variant IN ITEMS log_addr log_not_demangled)
     endif()
 endforeach()
 
+# Combined-flags variant: all three gated macros defined simultaneously. Exercises
+# LOG_ELAPSED's byte-offset math under the line-layout changes introduced by
+# LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the placeholder
+# position (right after the fixed-width timestamp) is independent of the tail
+# layout and that pwrite() never stomps the addr column.
+set(combined_variant log_elapsed_addr_not_demangled)
+add_library(callstacklogger_${combined_variant} STATIC
+    ${PROJECT_SOURCE_DIR}/src/callStack.cpp
+    ${PROJECT_SOURCE_DIR}/src/trace.cpp)
+target_include_directories(callstacklogger_${combined_variant} PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
+target_compile_definitions(callstacklogger_${combined_variant} PUBLIC
+    LOG_ELAPSED LOG_ADDR LOG_NOT_DEMANGLED)
+target_compile_options(callstacklogger_${combined_variant} INTERFACE -g)
+target_link_options(callstacklogger_${combined_variant} INTERFACE -rdynamic)
+target_link_libraries(callstacklogger_${combined_variant} PUBLIC -ldl -lbfd)
+
+add_executable(traced_test_program_${combined_variant} traced_program.cpp)
+target_compile_features(traced_test_program_${combined_variant} PRIVATE cxx_std_17)
+target_compile_options(traced_test_program_${combined_variant} PRIVATE ${INSTRUMENT_FLAGS})
+target_link_libraries(traced_test_program_${combined_variant} PRIVATE
+    callstacklogger_${combined_variant})
+
+cslg_apply_sanitizers(callstacklogger_${combined_variant})
+cslg_apply_sanitizers(traced_test_program_${combined_variant})
+
+if(COVERAGE)
+    target_compile_options(callstacklogger_${combined_variant} PRIVATE --coverage)
+    target_compile_options(traced_test_program_${combined_variant} PRIVATE --coverage)
+    target_link_options(traced_test_program_${combined_variant} PRIVATE --coverage)
+endif()
+
 # The integration test runner executes traced_test_program and parses output.
 # Compiled WITHOUT instrumentation — just gtest code.
 add_executable(integration_tests test_integration.cpp)
@@ -105,17 +139,22 @@ target_compile_definitions(integration_tests PRIVATE
     CALLSTACK_API_PROGRAM_PATH="$<TARGET_FILE:callstack_api_program>"
     TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
     TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH="$<TARGET_FILE:traced_test_program_log_not_demangled>"
+    TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed>"
+    TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed_addr_not_demangled>"
 )
 
-# When the user passes -DLOG_ADDR=ON or -DLOG_NOT_DEMANGLED=ON globally, the
-# default callstacklogger target also defines that macro PUBLIC — so tests that
-# expect the DEFAULT build to NOT have the macro must skip themselves to avoid
-# false failures.
+# When the user passes -DLOG_ADDR=ON, -DLOG_NOT_DEMANGLED=ON, or -DLOG_ELAPSED=ON
+# globally, the default callstacklogger target also defines that macro PUBLIC —
+# so tests that expect the DEFAULT build to NOT have the macro must skip themselves
+# to avoid false failures.
 if(LOG_ADDR)
     target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_ADDR)
 endif()
 if(LOG_NOT_DEMANGLED)
     target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_NOT_DEMANGLED)
+endif()
+if(LOG_ELAPSED)
+    target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_ELAPSED)
 endif()
 
 if(COVERAGE)

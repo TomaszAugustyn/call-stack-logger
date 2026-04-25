@@ -13,6 +13,14 @@ project(call-stack-logger)
 option(BUILD_TESTS "Build unit and integration tests" OFF)
 option(COVERAGE "Enable code coverage (requires GCC)" OFF)
 
+# Opt-in per-function duration tracking. When ON, every instrumented function's
+# exit patches the in-place "[  pending ]" placeholder on its enter line with the
+# actual elapsed duration (auto-scaled SI units), using a second non-O_APPEND fd
+# and pwrite(). When OFF (default), zero runtime or code-size cost — all the
+# LOG_ELAPSED machinery is inside #ifdef LOG_ELAPSED blocks. See the
+# "Per-function timing" section in README.md for details.
+option(LOG_ELAPSED "Record and display per-function duration in trace output" OFF)
+
 # Sanitizers: opt-in, for debugging / CI runs. Flags are applied PRIVATE to every
 # cslg target (library + demo + tests) so external users who link callstacklogger
 # never inherit sanitizer flags — they link a clean library regardless.
@@ -106,7 +114,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     string(STRIP "${CPP_STD_INCLUDES}" CPP_STD_INCLUDES)
 
     # Also exclude the project's instrumentation headers from instrumentation.
-    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/format.h,include/prettyTime.h,include/traceFilePath.h" CACHE STRING "")
+    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/format.h,include/prettyTime.h,include/traceFilePath.h,include/durationFormat.h" CACHE STRING "")
     message(STATUS "CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}]")
 
     set(INSTRUMENT_FLAGS -finstrument-functions
