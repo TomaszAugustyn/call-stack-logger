@@ -205,11 +205,42 @@ void open_this_thread_file(PerThreadState& self) {
         return;
     }
 
+#ifdef LOG_ELAPSED
+    // Second fd to the same file, WITHOUT O_APPEND, reserved for pwrite()-patching
+    // the fixed-width "[  pending ]" placeholders with real durations on exit. A
+    // single O_APPEND fd would force every pwrite to EOF on Linux (documented in
+    // pwrite(2)), so we need this separate handle. Both fds share the kernel
+    // inode; writes never overlap in byte range — fp only writes NEW bytes
+    // beyond EOF, pfd only rewrites EXISTING placeholder bytes.
+    int pfd = open(path.c_str(), O_WRONLY | O_NOFOLLOW);
+    if (pfd < 0) {
+        fclose(fp);
+        fprintf(stderr,
+                "[call-stack-logger] WARNING: Could not open %s for duration patching\n",
+                path.c_str());
+        return;
+    }
+#endif
+
     // Line-buffered mode: flushes after each '\n' (every trace line). Crash-safe
     // without per-call fflush overhead.
     setvbuf(fp, NULL, _IOLBF, 0);
     self.trace_file.fp.store(fp, std::memory_order_relaxed);
+#ifdef LOG_ELAPSED
+    self.trace_file.patch_fd.store(pfd, std::memory_order_relaxed);
+#endif
+
     write_run_separator_header(fp, tid);
+
+#ifdef LOG_ELAPSED
+    // Seed the per-thread byte cursor to the current EOF, which now reflects
+    // everything written by prior runs (multi-run append) AND the separator
+    // header we just wrote. Line-buffered stdio flushed the header on its final
+    // '\n', so lseek on pfd observes the post-header size. SEEK_END on a
+    // non-O_APPEND fd returns the file size without affecting fp's position.
+    off_t eof = lseek(pfd, 0, SEEK_END);
+    self.cursor = (eof == static_cast<off_t>(-1)) ? 0 : eof;
+#endif
 
     // Register this file so trace_shutdown() can close it at program exit if the
     // thread is still alive. If shutdown has already completed (edge case: a new
@@ -220,6 +251,10 @@ void open_this_thread_file(PerThreadState& self) {
         if (g.shutdown_complete.load(std::memory_order_relaxed)) {
             fclose(fp);
             self.trace_file.fp.store(nullptr, std::memory_order_relaxed);
+#ifdef LOG_ELAPSED
+            close(pfd);
+            self.trace_file.patch_fd.store(-1, std::memory_order_relaxed);
+#endif
             return;
         }
         g.open_files.push_back(&self.trace_file);
@@ -279,6 +314,13 @@ static void trace_shutdown() {
     // null and skip. exchange ensures any worker loading fp after our store sees
     // nullptr; workers that already loaded the old fp may briefly write to a closing
     // FILE* — the documented shutdown-race trade-off.
+    //
+    // Under LOG_ELAPSED we also close the companion patch_fd for each thread.
+    // Order matters: null fp first, then close patch_fd. If a worker observes
+    // fp != nullptr it will proceed into the enter/exit path and may pwrite;
+    // nulling fp first makes it skip the whole line, so patch_fd is safe to
+    // close next. Workers that already loaded the old patch_fd may briefly
+    // pwrite into a closing fd (EBADF, no crash) — same accepted shutdown race.
     {
         std::lock_guard<std::mutex> lock(g.open_files_mutex);
         for (PerThreadTraceFile* f : g.open_files) {
@@ -287,6 +329,12 @@ static void trace_shutdown() {
             if (fp != nullptr) {
                 fclose(fp);
             }
+#ifdef LOG_ELAPSED
+            int pfd = f->patch_fd.exchange(-1, std::memory_order_relaxed);
+            if (pfd != -1) {
+                close(pfd);
+            }
+#endif
         }
         g.open_files.clear();
     }
@@ -320,11 +368,21 @@ PerThreadTraceFile::~PerThreadTraceFile() {
     // Re-check under lock: trace_shutdown() may have raced and already closed us.
     // Use exchange so we both observe and claim the fp atomically.
     FILE* old = fp.exchange(nullptr, std::memory_order_relaxed);
+#ifdef LOG_ELAPSED
+    // Claim patch_fd too. If shutdown raced in, it already nulled both — old
+    // will be nullptr and old_pfd will be -1, and we return without touching them.
+    int old_pfd = patch_fd.exchange(-1, std::memory_order_relaxed);
+#endif
     if (old == nullptr) {
         return;
     }
 
     fclose(old);
+#ifdef LOG_ELAPSED
+    if (old_pfd != -1) {
+        close(old_pfd);
+    }
+#endif
 
     if (registered) {
         // Erase self from the registry. We hold a pointer to this, but after this
@@ -341,6 +399,18 @@ __attribute__ ((constructor))
 NO_INSTRUMENT
 void trace_begin() {
     t_state.in_instrumentation = true;
+
+#ifdef LOG_ELAPSED
+    // Belt-and-suspenders: the LOG_ELAPSED byte-offset derivation assumes
+    // pretty_time() returns exactly PRETTY_TIME_LENGTH characters. If someone
+    // changes LOGGER_PRETTY_TIME_FORMAT / LOGGER_PRETTY_MS_FORMAT without also
+    // updating PRETTY_TIME_LENGTH, the unit test catches it — this runtime
+    // check is a second line of defense for downstream consumers who might
+    // somehow skip the unit test but still end up here. Aborts loudly rather
+    // than silently corrupting trace files.
+    assert(utils::pretty_time().size() == utils::PRETTY_TIME_LENGTH
+           && "PRETTY_TIME_LENGTH mismatch — see include/prettyTime.h");
+#endif
 
     // Capture the main thread's TID before any worker thread exists. Worker threads
     // compare their gettid() to this value to decide main-file vs per-tid-file.
