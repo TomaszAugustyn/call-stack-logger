@@ -10,6 +10,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <ctime>
 #include <string>
 
@@ -24,6 +25,13 @@ namespace utils {
 
 // printf format
 #define LOGGER_PRETTY_MS_FORMAT ".%03ld"
+
+// Guaranteed output length of pretty_time(): "DD-MM-YYYY HH:MM:SS.mmm" = 23 chars.
+// Tied to LOGGER_PRETTY_TIME_FORMAT + LOGGER_PRETTY_MS_FORMAT. If either format
+// changes, update this constant — the PrettyTimeTest.LengthMatchesConstant unit
+// test enforces consistency and will fail fast on drift. Downstream code
+// (notably LOG_ELAPSED in trace.cpp) derives byte offsets from this value.
+inline constexpr std::size_t PRETTY_TIME_LENGTH = 23;
 
 // Convert current time to milliseconds since unix epoch.
 // NO_INSTRUMENT: called from the instrumentation pipeline (resolve -> pretty_time -> to_ms).

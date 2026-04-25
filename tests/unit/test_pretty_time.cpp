@@ -35,6 +35,19 @@ TEST(PrettyTimeTest, CorrectLength) {
     EXPECT_EQ(ts.length(), 23u) << "Timestamp '" << ts << "' has unexpected length";
 }
 
+// The PRETTY_TIME_LENGTH compile-time constant must match the actual output length.
+// LOG_ELAPSED derives byte offsets from this constant; any drift between the
+// declared constant and what pretty_time() produces would silently corrupt
+// the patched duration field. This test is the authoritative guardrail.
+TEST(PrettyTimeTest, LengthMatchesConstant) {
+    std::string ts = utils::pretty_time();
+    EXPECT_EQ(ts.length(), utils::PRETTY_TIME_LENGTH)
+            << "pretty_time() returned " << ts.length() << " chars ('" << ts
+            << "') but PRETTY_TIME_LENGTH is " << utils::PRETTY_TIME_LENGTH
+            << ". Update the constant in include/prettyTime.h to match, and "
+            << "audit any code that derives offsets from it (LOG_ELAPSED in trace.cpp).";
+}
+
 // Calling pretty_time() twice in quick succession should produce similar timestamps.
 TEST(PrettyTimeTest, ConsecutiveCallsProduceSimilarTimestamps) {
     std::string ts1 = utils::pretty_time();
