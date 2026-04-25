@@ -25,10 +25,20 @@ namespace utils {
 // tree indentation, function name, and caller location.
 // Uses snprintf into a stack buffer instead of std::ostringstream to avoid heap
 // allocation on every traced function call.
+//
+// `after_timestamp` is inserted verbatim immediately after the "[<timestamp>] "
+// prefix and before everything else (addr / tree / name / caller). It exists so
+// LOG_ELAPSED can splice a fixed-width "[  pending ] " duration placeholder into
+// every line at a position whose byte offset is independent of LOG_ADDR /
+// LOG_NOT_DEMANGLED. The default empty string preserves today's output byte-for-
+// byte — all existing call sites are unaffected. This header stays flag-agnostic:
+// the caller in trace.cpp decides what, if anything, to splice in.
+//
 // NO_INSTRUMENT: this function is part of the instrumentation pipeline (called from
 // __cyg_profile_func_enter) and must not be instrumented itself.
 NO_INSTRUMENT
-inline std::string format(const instrumentation::ResolvedFrame& frame, int current_stack_depth) {
+inline std::string format(const instrumentation::ResolvedFrame& frame, int current_stack_depth,
+                          const char* after_timestamp = "") {
 
     constexpr size_t BUF_SIZE = 2048;
     char buf[BUF_SIZE];
@@ -40,6 +50,17 @@ inline std::string format(const instrumentation::ResolvedFrame& frame, int curre
     if (n > 0 && n < remaining) {
         pos += n;
         remaining -= n;
+    }
+
+    // Optional splice immediately after the timestamp (LOG_ELAPSED uses this
+    // to reserve the fixed-width duration field). If `after_timestamp` is the
+    // default empty string this is a no-op and incurs no bytes.
+    if (after_timestamp && *after_timestamp && remaining > 0) {
+        n = std::snprintf(buf + pos, remaining, "%s", after_timestamp);
+        if (n > 0 && n < remaining) {
+            pos += n;
+            remaining -= n;
+        }
     }
 
     // Optional address (when LOG_ADDR is defined)

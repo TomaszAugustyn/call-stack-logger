@@ -69,17 +69,25 @@ std::vector<std::string> split_lines(const std::string& content) {
 
 // Count leading indentation characters ("|  " and "|_ " patterns) in a trace line.
 // Returns the nesting depth based on the tree prefix.
+//
+// Scans forward to the FIRST "|  " or "|_ " occurrence rather than stopping at
+// the first "] ", so the helper tolerates any number of bracketed prefixes
+// between the timestamp and the tree — specifically: the LOG_ELAPSED duration
+// field ("[  pending ]" or a patched duration) and the LOG_ADDR field
+// ("addr: [0x...]"). The tree characters are unambiguous on a valid trace line
+// because none of the prefix content ever contains those exact 3-char sequences.
 int count_indentation_depth(const std::string& line) {
-    int depth = 0;
-    // Find the first "|" after the timestamp (which is in brackets)
-    auto bracket_end = line.find("] ");
-    if (bracket_end == std::string::npos) return 0;
-
-    std::string after_ts = line.substr(bracket_end + 2);
     size_t pos = 0;
-    while (pos + 2 < after_ts.size()) {
-        if (after_ts.substr(pos, 3) == "|  " || after_ts.substr(pos, 3) == "|_ ") {
-            depth++;
+    while (pos + 2 < line.size()) {
+        if (line.compare(pos, 3, "|  ") == 0 || line.compare(pos, 3, "|_ ") == 0) {
+            break;
+        }
+        ++pos;
+    }
+    int depth = 0;
+    while (pos + 2 < line.size()) {
+        if (line.compare(pos, 3, "|  ") == 0 || line.compare(pos, 3, "|_ ") == 0) {
+            ++depth;
             pos += 3;
         } else {
             break;

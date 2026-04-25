@@ -451,6 +451,13 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
     // destructors of std library types may be instrumented, so in_instrumentation must
     // remain true until all destructors have run.
     t_state.in_instrumentation = true;
+#ifdef LOG_ELAPSED
+    // Snapshot monotonic time right after crossing the re-entrancy guard so the
+    // recorded enter-time is as close as possible to the instrumented function's
+    // actual call boundary. BFD resolution below adds tens of microseconds — we
+    // explicitly don't want that in the reported duration.
+    const auto enter_time = std::chrono::steady_clock::now();
+#endif
     FILE* fp = get_thread_fp();
     if (fp != nullptr) {
         auto maybe_resolved = instrumentation::resolve(callee, caller);
@@ -464,9 +471,32 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         }
         if (resolved) {
             t_state.current_stack_depth++;
+#ifdef LOG_ELAPSED
+            // Splice a fixed-width "[  pending ] " placeholder right after the
+            // timestamp. See include/durationFormat.h for the width invariant.
+            std::string line = utils::format(*maybe_resolved, t_state.current_stack_depth,
+                                             "[  pending ] ");
+            // Placeholder sits at "[<timestamp>] " offset = 1 + PRETTY_TIME_LENGTH + 2.
+            // Record that offset + the enter timestamp BEFORE writing so a racing
+            // shutdown that nulls fp between our store and our write does not leave
+            // stale data in the per-frame slots (worst case: the write never happens
+            // because fp is already closed, and the slots we stored are harmless).
+            static constexpr std::size_t PLACEHOLDER_OFFSET_IN_LINE =
+                    utils::PRETTY_TIME_LENGTH + 3;
+            t_state.frame_enter_time[t_state.frame_resolved_top] = enter_time;
+            t_state.frame_placeholder_offset[t_state.frame_resolved_top] =
+                    t_state.cursor + static_cast<off_t>(PLACEHOLDER_OFFSET_IN_LINE);
+            // No mutex: this FILE* is private to this thread. fputs + fputc give
+            // us a known-exact byte count (line.size() + 1) so cursor tracking
+            // stays accurate without any ftello/fflush calls on the hot path.
+            fputs(line.c_str(), fp);
+            fputc('\n', fp);
+            t_state.cursor += static_cast<off_t>(line.size() + 1);
+#else
             // No mutex: this FILE* is private to this thread.
             fprintf(fp, "%s\n",
                     utils::format(*maybe_resolved, t_state.current_stack_depth).c_str());
+#endif
         }
     } // maybe_resolved destructor runs here, still under guard
     t_state.in_instrumentation = false;
