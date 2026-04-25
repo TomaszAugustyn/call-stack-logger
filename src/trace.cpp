@@ -23,6 +23,13 @@
 #include <unistd.h>
 #include <vector>
 
+#ifdef LOG_ELAPSED
+    #include "durationFormat.h"
+    #include <cassert>
+    #include <chrono>
+    #include <sys/stat.h>
+#endif
+
 // clang-format off
 #ifndef DISABLE_INSTRUMENTATION
 
@@ -47,6 +54,17 @@ struct PerThreadTraceFile {
     bool open_attempted = false;   // avoid retry after open failure
     bool registered = false;       // set true once added to g_trace().open_files
 
+#ifdef LOG_ELAPSED
+    // Second file descriptor to the same trace file, opened WITHOUT O_APPEND so
+    // pwrite() can patch the fixed-width duration placeholder at explicit byte
+    // offsets. fp (above) still uses O_APPEND for sequential line writes —
+    // the two fds share the kernel inode; writes never overlap in byte range
+    // (fp writes NEW bytes beyond EOF, patch_fd rewrites EXISTING placeholder
+    // bytes). Atomic for the same reason as fp: shutdown on another thread may
+    // close it concurrently with the owning thread's hot-path reads.
+    std::atomic<int> patch_fd{-1};
+#endif
+
     NO_INSTRUMENT PerThreadTraceFile() = default;
     NO_INSTRUMENT ~PerThreadTraceFile();   // defined after TraceGlobals
 
@@ -68,6 +86,27 @@ struct PerThreadState {
     int frame_overflow_count = 0;
     // Cached gettid() result (0 means not yet resolved). Avoids a syscall per trace call.
     pid_t cached_tid = 0;
+
+#ifdef LOG_ELAPSED
+    // Per-frame enter timestamp, used to compute elapsed duration on exit.
+    // Indexed by the same counter as frame_resolved_stack[] — one slot per
+    // instrumented-and-resolved frame currently on the stack.
+    std::chrono::steady_clock::time_point frame_enter_time[MAX_TRACE_DEPTH] = {};
+
+    // Byte offset (into this thread's trace file) of the "[  pending ]"
+    // placeholder for each frame. On exit we pwrite the formatted duration at
+    // this offset. Using an int64_t-compatible type so off_t's signedness is
+    // explicit at the use site.
+    off_t frame_placeholder_offset[MAX_TRACE_DEPTH] = {};
+
+    // Running byte position for this thread's trace file. Seeded from
+    // stat().st_size when the file is opened (handles multi-run append where
+    // earlier runs already wrote content + separator headers). Advanced by
+    // exactly the number of bytes we wrote for every line — lets us compute
+    // placeholder offsets without calling ftello() on the hot path.
+    off_t cursor = 0;
+#endif
+
     PerThreadTraceFile trace_file;
 };
 
