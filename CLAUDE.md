@@ -171,6 +171,73 @@ overengineering for a debugging tool.
 
 `fork()` is not supported.
 
+### Per-Function Timing (LOG_ELAPSED)
+
+Opt-in via `-DLOG_ELAPSED=ON`. When enabled, every traced function's exit
+patches the corresponding line on disk in place with the elapsed duration —
+no second line, no reorder, no growth in line count.
+
+**Two-fd-per-thread design.** Each thread opens its trace file twice:
+the existing `FILE* fp` with `O_APPEND` (used for sequential writes —
+header lines, enter lines) and a new raw `int patch_fd` opened
+**without** `O_APPEND`, used only for `pwrite()`. Both descriptors share
+the kernel inode (it's one file on disk). Without the second fd, `pwrite`
+on Linux is silently redirected to EOF when the fd has `O_APPEND` — see
+`pwrite(2)`. The two fds never overlap in byte range: `fp` only writes
+**new** bytes beyond EOF, `patch_fd` only rewrites **existing**
+placeholder bytes.
+
+**Fixed-width invariant.** Every duration field is exactly 12 bytes
+(`DURATION_FIELD_WIDTH` in `include/durationFormat.h`). The placeholder
+`[  pending ]`, the saturation sentinel `[  >999.9s ]`, and every output
+of `format_duration_12chars()` match that width — `static_assert`s and
+the `DurationFormatTest` suite enforce this. If it ever broke, pwrite
+would shift bytes and corrupt the file; the invariant is the safety net.
+
+**Cursor tracking, no ftello/fflush.** A `thread_local off_t cursor`
+seeded from `lseek(patch_fd, 0, SEEK_END)` after the run-separator
+header is written. Every line write advances `cursor` by the exact byte
+count. Placeholder offset for a frame is then
+`cursor_before_write + utils::PRETTY_TIME_LENGTH + 3` — the field is
+spliced immediately after `"[<timestamp>] "`, before the optional
+`addr:` column and the tree, which keeps the offset invariant under
+any combination of `LOG_ADDR` / `LOG_NOT_DEMANGLED`.
+
+**Crash-diagnostic feature.** A line on disk holds either a real
+`[   1.234ms]` (function returned cleanly) or `[  pending ]` (still
+executing at the crash). On crash, the chain of `[  pending ]` lines
+near the tail identifies exactly which frames were active at the crash
+site — useful debugging signal that's hard to get otherwise. See README's
+"Per-function timing" section for an example.
+
+**Per-frame state.** Two thread_local arrays parallel to
+`frame_resolved_stack[]`:
+`std::chrono::steady_clock::time_point frame_enter_time[MAX_TRACE_DEPTH]`
+and `off_t frame_placeholder_offset[MAX_TRACE_DEPTH]`. Indexed by
+`frame_resolved_top` so enter/exit operate on the matching slot. The
+exit handler computes `now() - enter_time[idx]`, formats into a 12-byte
+buffer, and `pwrite(patch_fd, buf, 12, frame_placeholder_offset[idx])`.
+
+**Drift guards.** Both the `PrettyTimeTest.LengthMatchesConstant` unit
+test and a runtime `assert()` in `trace_begin()` verify that
+`pretty_time().size() == utils::PRETTY_TIME_LENGTH` — if anyone changes
+either of the time-format strings without updating the constant, the
+build fails fast (or the program aborts at startup) rather than
+silently corrupting trace files.
+
+**Zero overhead when off.** All LOG_ELAPSED-only code lives inside
+`#ifdef LOG_ELAPSED` blocks grouped per logical region (struct fields,
+open path, enter handler, exit handler, close path). With
+`LOG_ELAPSED=OFF` none of `<chrono>`, `<sys/stat.h>`, the patch_fd, the
+per-frame arrays, the cursor, or the pwrite() call compiles. The
+binary is byte-identical to today's default.
+
+**Shutdown race.** Same accepted trade-off as for the `fp` write path:
+worker may be mid-pwrite when shutdown closes `patch_fd` (returns
+EBADF, no crash). `trace_shutdown` nulls `fp` first then closes
+`patch_fd`, so a worker that observes `fp != nullptr` and proceeds to
+write will not also attempt to pwrite into an fd that's already closed.
+
 ### Indentation / Nesting Depth
 
 A `thread_local` `current_stack_depth` counter in `trace.cpp`:
@@ -208,6 +275,13 @@ With optional address logging when `LOG_ADDR` is defined:
 [DD-MM-YYYY HH:MM:SS.mmm] addr: [0x00007fff12345678] |_ functionName  (called from: filename.cpp:42)
 ```
 
+With `LOG_ELAPSED` defined, a 12-byte fixed-width duration field sits between
+the timestamp and the rest (compatible with `LOG_ADDR`):
+```
+[DD-MM-YYYY HH:MM:SS.mmm] [   1.234ms] |_ functionName  (called from: filename.cpp:42)
+[DD-MM-YYYY HH:MM:SS.mmm] [   1.234ms] addr: [0x00007fff12345678] |_ functionName  (called from: ...)
+```
+
 ## File Structure
 
 ```
@@ -225,8 +299,9 @@ call-stack-logger/
 |-- .gitignore                  # Ignores build artifacts, IDE files, *.out
 |-- include/
 |   |-- callStack.h             # bfdResolver struct, get_call_stack(), resolve() API
+|   |-- durationFormat.h        # utils::format_duration_12chars (LOG_ELAPSED helper)
 |   |-- format.h                # utils::format() - formats ResolvedFrame into string
-|   |-- prettyTime.h            # utils::pretty_time() - timestamp with milliseconds
+|   |-- prettyTime.h            # utils::pretty_time() + PRETTY_TIME_LENGTH constant
 |   |-- traceFilePath.h         # utils::resolve_base_trace_path + build_trace_filename
 |   |-- types.h                 # ResolvedFrame struct definition
 |   |-- unwinder.h              # FrameUnwinder template, Callback, unwind_nth_frame()
@@ -240,6 +315,7 @@ call-stack-logger/
 |   |-- CMakeLists.txt          # FetchContent for Google Test, add subdirs
 |   |-- unit/
 |   |   |-- CMakeLists.txt      # Unit test executable (no instrumentation)
+|   |   |-- test_duration_format.cpp # Tests for utils::format_duration_12chars()
 |   |   |-- test_format.cpp     # Tests for utils::format()
 |   |   |-- test_pretty_time.cpp # Tests for utils::pretty_time() and to_ms()
 |   |   |-- test_trace_file_path.cpp # Tests for resolve_base_trace_path + build_trace_filename
@@ -247,6 +323,7 @@ call-stack-logger/
 |       |-- CMakeLists.txt      # Traced programs + integration test runner
 |       |-- traced_program.cpp  # Instrumented single-threaded program for testing
 |       |-- threaded_traced_program.cpp # Instrumented multi-threaded program (per-thread files)
+|       |-- log_elapsed_traced_program.cpp # Instrumented program with usleep() sentinels for LOG_ELAPSED tests
 |       |-- callstack_api_program.cpp # Non-instrumented; exercises get_call_stack() API
 |       |-- test_integration.cpp # All integration tests (single/multi-threaded + API)
 |-- lib/                        # Empty dir (placeholder for external libs)
@@ -284,7 +361,19 @@ log line with optional address, tree indentation, function name, and caller loca
 
 ### `include/prettyTime.h`
 `utils::pretty_time()` returns current time as `"DD-MM-YYYY HH:MM:SS.mmm"` string.
-**Note:** Uses `std::localtime()` which is not thread-safe.
+**Note:** Uses `localtime_r()` (thread-safe POSIX variant). Also exposes
+`utils::PRETTY_TIME_LENGTH = 23` — the guaranteed output length, depended on by
+LOG_ELAPSED to derive the placeholder byte offset without magic numbers.
+`PrettyTimeTest.LengthMatchesConstant` enforces the constant matches actual output.
+
+### `include/durationFormat.h`
+`utils::format_duration_12chars(uint64_t ns, char out[13])` renders a nanosecond
+duration into a fixed 12-byte field with auto-scaled SI units (`[ 123.456ns]`,
+`[ 123.456us]`, `[ 123.456ms]`, `[ 123.456s ]`, saturating at `[  >999.9s ]`).
+Also exposes the `DURATION_PLACEHOLDER` ("[  pending ]") and `DURATION_SATURATION`
+constants. The 12-byte width is a hard invariant — `static_assert`s and the
+`DurationFormatTest` suite enforce every code path matches it. Used only when
+LOG_ELAPSED is enabled.
 
 ### `include/traceFilePath.h`
 Two pure `NO_INSTRUMENT inline` helpers used by `trace.cpp` to compute per-thread trace
@@ -370,6 +459,7 @@ make run                                # Run
 |--------|--------|
 | `LOG_ADDR` | Include function addresses in trace output |
 | `LOG_NOT_DEMANGLED` | Log functions even when demangling fails |
+| `LOG_ELAPSED` | Record per-function duration via in-place pwrite() patching of a 12-byte placeholder spliced after the timestamp. See "Per-function timing" below. |
 | `DISABLE_INSTRUMENTATION` | Compile without any instrumentation hooks |
 
 ### Link Dependencies
@@ -416,10 +506,15 @@ FetchContent (downloaded once, cached for offline use).
 
 Test pure/deterministic functions from the include headers:
 - `test_format.cpp` — tree indentation, address formatting, line numbers, buffer handling
-- `test_pretty_time.cpp` — timestamp format, length, milliseconds, `to_ms()` conversion
+- `test_pretty_time.cpp` — timestamp format, length, milliseconds, `to_ms()` conversion;
+  `LengthMatchesConstant` enforces `pretty_time().size() == utils::PRETTY_TIME_LENGTH`
+  (LOG_ELAPSED depends on this for byte-offset derivation)
 - `test_trace_file_path.cpp` — `utils::resolve_base_trace_path()` (env var handling with
   null/empty/absolute/relative/special-char paths) and `utils::build_trace_filename()`
   (main vs worker thread suffix, small and LONG_MAX TIDs)
+- `test_duration_format.cpp` — exhaustive coverage of `utils::format_duration_12chars()`:
+  zero, ns / us / ms / s ranges and boundaries, saturation at 1000s and UINT64_MAX,
+  framing characters, fixed 12-byte width invariant, buffer-overflow canary
 
 ### Integration Tests (`tests/integration/`)
 
@@ -474,6 +569,27 @@ Test pure/deterministic functions from the include headers:
   (important on Clang — `std::thread` internals would explode the trace without
   the runtime filter), all worker files have identical function entry counts
   (proves deterministic per-thread traces).
+- `LogElapsedFlagTest` fixture (5 tests) drives `traced_test_program_log_elapsed`
+  built from `log_elapsed_traced_program.cpp` (a dedicated driver with an
+  `elapsed_outer → elapsed_middle → elapsed_inner` chain and a `usleep(10000)`
+  sentinel inside `elapsed_inner`). Verifies: every entry line carries a 12-byte
+  duration field, no `[  pending ]` placeholders remain after clean exit, parent
+  durations ≥ child durations along the nested chain (proves per-frame indexing
+  of `frame_enter_time` / `frame_placeholder_offset` is correct under LIFO frame
+  stacking), `elapsed_inner` reports ≥10 ms (the usleep), and every line parses
+  cleanly against a strict `[ts] [dur] … (called from: file:line)` regex (proves
+  pwrite never spills past its 12-byte window).
+  `LogElapsedDefaultBuildTest.NoDurationFieldWithoutFlag` is a negative test
+  on the default build (skipped when the build is configured with
+  `-DLOG_ELAPSED=ON`, via `CSLG_DEFAULT_HAS_LOG_ELAPSED`).
+- `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the all-three-flags
+  variant `traced_test_program_log_elapsed_addr_not_demangled`. Asserts the
+  ordering "timestamp → duration → addr" via regex, the tree column stays
+  byte-aligned across same-depth lines (proves the fixed-width LOG_ELAPSED
+  prefix preserves alignment under the LOG_ADDR layout), no pending leftovers,
+  and the `addr: [0x...]` column never gets corrupted by pwrite (catches any
+  byte-stomping past the 12-byte field, since the addr column starts ~13 bytes
+  after the placeholder).
 
 ### Running Tests
 
@@ -607,8 +723,21 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
 6. **Performance overhead:** Every function call triggers symbol resolution via BFD; this tool
    is for debugging/tracing, not production use. `format()` uses `snprintf` with a stack
    buffer to avoid per-call heap allocation.
-7. **Header-only utilities:** `format.h`, `prettyTime.h`, `unwinder.h` contain inline
-   implementations in headers (definitions in headers, not just declarations)
+7. **Header-only utilities:** `format.h`, `prettyTime.h`, `unwinder.h`,
+   `durationFormat.h` contain inline implementations in headers (definitions in
+   headers, not just declarations).
+8. **Per-function timing (`LOG_ELAPSED`)**: opt-in. Each thread opens a SECOND
+   non-O_APPEND fd to its trace file solely so `pwrite()` honors explicit byte
+   offsets (Linux silently redirects pwrite to EOF when the fd has O_APPEND).
+   Enter handler writes a 12-byte `[  pending ]` placeholder spliced after the
+   timestamp; exit handler patches it in place with the SI-auto-scaled duration.
+   Placeholder offset derived from `utils::PRETTY_TIME_LENGTH` (no magic
+   numbers); a unit test plus a runtime assert in `trace_begin()` guard against
+   format-string drift. Crash-safe: lines that don't get patched stay as
+   `[  pending ]`, identifying which frames were active at the crash. Zero
+   overhead when `LOG_ELAPSED=OFF` — all code is `#ifdef`-guarded, the binary
+   is byte-identical to a build without the option. See "Per-Function Timing
+   (LOG_ELAPSED)" in the Architecture section above.
 
 ## Use Cases (from the article)
 

@@ -213,6 +213,7 @@ the consumers you choose.
 |--------|---------|-------------|
 | `LOG_ADDR` | `OFF` | Include function addresses in trace output |
 | `LOG_NOT_DEMANGLED` | `OFF` | Log functions even when demangling fails |
+| `LOG_ELAPSED` | `OFF` | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed). |
 | `DISABLE_INSTRUMENTATION` | `OFF` | Compile without any instrumentation hooks |
 | `BUILD_TESTS` | `OFF` | Build unit and integration tests (fetches Google Test) |
 | `COVERAGE` | `OFF` | Enable code coverage via GCC `--coverage` flag |
@@ -230,6 +231,82 @@ CSLG_OUTPUT_FILE=/tmp/my_trace.out ./build/runDemo
 # Single-threaded program → /tmp/my_trace.out
 # Multi-threaded program → /tmp/my_trace.out + /tmp/my_trace.out_tid_<N> per worker
 ```
+
+## :stopwatch: Per-function timing (`LOG_ELAPSED`) ##
+
+Build with `-DLOG_ELAPSED=ON` to record how long every traced function takes
+to execute, displayed inline alongside the call. Useful for spotting bottlenecks
+in unfamiliar code without leaving the trace-driven debugging workflow.
+
+```bash
+cmake -B build -DLOG_ELAPSED=ON
+cmake --build build
+./build/runDemo
+```
+
+A 12-byte fixed-width duration field is spliced **between the timestamp and the
+tree column**, so it never disturbs tree alignment and is independent of
+`LOG_ADDR` / `LOG_NOT_DEMANGLED`:
+
+```
+[21-04-2026 15:00:00.123] [   0.105s ] |_ main  (called from: …libc-start.c:310)
+[21-04-2026 15:00:00.123] [   0.123us] |  |_ A::foo()  (called from: .../main.cpp:28)
+[21-04-2026 15:00:00.123] [  45.678ms] |  |_ B::foo()  (called from: .../main.cpp:33)
+[21-04-2026 15:00:00.124] [   1.234us] |  |  |_ std::sort<…>  (called from: …)
+```
+
+Combined with `LOG_ADDR=ON` the address column simply follows the duration:
+
+```
+[21-04-2026 15:00:00.123] [   0.105s ] addr: [0x00007fff12345678] |_ main  (called from: …)
+```
+
+### Format ###
+
+| Range | Example | Notes |
+|---|---|---|
+| `< 1 µs`   | `[ 123.000ns]` | `ns` unit |
+| `< 1 ms`   | `[ 123.456us]` | `us` unit |
+| `< 1 s`    | `[ 123.456ms]` | `ms` unit |
+| `< 1000 s` | `[   1.234s ]` | `s ` unit (trailing space pads the field) |
+| `≥ 1000 s` | `[  >999.9s ]` | saturation sentinel |
+
+Auto-scales to keep the output readable. The placeholder while a function is
+still executing is `[  pending ]`.
+
+### Crash diagnostics via `[  pending ]` ###
+
+The duration is written **on function exit** by patching the line in place
+(`pwrite()` over a 12-byte placeholder). If the program crashes while a
+function is still running, that line stays on disk with `[  pending ]`
+intact — **this is a feature, not a bug**. Every line carrying `[  pending ]`
+in the tail of a post-crash trace file identifies a frame that was active
+at the crash site:
+
+```
+[21-04-2026 15:00:01.500] [  pending ] |_ main  (called from: …)
+[21-04-2026 15:00:01.500] [  pending ] |  |_ process_request()  (called from: server.cpp:42)
+[21-04-2026 15:00:01.501] [  pending ] |  |  |_ parse_header()  (called from: server.cpp:120)
+*** SIGSEGV ***
+```
+
+Reading from the bottom up gives the call chain at the crash. Combined
+with the timestamps you also see roughly *when* each frame had been entered
+relative to the crash — additional signal that's hard to get from a stack
+trace alone.
+
+### Cost ###
+
+Adds two `steady_clock::now()` reads (~20 ns each) and one `pwrite()` syscall
+(~0.5–1 µs) per traced function call. Trace file size grows by ~13 bytes per
+line (the placeholder + separator space). For a debug-time tool this is
+negligible compared with the existing BFD symbol resolution. With
+`LOG_ELAPSED=OFF` the produced binary is byte-identical to a build without
+the option — the entire feature is gated behind compile-time `#ifdef`s.
+
+`LOG_ELAPSED` works alongside the multi-threaded per-thread-file design;
+each thread keeps its own pair of file descriptors and patches durations
+independently with no cross-thread synchronization on the write path.
 
 ## :shield: Thread Safety ##
 
