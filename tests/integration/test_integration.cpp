@@ -1025,3 +1025,136 @@ TEST(LogElapsedDefaultBuildTest, NoDurationFieldWithoutFlag) {
             << "Default build unexpectedly has a pending placeholder.";
 #endif
 }
+
+// ============================================================================
+// Combined LOG_ELAPSED + LOG_ADDR + LOG_NOT_DEMANGLED — proves LOG_ELAPSED's
+// fixed byte-offset math is independent of layout changes downstream of the
+// timestamp (LOG_ADDR prepends "addr: [0x...]" before the tree). If the
+// placeholder offset were derived from the line tail rather than from
+// PRETTY_TIME_LENGTH, this combination would silently corrupt the addr column.
+// ============================================================================
+
+class LogElapsedCombinedFlagsTest : public ::testing::Test {
+protected:
+    std::string trace_content;
+    std::vector<std::string> trace_lines;
+    std::string trace_file_path;
+
+    void SetUp() override {
+        char tmp_path[] = "/tmp/cslg_combo_test_XXXXXX";
+        int fd = mkstemp(tmp_path);
+        ASSERT_GE(fd, 0) << "mkstemp failed";
+        close(fd);
+        trace_file_path = tmp_path;
+
+        std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_file_path + "\" \""
+                        + TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH
+                        + "\" > /dev/null 2>&1";
+        int ret = system(cmd.c_str());
+        ASSERT_EQ(ret, 0) << "combined traced program failed, exit=" << ret;
+
+        trace_content = read_file(trace_file_path);
+        trace_lines = split_lines(trace_content);
+    }
+
+    void TearDown() override {
+        if (!trace_file_path.empty()) {
+            unlink(trace_file_path.c_str());
+        }
+    }
+};
+
+// On every entry, the duration field must sit BETWEEN the timestamp and the
+// "addr: [0x...]" column — not after it, not before it. Proves layout ordering.
+TEST_F(LogElapsedCombinedFlagsTest, EveryLineHasDurationThenAddr) {
+    // "[<ts>] [<dur>] addr: [0x<hex>] ..." — the duration field comes right
+    // after the closing ']' of the timestamp.
+    std::regex pattern(R"(\] \[[ >0-9.]{8}(ns|us|ms|s )\] addr: \[0x[0-9a-f]+\] )");
+    int total_entries = 0;
+    int matched = 0;
+    for (const auto& line : trace_lines) {
+        if (line.find("(called from:") == std::string::npos) continue;
+        ++total_entries;
+        if (std::regex_search(line, pattern)) ++matched;
+        else {
+            ADD_FAILURE() << "Combined-flag line missing the expected "
+                             "<dur> then addr ordering:\n" << line;
+        }
+    }
+    ASSERT_GT(total_entries, 0) << "no function entries in trace";
+    EXPECT_EQ(matched, total_entries);
+}
+
+// The tree alignment column (where '|_' lives) must be at the same byte offset
+// for every line at a given depth — proving the fixed-width 13-byte LOG_ELAPSED
+// prefix preserves alignment under the combined LOG_ADDR layout.
+TEST_F(LogElapsedCombinedFlagsTest, TreeColumnsStillAlign) {
+    // Group lines by indentation depth and assert all lines at the same depth
+    // share the same byte position for "|_". depth 0 = top-level frame which
+    // has no '|_' — so we look only at depth >= 1 lines.
+    std::map<int, std::vector<std::size_t>> positions_by_depth;
+    for (const auto& line : trace_lines) {
+        if (line.find("(called from:") == std::string::npos) continue;
+        int depth = count_indentation_depth(line);
+        if (depth < 1) continue;
+        std::size_t pos = line.find("|_ ");
+        if (pos == std::string::npos) continue;
+        positions_by_depth[depth].push_back(pos);
+    }
+
+    ASSERT_FALSE(positions_by_depth.empty())
+            << "no depth-1+ lines found — test assumes nested calls in the program";
+
+    for (const auto& [depth, positions] : positions_by_depth) {
+        ASSERT_FALSE(positions.empty());
+        const std::size_t first = positions.front();
+        for (std::size_t p : positions) {
+            EXPECT_EQ(p, first)
+                    << "Tree column at depth " << depth
+                    << " not aligned: '|_' found at offset " << p
+                    << " but expected " << first
+                    << ". LOG_ELAPSED's 13-byte prefix may be drifting under "
+                       "the combined LOG_ADDR layout.";
+        }
+    }
+}
+
+// No "[  pending ]" placeholders remain after a clean exit, even with all
+// three flags on. This is the same invariant as in LogElapsedFlagTest, but
+// re-checking it under the combined layout proves that addr-column patching
+// hasn't accidentally shifted any per-frame offset.
+TEST_F(LogElapsedCombinedFlagsTest, NoPendingLeftovers) {
+    EXPECT_EQ(trace_content.find("[  pending ]"), std::string::npos)
+            << "Pending placeholder remains under combined flags. Trace:\n"
+            << trace_content;
+}
+
+// On every entry, the addr column must contain a plausible non-zero pointer
+// value. If pwrite() ever stomped past its 12-byte field, the addr column —
+// which sits 13 bytes after the placeholder start — would be the first thing
+// to corrupt.
+TEST_F(LogElapsedCombinedFlagsTest, PwriteDidNotCorruptAddr) {
+    std::regex addr_pat(R"(addr: \[0x([0-9a-f]+)\])");
+    int total_entries = 0;
+    int valid_addrs = 0;
+    for (const auto& line : trace_lines) {
+        if (line.find("(called from:") == std::string::npos) continue;
+        ++total_entries;
+        std::smatch m;
+        if (!std::regex_search(line, m, addr_pat)) {
+            ADD_FAILURE() << "addr column missing or malformed:\n" << line;
+            continue;
+        }
+        // hex value must parse and be non-zero (zero would imply stomped bytes).
+        const std::string hex = m[1].str();
+        try {
+            unsigned long long val = std::stoull(hex, nullptr, 16);
+            if (val != 0) ++valid_addrs;
+            else ADD_FAILURE() << "addr is zero — possible byte corruption:\n" << line;
+        } catch (...) {
+            ADD_FAILURE() << "addr hex unparseable — corruption:\n" << line;
+        }
+    }
+    ASSERT_GT(total_entries, 0) << "no function entries in trace";
+    EXPECT_EQ(valid_addrs, total_entries);
+}
