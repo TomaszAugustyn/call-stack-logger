@@ -63,8 +63,8 @@ endif()
 # with one of the gated #defines so we can exercise the corresponding code path
 # without polluting the main build (the main library is built without these flags).
 #
-# Single-flag variants (each gets exactly one macro defined):
-foreach(variant IN ITEMS log_addr log_not_demangled log_elapsed)
+# Single-flag variants that reuse the existing traced_program.cpp driver:
+foreach(variant IN ITEMS log_addr log_not_demangled)
     string(TOUPPER "${variant}" variant_upper)
     add_library(callstacklogger_${variant} STATIC
         ${PROJECT_SOURCE_DIR}/src/callStack.cpp
@@ -90,6 +90,33 @@ foreach(variant IN ITEMS log_addr log_not_demangled log_elapsed)
         target_link_options(traced_test_program_${variant} PRIVATE --coverage)
     endif()
 endforeach()
+
+# LOG_ELAPSED variant — uses a DEDICATED driver (log_elapsed_traced_program.cpp)
+# with usleep() sentinels at known depths, so LogElapsedFlagTest can assert
+# specific lower bounds on the reported durations.
+add_library(callstacklogger_log_elapsed STATIC
+    ${PROJECT_SOURCE_DIR}/src/callStack.cpp
+    ${PROJECT_SOURCE_DIR}/src/trace.cpp)
+target_include_directories(callstacklogger_log_elapsed PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
+target_compile_definitions(callstacklogger_log_elapsed PUBLIC LOG_ELAPSED)
+target_compile_options(callstacklogger_log_elapsed INTERFACE -g)
+target_link_options(callstacklogger_log_elapsed INTERFACE -rdynamic)
+target_link_libraries(callstacklogger_log_elapsed PUBLIC -ldl -lbfd)
+
+add_executable(traced_test_program_log_elapsed log_elapsed_traced_program.cpp)
+target_compile_features(traced_test_program_log_elapsed PRIVATE cxx_std_17)
+target_compile_options(traced_test_program_log_elapsed PRIVATE ${INSTRUMENT_FLAGS})
+target_link_libraries(traced_test_program_log_elapsed PRIVATE callstacklogger_log_elapsed)
+
+cslg_apply_sanitizers(callstacklogger_log_elapsed)
+cslg_apply_sanitizers(traced_test_program_log_elapsed)
+
+if(COVERAGE)
+    target_compile_options(callstacklogger_log_elapsed PRIVATE --coverage)
+    target_compile_options(traced_test_program_log_elapsed PRIVATE --coverage)
+    target_link_options(traced_test_program_log_elapsed PRIVATE --coverage)
+endif()
 
 # Combined-flags variant: all three gated macros defined simultaneously. Exercises
 # LOG_ELAPSED's byte-offset math under the line-layout changes introduced by

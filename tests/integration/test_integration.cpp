@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <limits>
 #include <map>
 #include <regex>
 #include <set>
@@ -44,6 +45,12 @@
 #endif
 #ifndef CALLSTACK_API_PROGRAM_PATH
     #error "CALLSTACK_API_PROGRAM_PATH must be defined by CMake"
+#endif
+#ifndef TRACED_PROGRAM_LOG_ELAPSED_PATH
+    #error "TRACED_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
+#endif
+#ifndef TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH
+    #error "TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH must be defined by CMake"
 #endif
 
 namespace {
@@ -797,4 +804,224 @@ TEST(LogNotDemangledFlagTest, ProducesNormalTraceOutput) {
             << "no function entries";
     EXPECT_NE(content.find("main"), std::string::npos)
             << "main not in trace";
+}
+
+// ============================================================================
+// LOG_ELAPSED build-flag tests
+//
+// Each line produced under -DLOG_ELAPSED=ON carries a 12-byte fixed-width
+// duration field "[  1.234us]" / "[ 123.456ms]" / etc. between the timestamp
+// and whatever follows (addr / tree / name / caller). On function exit the
+// logger pwrites the formatted elapsed duration on top of the "[  pending ]"
+// placeholder written at enter. These tests drive a dedicated program
+// (log_elapsed_traced_program.cpp) that has a predictable nested call chain
+// (elapsed_outer -> elapsed_middle -> elapsed_inner) with a usleep(10000)
+// sentinel at the deepest frame.
+// ============================================================================
+
+namespace {
+
+// Regex for any valid duration field: "[ 1.234ns]" / "[ 123.456us]" / ...
+// Trailing ']' is preceded by 'n' / 'u' / 'm' / ' ' (space in the s-unit case).
+// Saturation sentinel "[  >999.9s ]" matches via the ".9s " tail.
+const std::regex& duration_field_regex() {
+    // Formats we emit: "[ 123.456ns]", "[ 123.456us]", "[ 123.456ms]",
+    // "[ 123.456s ]", or the saturation "[  >999.9s ]".
+    static const std::regex r(R"(\[[ >0-9.]{8}(ns|us|ms|s )\])");
+    return r;
+}
+
+// Extract the duration (in nanoseconds) from the 12-byte field occurring
+// AFTER the timestamp on a LOG_ELAPSED trace line. Returns -1 if no match.
+// Used for monotonicity and sentinel assertions.
+long long parse_duration_ns(const std::string& line) {
+    std::smatch m;
+    if (!std::regex_search(line, m, duration_field_regex())) return -1;
+    // Matched text is the whole 12-byte field. Inside the brackets, the first
+    // 8 chars are the number (possibly with leading spaces / '>'), the last
+    // two are the unit.
+    const std::string field = m.str();
+    if (field.size() != 12) return -1;
+    if (field.substr(1, 10).find('>') != std::string::npos) {
+        // Saturation sentinel — treat as very large for ordering purposes.
+        return std::numeric_limits<long long>::max();
+    }
+    const std::string num_str = field.substr(1, 8);
+    const std::string unit = field.substr(9, 2);
+    double value = std::stod(num_str);
+    long long ns = 0;
+    if (unit == "ns") ns = static_cast<long long>(value);
+    else if (unit == "us") ns = static_cast<long long>(value * 1'000.0);
+    else if (unit == "ms") ns = static_cast<long long>(value * 1'000'000.0);
+    else if (unit == "s ") ns = static_cast<long long>(value * 1'000'000'000.0);
+    else return -1;
+    return ns;
+}
+
+// Find the single line that matches a function-name substring (restricted to
+// lines that also contain "(called from:" so we ignore the run-separator).
+// Returns "" if not found or if multiple matches (ambiguous).
+std::string find_unique_line(const std::vector<std::string>& lines, const std::string& name) {
+    std::string found;
+    int matches = 0;
+    for (const auto& line : lines) {
+        if (line.find(name) != std::string::npos &&
+            line.find("(called from:") != std::string::npos) {
+            found = line;
+            ++matches;
+        }
+    }
+    return (matches == 1) ? found : "";
+}
+
+} // namespace
+
+// Test fixture that runs the LOG_ELAPSED-enabled program and captures output.
+class LogElapsedFlagTest : public ::testing::Test {
+protected:
+    std::string trace_content;
+    std::vector<std::string> trace_lines;
+    std::string trace_file_path;
+
+    void SetUp() override {
+        char tmp_path[] = "/tmp/cslg_elapsed_test_XXXXXX";
+        int fd = mkstemp(tmp_path);
+        ASSERT_GE(fd, 0) << "mkstemp failed";
+        close(fd);
+        trace_file_path = tmp_path;
+
+        std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_file_path + "\" \""
+                        + TRACED_PROGRAM_LOG_ELAPSED_PATH + "\" > /dev/null 2>&1";
+        int ret = system(cmd.c_str());
+        ASSERT_EQ(ret, 0) << "traced_test_program_log_elapsed failed, exit=" << ret;
+
+        trace_content = read_file(trace_file_path);
+        trace_lines = split_lines(trace_content);
+    }
+
+    void TearDown() override {
+        if (!trace_file_path.empty()) {
+            unlink(trace_file_path.c_str());
+        }
+    }
+};
+
+// Every function-entry line must carry a valid 12-byte duration field.
+TEST_F(LogElapsedFlagTest, EveryLineHasDurationField) {
+    int total_entries = 0;
+    int with_duration = 0;
+    for (const auto& line : trace_lines) {
+        if (line.find("(called from:") == std::string::npos) continue;
+        ++total_entries;
+        if (std::regex_search(line, duration_field_regex())) ++with_duration;
+    }
+    ASSERT_GT(total_entries, 0) << "no function entries in trace";
+    EXPECT_EQ(with_duration, total_entries)
+            << "Expected every entry to carry a duration field. Got "
+            << with_duration << "/" << total_entries << ". Trace:\n" << trace_content;
+}
+
+// After a clean exit, no "[  pending ]" placeholders must remain on disk.
+TEST_F(LogElapsedFlagTest, NoPendingLeftovers) {
+    EXPECT_EQ(trace_content.find("[  pending ]"), std::string::npos)
+            << "Found un-patched placeholder after clean exit. Exit-side pwrite "
+               "probably didn't run for some frame.\nTrace:\n" << trace_content;
+}
+
+// The nested call chain "elapsed_outer -> elapsed_middle -> elapsed_inner"
+// must show parent durations >= child durations (up to a small jitter margin).
+TEST_F(LogElapsedFlagTest, DurationsAreMonotonicallySensible) {
+    std::string l_outer = find_unique_line(trace_lines, "elapsed_outer");
+    std::string l_middle = find_unique_line(trace_lines, "elapsed_middle");
+    std::string l_inner = find_unique_line(trace_lines, "elapsed_inner");
+
+    ASSERT_FALSE(l_outer.empty()) << "elapsed_outer line missing or not unique";
+    ASSERT_FALSE(l_middle.empty()) << "elapsed_middle line missing or not unique";
+    ASSERT_FALSE(l_inner.empty()) << "elapsed_inner line missing or not unique";
+
+    long long d_outer = parse_duration_ns(l_outer);
+    long long d_middle = parse_duration_ns(l_middle);
+    long long d_inner = parse_duration_ns(l_inner);
+
+    ASSERT_GE(d_outer, 0) << "failed to parse elapsed_outer duration: " << l_outer;
+    ASSERT_GE(d_middle, 0) << "failed to parse elapsed_middle duration: " << l_middle;
+    ASSERT_GE(d_inner, 0) << "failed to parse elapsed_inner duration: " << l_inner;
+
+    // Parent >= child. The 3-decimal rounding of the displayed format can
+    // produce ties when durations are very close — hence GE, not GT.
+    EXPECT_GE(d_outer, d_middle)
+            << "elapsed_outer (" << d_outer << "ns) < elapsed_middle ("
+            << d_middle << "ns) — parent should be >= child";
+    EXPECT_GE(d_middle, d_inner)
+            << "elapsed_middle (" << d_middle << "ns) < elapsed_inner ("
+            << d_inner << "ns) — parent should be >= child";
+}
+
+// elapsed_inner's reported duration must be >= 10 ms (the usleep sentinel),
+// and not unreasonably large (< 5 s catches any catastrophic clock/offset
+// corruption, with generous room for CI scheduling jitter).
+TEST_F(LogElapsedFlagTest, UsleepSentinelMatches) {
+    std::string line = find_unique_line(trace_lines, "elapsed_inner");
+    ASSERT_FALSE(line.empty()) << "elapsed_inner line missing or not unique";
+
+    long long ns = parse_duration_ns(line);
+    ASSERT_GE(ns, 0) << "failed to parse duration from: " << line;
+
+    constexpr long long TEN_MS_NS = 10'000'000LL;
+    constexpr long long FIVE_SEC_NS = 5'000'000'000LL;
+    EXPECT_GE(ns, TEN_MS_NS)
+            << "elapsed_inner should sleep >= 10 ms, got " << ns
+            << " ns. Line:\n" << line;
+    EXPECT_LT(ns, FIVE_SEC_NS)
+            << "elapsed_inner exceeded 5 s — clock corruption? Got " << ns
+            << " ns. Line:\n" << line;
+}
+
+// Every LOG_ELAPSED line must parse cleanly — timestamp, duration, optional
+// addr, tree, name, caller — and pwrite must not have scribbled bytes
+// outside the 12-byte field. Checks the overall line shape via a single
+// regex covering the three common layouts (with / without addr / with tree).
+TEST_F(LogElapsedFlagTest, NoFormatCorruption) {
+    // Pattern: "[<ts>] [<dur>] (tree)? <name> (called from: <file>:<line>)"
+    // Tree and name are hard to constrain tightly in regex; we validate
+    // the fixed-layout prefix (timestamp + duration) and the trailing
+    // "(called from: ...)" and trust the middle.
+    std::regex full(R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] \[[ >0-9.]{8}(ns|us|ms|s )\] .*\(called from: .+:.+\)$)");
+
+    int entries = 0;
+    int matched = 0;
+    for (const auto& line : trace_lines) {
+        if (line.find("(called from:") == std::string::npos) continue;
+        ++entries;
+        if (std::regex_match(line, full)) ++matched;
+        else {
+            ADD_FAILURE() << "Malformed LOG_ELAPSED line (pwrite may have corrupted "
+                             "byte boundaries):\n" << line;
+        }
+    }
+    ASSERT_GT(entries, 0) << "no function entries in trace";
+    EXPECT_EQ(matched, entries);
+}
+
+// Negative test: the DEFAULT (non-LOG_ELAPSED) traced_test_program must NOT
+// include a duration field. Guards against the macro accidentally becoming
+// always-on. Skipped when the build was configured with -DLOG_ELAPSED=ON,
+// in which case the default callstacklogger target also defines LOG_ELAPSED.
+//
+// Lives in its own suite (not LogElapsedFlagTest) because gtest forbids
+// mixing TEST_F (fixture-bound) and TEST (free) in the same suite.
+TEST(LogElapsedDefaultBuildTest, NoDurationFieldWithoutFlag) {
+#ifdef CSLG_DEFAULT_HAS_LOG_ELAPSED
+    GTEST_SKIP() << "Skipped: configured with -DLOG_ELAPSED=ON, so the default "
+                    "callstacklogger target also defines LOG_ELAPSED.";
+#else
+    std::string content = run_and_capture_trace(TRACED_PROGRAM_PATH);
+    ASSERT_FALSE(content.empty()) << "trace file is empty";
+
+    EXPECT_FALSE(std::regex_search(content, duration_field_regex()))
+            << "Default build unexpectedly carries a duration field — LOG_ELAPSED "
+               "macro may be leaking into the default callstacklogger target.";
+    EXPECT_EQ(content.find("[  pending ]"), std::string::npos)
+            << "Default build unexpectedly has a pending placeholder.";
+#endif
 }
