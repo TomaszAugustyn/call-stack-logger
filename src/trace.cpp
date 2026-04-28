@@ -462,8 +462,14 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
     if (fp != nullptr) {
         auto maybe_resolved = instrumentation::resolve(callee, caller);
         bool resolved = maybe_resolved.has_value();
+#ifdef LOG_ELAPSED
+        bool pushed_to_stack = false;
+#endif
         if (t_state.frame_resolved_top < MAX_TRACE_DEPTH - 1) {
             t_state.frame_resolved_stack[++t_state.frame_resolved_top] = resolved;
+#ifdef LOG_ELAPSED
+            pushed_to_stack = true;
+#endif
         } else {
             // Stack full — track overflow to keep exit handler in sync.
             // Indentation (current_stack_depth) remains correct regardless.
@@ -477,15 +483,20 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             std::string line = utils::format(*maybe_resolved, t_state.current_stack_depth,
                                              "[  pending ] ");
             // Placeholder sits at "[<timestamp>] " offset = 1 + PRETTY_TIME_LENGTH + 2.
-            // Record that offset + the enter timestamp BEFORE writing so a racing
-            // shutdown that nulls fp between our store and our write does not leave
-            // stale data in the per-frame slots (worst case: the write never happens
-            // because fp is already closed, and the slots we stored are harmless).
+            // Only record enter-time/offset in the per-frame array when we
+            // actually pushed this frame onto the resolution stack. Overflow
+            // frames (call depth > MAX_TRACE_DEPTH) share their slot with the
+            // topmost pushed frame — overwriting it would cause that frame's
+            // exit to pwrite the wrong duration at the wrong offset. Accept
+            // that overflow frames' "[  pending ]" placeholder stays un-patched:
+            // we already lose resolve-state tracking for them, same trade-off.
             static constexpr std::size_t PLACEHOLDER_OFFSET_IN_LINE =
                     utils::PRETTY_TIME_LENGTH + 3;
-            t_state.frame_enter_time[t_state.frame_resolved_top] = enter_time;
-            t_state.frame_placeholder_offset[t_state.frame_resolved_top] =
-                    t_state.cursor + static_cast<off_t>(PLACEHOLDER_OFFSET_IN_LINE);
+            if (pushed_to_stack) {
+                t_state.frame_enter_time[t_state.frame_resolved_top] = enter_time;
+                t_state.frame_placeholder_offset[t_state.frame_resolved_top] =
+                        t_state.cursor + static_cast<off_t>(PLACEHOLDER_OFFSET_IN_LINE);
+            }
             // No mutex: this FILE* is private to this thread. fputs + fputc give
             // us a known-exact byte count (line.size() + 1) so cursor tracking
             // stays accurate without any ftello/fflush calls on the hot path.
