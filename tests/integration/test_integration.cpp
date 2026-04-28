@@ -834,28 +834,40 @@ const std::regex& duration_field_regex() {
 // Extract the duration (in nanoseconds) from the 12-byte field occurring
 // AFTER the timestamp on a LOG_ELAPSED trace line. Returns -1 if no match.
 // Used for monotonicity and sentinel assertions.
+//
+// Parses whole and fractional parts as integers (via std::stoll) rather than
+// std::stod so this helper is locale-independent: the trace file uses '.' as
+// the decimal separator regardless of LC_NUMERIC (see format_duration_12chars
+// in durationFormat.h), and std::stod would misparse that as an integer on
+// hosts where LC_NUMERIC expects ','. Integer conversion has no such coupling.
 long long parse_duration_ns(const std::string& line) {
     std::smatch m;
     if (!std::regex_search(line, m, duration_field_regex())) return -1;
-    // Matched text is the whole 12-byte field. Inside the brackets, the first
-    // 8 chars are the number (possibly with leading spaces / '>'), the last
-    // two are the unit.
     const std::string field = m.str();
     if (field.size() != 12) return -1;
     if (field.substr(1, 10).find('>') != std::string::npos) {
-        // Saturation sentinel — treat as very large for ordering purposes.
         return std::numeric_limits<long long>::max();
     }
-    const std::string num_str = field.substr(1, 8);
-    const std::string unit = field.substr(9, 2);
-    double value = std::stod(num_str);
-    long long ns = 0;
-    if (unit == "ns") ns = static_cast<long long>(value);
-    else if (unit == "us") ns = static_cast<long long>(value * 1'000.0);
-    else if (unit == "ms") ns = static_cast<long long>(value * 1'000'000.0);
-    else if (unit == "s ") ns = static_cast<long long>(value * 1'000'000'000.0);
-    else return -1;
-    return ns;
+    // Field layout produced by format_duration_12chars:
+    //   [ <4-char whole> . <3-char frac> <2-char unit> ]
+    //   positions: 0='[', 1..4=whole, 5='.', 6..8=frac, 9..10=unit, 11=']'
+    try {
+        const std::string whole_str = field.substr(1, 4);
+        const std::string frac_str = field.substr(6, 3);
+        const std::string unit = field.substr(9, 2);
+        const long long whole = std::stoll(whole_str);   // tolerates leading spaces
+        const long long frac = std::stoll(frac_str);
+        long long scale_whole = 0;
+        long long scale_frac = 0;
+        if (unit == "ns") { scale_whole = 1; scale_frac = 0; }
+        else if (unit == "us") { scale_whole = 1'000; scale_frac = 1; }
+        else if (unit == "ms") { scale_whole = 1'000'000; scale_frac = 1'000; }
+        else if (unit == "s ") { scale_whole = 1'000'000'000; scale_frac = 1'000'000; }
+        else return -1;
+        return whole * scale_whole + frac * scale_frac;
+    } catch (...) {
+        return -1;
+    }
 }
 
 // Find the single line that matches a function-name substring (restricted to

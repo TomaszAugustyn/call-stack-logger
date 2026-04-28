@@ -15,6 +15,7 @@
  */
 
 #include "format.h"
+#include "prettyTime.h"
 #include "types.h"
 #include <gtest/gtest.h>
 #include <string>
@@ -130,4 +131,46 @@ TEST(FormatTest, EmptyFunctionName) {
     std::string result = utils::format(frame, 0);
 
     EXPECT_NE(result.find("(called from: test.cpp:42)"), std::string::npos);
+}
+
+// Guards the LOG_ELAPSED byte-offset invariant. trace.cpp computes the
+// placeholder's absolute file offset as `cursor + utils::PRETTY_TIME_LENGTH + 3`,
+// which assumes `format()` emits the `after_timestamp` argument immediately after
+// the "[<timestamp>] " prefix (= 1 + PRETTY_TIME_LENGTH + 2 bytes). If format()
+// ever re-orders the prefix — e.g., by putting the address column before the
+// splice — this test fails before LOG_ELAPSED ships a corrupted trace file.
+TEST(FormatTest, AfterTimestampLandsAtExpectedOffset) {
+    auto frame = make_frame("placeholder_offset_probe");
+    std::string result = utils::format(frame, 1, "[  pending ] ");
+
+    constexpr std::size_t EXPECTED_OFFSET = utils::PRETTY_TIME_LENGTH + 3;
+    ASSERT_GE(result.size(), EXPECTED_OFFSET + 12)
+            << "Output too short to contain the placeholder.";
+    EXPECT_EQ(result.substr(EXPECTED_OFFSET, 12), "[  pending ]")
+            << "Placeholder is not at byte offset " << EXPECTED_OFFSET
+            << ". LOG_ELAPSED's pwrite offset derivation (PRETTY_TIME_LENGTH + 3) "
+               "has drifted from what format() produces. Full line was:\n"
+            << result;
+    EXPECT_EQ(result.substr(0, EXPECTED_OFFSET), "[01-01-2025 12:00:00.000] ")
+            << "The 26-byte prefix is not exactly \"[<timestamp>] \" as the "
+               "offset math assumes.";
+}
+
+// Same guard combined with LOG_ADDR's address column: the address must land
+// AFTER the after_timestamp splice, not before. trace.cpp relies on this
+// ordering so the placeholder offset stays independent of LOG_ADDR.
+TEST(FormatTest, AfterTimestampPrecedesAddressColumn) {
+    void* addr = reinterpret_cast<void*>(0xDEADBEEF);
+    auto frame = make_frame("func_with_addr", "f.cpp", 10, addr);
+    std::string result = utils::format(frame, 1, "[  pending ] ");
+
+    constexpr std::size_t EXPECTED_OFFSET = utils::PRETTY_TIME_LENGTH + 3;
+    EXPECT_EQ(result.substr(EXPECTED_OFFSET, 12), "[  pending ]");
+    // addr must come after the placeholder, not before.
+    const auto addr_pos = result.find("addr:");
+    ASSERT_NE(addr_pos, std::string::npos);
+    EXPECT_GT(addr_pos, EXPECTED_OFFSET + 12)
+            << "addr: column appears at offset " << addr_pos
+            << " — should be AFTER the placeholder (which ends at "
+            << (EXPECTED_OFFSET + 12) << "). LOG_ELAPSED layout has regressed.";
 }
