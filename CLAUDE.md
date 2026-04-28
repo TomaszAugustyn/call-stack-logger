@@ -144,29 +144,38 @@ mutex. The only mutex (`open_files_mutex`) is taken only during open (once per t
 and during shutdown.
 
 The `fp` field inside `PerThreadTraceFile` is `std::atomic<FILE*>` with
-`memory_order_relaxed` reads/writes — required because the owning thread reads it
-lock-free on the hot path while shutdown on another thread may concurrently null it
-through the open_files registry pointer. Without `std::atomic` this would be a data
-race per the C++ memory model (UB). Relaxed ordering is sufficient (no piggy-backed
-data dependency on the pointer value), and on x86_64 / ARM64 the codegen is identical
-to a plain `mov` / `LDR` — no hot-path overhead.
+`memory_order_relaxed` reads/writes. The owning thread reads it lock-free on the
+hot path; its own `~PerThreadTraceFile` (thread exit) nulls it under
+`open_files_mutex`. Declaring it atomic avoids any C++ memory-model hair-splitting
+and on x86_64 / ARM64 compiles to a single `mov` / `LDR` — no hot-path overhead.
+(Earlier revisions had `trace_shutdown` cross-thread null the pointer; see below
+for why that was changed.)
 
-**Shutdown coordination**:
+**Shutdown coordination (no cross-thread close)**:
 - `atexit(trace_shutdown)` registered in `trace_begin()` — runs BEFORE static
   destructors (critical for Clang where those destructors may be instrumented).
-- `trace_shutdown()` drains the `open_files` registry: fclose every FILE* and null
-  the pointer. Idempotent via a CAS on `shutdown_started`.
-- Per-thread `PerThreadTraceFile` has a destructor that runs on thread exit. It takes
-  the `open_files_mutex`, re-checks `fp != nullptr` under the lock (handles a racing
-  shutdown), closes fp, and removes itself from the registry.
-- Double-close is impossible: both shutdown and the destructor null `fp` under the
-  same mutex and re-check after acquiring it.
+- `trace_shutdown()` acquires `open_files_mutex`, iterates the registry, calls
+  `fflush()` on each thread's `FILE*` (pushes any buffered partial line to the
+  kernel — thread-safe, per-FILE implicit lock), then clears the registry and
+  sets `shutdown_complete`. Idempotent via a CAS on `shutdown_started`.
+- `trace_shutdown` deliberately does NOT `fclose()` other threads' fps or
+  `close()` their patch_fds. `fclose` frees the stdio FILE struct — if a worker
+  thread were mid-`fprintf` when shutdown ran, its next stdio call would be a
+  use-after-free. `close(patch_fd)` would release the fd number for reuse —
+  a stale `pwrite` from a racing worker could then land in an unrelated file.
+  Both outcomes are worse than the documented "EBADF at worst" guarantee.
+- Per-thread `~PerThreadTraceFile` closes both fds on **thread exit**. That
+  runs only on the owning thread, so no cross-thread race exists there. Threads
+  still alive at process exit have their fds closed by the kernel.
+- The cost is one fd pair per trace-producing thread held open until process
+  exit — trivial for a debug tool.
 
-**Shutdown race (accepted trade-off):** a worker may be mid-`fprintf` when main runs
-`trace_shutdown`. Worst case is a torn final line or a silent write to a just-closed
-fd (`EBADF`, no crash). Line-buffered mode bounds corruption to at most one line per
-thread. Workers observe `shutdown_complete` inside `get_thread_fp()` within one cache
-coherence delay of the store. A per-file mutex was considered but rejected as
+**Shutdown race (accepted trade-off):** a worker may be mid-`fprintf` when main
+runs `trace_shutdown`. Worst case is a torn final line: the fprintf completes
+normally against a still-valid FILE struct and still-open fd; the line just
+lands after the shutdown's fflush. `shutdown_complete` is observed by subsequent
+calls to `get_thread_fp()` within one cache coherence delay, which returns
+nullptr and stops new writes. A per-file mutex was considered but rejected as
 overengineering for a debugging tool.
 
 `fork()` is not supported.
@@ -194,6 +203,15 @@ of `format_duration_12chars()` match that width — `static_assert`s and
 the `DurationFormatTest` suite enforce this. If it ever broke, pwrite
 would shift bytes and corrupt the file; the invariant is the safety net.
 
+**Locale-independent format.** `format_duration_12chars` uses integer math
+and the `PRIu64` integer specifier — deliberately avoids `%f`, which
+honors `LC_NUMERIC` (decimal separator drifts to `,` in `de_DE` / `pl_PL` /
+`fr_FR` etc.). The decimal point in the format string is a literal `.`
+character, so the output is byte-identical across locales.
+`DurationFormatTest.DecimalSeparatorIsLocaleIndependent` switches
+`LC_NUMERIC=de_DE.UTF-8` at runtime and asserts the field still contains
+`.` — the Dockerfile generates the locale so CI exercises this path.
+
 **Cursor tracking, no ftello/fflush.** A `thread_local off_t cursor`
 seeded from `lseek(patch_fd, 0, SEEK_END)` after the run-separator
 header is written. Every line write advances `cursor` by the exact byte
@@ -218,6 +236,15 @@ and `off_t frame_placeholder_offset[MAX_TRACE_DEPTH]`. Indexed by
 exit handler computes `now() - enter_time[idx]`, formats into a 12-byte
 buffer, and `pwrite(patch_fd, buf, 12, frame_placeholder_offset[idx])`.
 
+**Overflow frames** (call depth > MAX_TRACE_DEPTH = 2048) still get an
+enter line written with the `[  pending ]` placeholder so tree indentation
+remains visually correct, but they do not get a slot in the per-frame
+arrays — writing one would overwrite the topmost pushed frame's slot and
+corrupt its patch. The `pushed_to_stack` guard in the enter handler
+enforces this. Their placeholders therefore remain `[  pending ]` even
+on clean exit. This is an accepted artifact of MAX_TRACE_DEPTH; such
+deep stacks already lose resolve-state tracking.
+
 **Drift guards.** Both the `PrettyTimeTest.LengthMatchesConstant` unit
 test and a runtime `assert()` in `trace_begin()` verify that
 `pretty_time().size() == utils::PRETTY_TIME_LENGTH` — if anyone changes
@@ -232,11 +259,12 @@ open path, enter handler, exit handler, close path). With
 per-frame arrays, the cursor, or the pwrite() call compiles. The
 binary is byte-identical to today's default.
 
-**Shutdown race.** Same accepted trade-off as for the `fp` write path:
-worker may be mid-pwrite when shutdown closes `patch_fd` (returns
-EBADF, no crash). `trace_shutdown` nulls `fp` first then closes
-`patch_fd`, so a worker that observes `fp != nullptr` and proceeds to
-write will not also attempt to pwrite into an fd that's already closed.
+**Shutdown race.** `trace_shutdown` does NOT close `patch_fd` (or `fp`) for
+other threads — see the top-level shutdown-coordination note in the
+Trace File Lifecycle section. A worker already past the `get_thread_fp()`
+nullptr check and mid-pwrite when shutdown runs simply completes its
+pwrite against a still-valid fd; the duration lands normally. The only
+visible shutdown artifact remains the torn-final-line case for `fprintf`.
 
 ### Indentation / Nesting Depth
 
@@ -704,17 +732,18 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    `FILE*` lives in an RAII `PerThreadTraceFile` member whose destructor runs on
    thread exit. **Zero mutex on the hot write path** — each thread writes to its own
    FILE*. `open_files_mutex` is taken only during open (once per thread) and during
-   shutdown (to drain the registry). `s_bfd_mutex` is still held for the entire
+   shutdown (to fflush the registry). `s_bfd_mutex` is still held for the entire
    `resolve()` call because BFD is not thread-safe — but file I/O is fully parallel.
-   Shutdown race with in-flight writes is an accepted trade-off: worst case is one
-   torn line per thread, bounded by line-buffered output and the `shutdown_complete`
-   atomic flag that workers observe within one cache coherence delay. `fork()` is
+   **Shutdown does NOT close other threads' descriptors** — it only fflushes — to
+   avoid UAF on the stdio FILE struct and fd-number-reuse for patch_fd (see the
+   Trace File Lifecycle section above). Per-thread destructors close on thread exit.
+   Worst-case shutdown artifact is one torn final line per thread. `fork()` is
    not supported — child inherits parent's thread_local FILE* pointers.
    `localtime_r` replaces `std::localtime` for thread-safe timestamp formatting.
 3. **Frame 6 constant:** The unwinder hard-codes frame depth 6 - must be recalculated if the
    call chain between `__cyg_profile_func_enter` and `unwind_nth_frame` changes.
-   Verified correct after all Phase 1, Phase 2, and Phase 3 changes (no commit touched the
-   call chain).
+   `get_thread_fp()` is explicit `inline` to avoid becoming a separate frame under
+   optimizer variation; if caller resolution ever regresses, check inlining first.
 4. **Append mode:** Trace output is opened with `O_APPEND | O_NOFOLLOW` - multiple runs
    accumulate, separated by timestamped headers; output is line-buffered (`_IOLBF`)
    with `0600` permissions (owner read/write only)

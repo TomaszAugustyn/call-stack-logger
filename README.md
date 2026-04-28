@@ -330,11 +330,15 @@ mean the hot write path has **zero cross-thread synchronization** — each threa
 to its own file descriptor. BFD symbol resolution is still serialized by a mutex (BFD is
 not thread-safe), but file I/O is fully parallel.
 
-**Shutdown race (documented trade-off):** at program exit, the main thread closes all
-trace files. If a worker is mid-`fprintf` when this happens, the worst case is one
-torn line or one silent write to a just-closed fd (`EBADF`, no crash). Line-buffered
-mode bounds corruption to at most one line per thread. This is acceptable for a
-debugging tool and avoids a mutex on the hot write path.
+**Shutdown race (documented trade-off):** at program exit, the main thread flushes
+each worker's trace file but deliberately does NOT close other threads' file
+descriptors — closing a stdio `FILE*` while another thread holds a pointer to it
+would be a use-after-free, and releasing a raw fd number lets a subsequent
+`open()` reuse it for an unrelated file. Per-thread destructors close their own
+descriptors at thread exit (race-free — only the owning thread accesses its own
+`FILE*`), and any fds still open at process exit are closed by the kernel.
+Worst case for a worker mid-`fprintf` at shutdown is therefore a torn final
+line, bounded by line-buffered mode to at most one per thread.
 
 `fork()` is not supported — the child process inherits the parent's `thread_local`
 state including `FILE*` pointers pointing to inherited file descriptors.
