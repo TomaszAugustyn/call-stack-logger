@@ -16,6 +16,7 @@
  */
 
 #include "durationFormat.h"
+#include <clocale>
 #include <cstdint>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -156,12 +157,60 @@ TEST(DurationFormatTest, UsToMsBoundary) {
     EXPECT_EQ(format_and_check(1'000'000ULL), "[   1.000ms]");
 }
 
-// Boundary: 999'999'999 ns → ms unit (rounds up); 1'000'000'000 ns → s unit.
+// Boundary: 999'999'999 ns → ms unit (truncated); 1'000'000'000 ns → s unit.
 TEST(DurationFormatTest, MsToSBoundary) {
-    // 999'999'999 ns = 999.999999 ms, rounds to 1000.000 with %.3f — still
-    // 8 chars, still fits the field width. This is the documented edge case.
-    EXPECT_EQ(format_and_check(999'999'999ULL), "[1000.000ms]");
+    // 999'999'999 ns. Integer math truncates at the 3-digit fraction, so
+    // whole = 999, frac = 999'999 / 1'000 = 999, giving "[ 999.999ms]".
+    // Nicer than the old FP behavior which rounded to "[1000.000ms]" and
+    // visually suggested we'd slipped into 4-digit ms territory.
+    EXPECT_EQ(format_and_check(999'999'999ULL), "[ 999.999ms]");
     EXPECT_EQ(format_and_check(1'000'000'000ULL), "[   1.000s ]");
+}
+
+// -------- Locale stress: decimal separator must not drift under LC_NUMERIC --------
+
+// If the formatter ever uses %f / %g it would inherit LC_NUMERIC and emit ','
+// instead of '.' in locales like de_DE / pl_PL / fr_FR — trace files would
+// become locale-dependent and break every downstream parser. This test switches
+// the C locale to one that uses ',' (when available on the host) and confirms
+// the output still has a literal '.' character. If the formatter ever regresses
+// to %f this test fails loudly.
+TEST(DurationFormatTest, DecimalSeparatorIsLocaleIndependent) {
+    // Save and restore the current LC_NUMERIC so the test is hermetic regardless
+    // of what the CI image's default is.
+    const char* const saved = std::setlocale(LC_NUMERIC, nullptr);
+    const std::string saved_copy = saved ? saved : "C";
+
+    const char* const comma_locales[] = {
+        "de_DE.UTF-8", "pl_PL.UTF-8", "fr_FR.UTF-8", "de_DE", "pl_PL", "fr_FR",
+    };
+    bool switched = false;
+    for (const char* loc : comma_locales) {
+        if (std::setlocale(LC_NUMERIC, loc) != nullptr) {
+            switched = true;
+            break;
+        }
+    }
+    if (!switched) {
+        GTEST_SKIP() << "No comma-decimal locale available on this host — skipping "
+                        "locale stress. (The Docker CI image ships the C locale only.) "
+                        "The integer-based formatter is locale-independent by "
+                        "construction, so this test is an auxiliary guard.";
+    }
+
+    char buf[utils::DURATION_FIELD_WIDTH + 1] = {};
+    utils::format_duration_12chars(123'456ULL, buf);  // 123.456 us
+
+    // Expect the dot — NOT a comma — regardless of LC_NUMERIC.
+    EXPECT_NE(std::strchr(buf, '.'), nullptr)
+            << "Duration field is missing '.': " << buf
+            << ". The formatter may have regressed to locale-dependent %f.";
+    EXPECT_EQ(std::strchr(buf, ','), nullptr)
+            << "Duration field contains ',': " << buf
+            << ". Decimal separator must be locale-independent.";
+    EXPECT_STREQ(buf, "[ 123.456us]");
+
+    std::setlocale(LC_NUMERIC, saved_copy.c_str());
 }
 
 // -------- Buffer untouched past DURATION_FIELD_WIDTH + NUL --------
