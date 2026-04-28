@@ -288,15 +288,37 @@ FILE* get_thread_fp() {
 
 } // namespace
 
-// Closes all per-thread trace files and permanently disables instrumentation.
-// Called via atexit() so it runs BEFORE static destructors (like s_bfds). Idempotent
-// via g.shutdown_started CAS.
+// Flushes per-thread stdio buffers and signals shutdown. Called via atexit() so it
+// runs BEFORE static destructors (like s_bfds). Idempotent via g.shutdown_started CAS.
 //
-// Shutdown race: a worker may be mid-fprintf when this runs. We accept the race —
-// worst case is a torn final line or a silent write to a just-closed fd (EBADF, no
-// crash). Line-buffered mode bounds corruption to at most one line per thread, and
-// workers observe shutdown_complete inside get_thread_fp() within one cache coherence
-// delay of the store below.
+// Shutdown race handling. A worker thread may be mid-fprintf (or mid-pwrite) when
+// this runs. To bound the degraded mode to what the design promises — "EBADF at
+// worst, never a crash" — we deliberately do NOT close other threads' descriptors
+// here:
+//
+//   * fclose() would free the stdio FILE struct. POSIX says using a stream from
+//     another thread after fclose() is UB; in practice a racing worker's fprintf
+//     would dereference freed memory (worse than torn line — potential SIGSEGV).
+//     So we only fflush(). Line-buffered mode has already pushed every completed
+//     line through to the kernel; this catches any final partial line in stdio's
+//     buffer. fflush on a FILE is thread-safe (each FILE has an implicit lock),
+//     unlike fclose.
+//
+//   * close(patch_fd) would release the fd number, and fd numbers are reused
+//     aggressively on Linux. A stale pwrite from a racing worker could then land
+//     in whatever unrelated fd opens next — far worse than EBADF. Leaving both
+//     fds open costs us one fd pair per thread until process exit, which the
+//     kernel reclaims automatically.
+//
+// Per-thread ~PerThreadTraceFile still closes both descriptors normally on thread
+// exit — that runs on the owning thread only, so no cross-thread race exists there.
+// Workers that survive to process exit simply have their fds closed by the kernel.
+//
+// The open_files registry IS cleared here so per-thread destructors running during
+// static cleanup don't try to find themselves in a partially-consistent vector;
+// that registry pointer is the one thing shutdown uses to reach cross-thread state,
+// and clearing it is racy-safe (workers don't touch it on the hot path — only
+// open_this_thread_file and ~PerThreadTraceFile do, and both hold the mutex).
 NO_INSTRUMENT
 static void trace_shutdown() {
     t_state.in_instrumentation = true;  // Permanently disable on main — never cleared
@@ -309,32 +331,15 @@ static void trace_shutdown() {
         return;
     }
 
-    // Drain the registry: close every file still open. Atomically swap each fp to
-    // nullptr so late TLS destructors (for threads that exit after this point) see
-    // null and skip. exchange ensures any worker loading fp after our store sees
-    // nullptr; workers that already loaded the old fp may briefly write to a closing
-    // FILE* — the documented shutdown-race trade-off.
-    //
-    // Under LOG_ELAPSED we also close the companion patch_fd for each thread.
-    // Order matters: null fp first, then close patch_fd. If a worker observes
-    // fp != nullptr it will proceed into the enter/exit path and may pwrite;
-    // nulling fp first makes it skip the whole line, so patch_fd is safe to
-    // close next. Workers that already loaded the old patch_fd may briefly
-    // pwrite into a closing fd (EBADF, no crash) — same accepted shutdown race.
     {
         std::lock_guard<std::mutex> lock(g.open_files_mutex);
         for (PerThreadTraceFile* f : g.open_files) {
             if (f == nullptr) continue;
-            FILE* fp = f->fp.exchange(nullptr, std::memory_order_relaxed);
+            FILE* fp = f->fp.load(std::memory_order_relaxed);
             if (fp != nullptr) {
-                fclose(fp);
+                fflush(fp);
             }
-#ifdef LOG_ELAPSED
-            int pfd = f->patch_fd.exchange(-1, std::memory_order_relaxed);
-            if (pfd != -1) {
-                close(pfd);
-            }
-#endif
+            // patch_fd intentionally not touched — see function comment.
         }
         g.open_files.clear();
     }
@@ -343,21 +348,26 @@ static void trace_shutdown() {
 }
 
 // PerThreadTraceFile destructor: closes this thread's file when the thread exits.
-// Coordinates with trace_shutdown() via open_files_mutex and the fp null-check:
-//   - If the thread exits BEFORE shutdown: this destructor closes fp, removes self
-//     from registry.
-//   - If the thread exits AFTER shutdown: trace_shutdown() already closed fp and
-//     nulled it, and cleared the registry. This destructor sees fp == nullptr and
-//     does nothing — no double-close.
+// Only the owning thread ever runs this, so the close is race-free by construction
+// — no other thread can still be dereferencing this thread's FILE* or patch_fd.
+//
+// trace_shutdown() no longer touches other threads' descriptors (see the comment
+// on that function for why), so the atomic transitions here are effectively
+// uncontended. They remain atomic only for consistency with the hot-path reads
+// in __cyg_profile_func_enter/exit (where the reader is always the owning thread,
+// but formally declaring the data atomic avoids any C++ memory-model hair-splitting
+// if the design ever evolves).
+//
+// The mutex is held only while touching the shared open_files registry, which is
+// small enough that the per-thread-exit cost is negligible.
 NO_INSTRUMENT
 PerThreadTraceFile::~PerThreadTraceFile() {
     // Set the re-entrancy guard permanently — the thread is about to die, and any
     // instrumented callee inside fclose/erase (possible with Clang) must be a no-op.
     t_state.in_instrumentation = true;
 
-    // Fast path (racy load is fine): either never opened or already closed by
-    // shutdown. With atomic + relaxed, this is well-defined; without atomic it
-    // would be UB even if shutdown ran on a different thread.
+    // Fast path: never opened → nothing to close, nothing registered. Cheap
+    // short-circuit for threads that never produced any trace output.
     if (fp.load(std::memory_order_relaxed) == nullptr) {
         return;
     }
@@ -365,12 +375,8 @@ PerThreadTraceFile::~PerThreadTraceFile() {
     TraceGlobals& g = g_trace();
     std::lock_guard<std::mutex> lock(g.open_files_mutex);
 
-    // Re-check under lock: trace_shutdown() may have raced and already closed us.
-    // Use exchange so we both observe and claim the fp atomically.
     FILE* old = fp.exchange(nullptr, std::memory_order_relaxed);
 #ifdef LOG_ELAPSED
-    // Claim patch_fd too. If shutdown raced in, it already nulled both — old
-    // will be nullptr and old_pfd will be -1, and we return without touching them.
     int old_pfd = patch_fd.exchange(-1, std::memory_order_relaxed);
 #endif
     if (old == nullptr) {
@@ -387,6 +393,8 @@ PerThreadTraceFile::~PerThreadTraceFile() {
     if (registered) {
         // Erase self from the registry. We hold a pointer to this, but after this
         // destructor the storage is gone, so leaving a dangling pointer would be bad.
+        // Note that after trace_shutdown() has run, the registry is already empty;
+        // find() returns end() and the erase is a no-op. Harmless either way.
         auto it = std::find(g.open_files.begin(), g.open_files.end(), this);
         if (it != g.open_files.end()) {
             g.open_files.erase(it);
