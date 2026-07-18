@@ -507,41 +507,65 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 #ifdef LOG_ELAPSED
         off_t line_start = 0;
 #endif
-        if (fp != nullptr) {
-            auto maybe_resolved = instrumentation::resolve(callee, caller);
-            if (maybe_resolved.has_value()) {
-                t_state.current_stack_depth++;
-                logged = true;
+        // Exception barrier: a tracing hook must never inject an exception into the
+        // traced program. Everything that can realistically throw (bad_alloc from
+        // the std::string work in get_thread_fp's lazy open, resolve(), and
+        // utils::format()) runs inside this try. State mutations (depth increment,
+        // `logged`, cursor bookkeeping) happen only AFTER the last throwing
+        // operation, so an exception leaves the bookkeeping untouched: the frame
+        // simply goes untraced and the unconditional push below keeps enter/exit
+        // pairing intact. The catch body must not allocate.
+        try {
+            FILE* fp = get_thread_fp();
+            if (fp != nullptr) {
+                auto maybe_resolved = instrumentation::resolve(callee, caller);
+                if (maybe_resolved.has_value()) {
 #ifdef LOG_ELAPSED
-                // Splice a fixed-width "[  pending ] " placeholder right after the
-                // timestamp. See include/durationFormat.h for the width invariant.
-                std::string line = utils::format(*maybe_resolved, t_state.current_stack_depth,
-                                                 "[  pending ] ");
-                // Remember where this line starts: the placeholder offset for the
-                // per-frame slot is recorded after the push below.
-                line_start = t_state.cursor;
-                // No mutex: this FILE* is private to this thread. fputs + fputc give
-                // us a known-exact byte count (line.size() + 1) so cursor tracking
-                // stays accurate without any ftello/fflush calls on the hot path.
-                // Both results are checked: the fputc('\n') is the line-buffered
-                // flush point, so a failing write(2) (ENOSPC, EIO) surfaces as EOF
-                // here. On failure the cursor is not advanced and is marked invalid
-                // — an unknown number of bytes reached the file, so any further
-                // cursor-derived patch offset would corrupt existing lines.
-                const int put_result = fputs(line.c_str(), fp);
-                const int newline_result = fputc('\n', fp);
-                if (put_result != EOF && newline_result != EOF) {
-                    t_state.cursor += static_cast<off_t>(line.size() + 1);
-                } else {
-                    t_state.cursor_valid = false;
-                }
+                    // Splice a fixed-width "[  pending ] " placeholder right after the
+                    // timestamp. See include/durationFormat.h for the width invariant.
+                    // format() may allocate (throw) — called with the prospective
+                    // depth; the actual increment follows in the no-throw zone.
+                    std::string line = utils::format(*maybe_resolved,
+                                                     t_state.current_stack_depth + 1,
+                                                     "[  pending ] ");
+                    // ---- no-throw zone ----
+                    t_state.current_stack_depth++;
+                    logged = true;
+                    // Remember where this line starts: the placeholder offset for the
+                    // per-frame slot is recorded after the push below.
+                    line_start = t_state.cursor;
+                    // No mutex: this FILE* is private to this thread. fputs + fputc give
+                    // us a known-exact byte count (line.size() + 1) so cursor tracking
+                    // stays accurate without any ftello/fflush calls on the hot path.
+                    // Both results are checked: the fputc('\n') is the line-buffered
+                    // flush point, so a failing write(2) (ENOSPC, EIO) surfaces as EOF
+                    // here. On failure the cursor is not advanced and is marked invalid
+                    // — an unknown number of bytes reached the file, so any further
+                    // cursor-derived patch offset would corrupt existing lines.
+                    const int put_result = fputs(line.c_str(), fp);
+                    const int newline_result = fputc('\n', fp);
+                    if (put_result != EOF && newline_result != EOF) {
+                        t_state.cursor += static_cast<off_t>(line.size() + 1);
+                    } else {
+                        t_state.cursor_valid = false;
+                    }
 #else
-                // No mutex: this FILE* is private to this thread.
-                fprintf(fp, "%s\n",
-                        utils::format(*maybe_resolved, t_state.current_stack_depth).c_str());
+                    // format() may allocate (throw) — called with the prospective
+                    // depth; the actual increment follows in the no-throw zone.
+                    std::string line = utils::format(*maybe_resolved,
+                                                     t_state.current_stack_depth + 1);
+                    // ---- no-throw zone ----
+                    t_state.current_stack_depth++;
+                    logged = true;
+                    // No mutex: this FILE* is private to this thread.
+                    fprintf(fp, "%s\n", line.c_str());
 #endif
-            }
-        } // maybe_resolved destructor runs here, still under guard
+                }
+            } // maybe_resolved destructor runs here, still under guard
+        } catch (...) {
+            // Swallow (realistically only bad_alloc under OOM). The frame goes
+            // untraced; `logged` stayed false and no state was half-updated.
+        }
 
         // Push a frame record for EVERY call — even when nothing was logged (trace not
         // ready, open failed, resolution filtered the frame, or shutdown completed).

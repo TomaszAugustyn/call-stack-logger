@@ -773,7 +773,11 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    re-entrancy guard in
    `__cyg_profile_func_enter` prevents recursive instrumentation from within the resolve
    pipeline (critical for Clang). Shutdown uses `atexit()` to disable instrumentation before
-   static destructors run.
+   static destructors run. The enter hook is additionally an **exception barrier**: its
+   resolve/format/log work runs inside `try/catch(...)` with state mutations placed after
+   the last throwing operation, so an OOM-time `bad_alloc` can never propagate out of the
+   hook into the traced program — the frame just goes untraced and pairing stays intact
+   (the exit hook performs no throwing operations and needs no barrier).
 2. **Full multi-threaded support:** Each thread writes to its own independent trace
    file. Main → `CSLG_OUTPUT_FILE` (or `trace.out`); workers → `<base>_tid_<gettid>`
    where `<gettid>` is the Linux kernel TID from `syscall(SYS_gettid)` (cached per
