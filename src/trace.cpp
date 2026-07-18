@@ -25,9 +25,7 @@
 
 #ifdef LOG_ELAPSED
     #include "durationFormat.h"
-    #include <cassert>
     #include <chrono>
-    #include <sys/stat.h>
 #endif
 
 // clang-format off
@@ -446,10 +444,18 @@ void trace_begin() {
     // changes LOGGER_PRETTY_TIME_FORMAT / LOGGER_PRETTY_MS_FORMAT without also
     // updating PRETTY_TIME_LENGTH, the unit test catches it — this runtime
     // check is a second line of defense for downstream consumers who might
-    // somehow skip the unit test but still end up here. Aborts loudly rather
-    // than silently corrupting trace files.
-    assert(utils::pretty_time().size() == utils::PRETTY_TIME_LENGTH
-           && "PRETTY_TIME_LENGTH mismatch — see include/prettyTime.h");
+    // somehow skip the unit test but still end up here. A manual check rather
+    // than assert(), deliberately: README recommends RelWithDebInfo builds,
+    // which define NDEBUG and would compile an assert away — this guard must
+    // hold in every build type, aborting loudly rather than letting mis-offset
+    // pwrites silently corrupt trace files.
+    if (utils::pretty_time().size() != utils::PRETTY_TIME_LENGTH) {
+        fprintf(stderr,
+                "[call-stack-logger] FATAL: pretty_time() length differs from "
+                "PRETTY_TIME_LENGTH — update include/prettyTime.h (LOG_ELAPSED "
+                "byte offsets would corrupt the trace file)\n");
+        abort();
+    }
 #endif
 
     // Capture the main thread's TID before any worker thread exists. Worker threads

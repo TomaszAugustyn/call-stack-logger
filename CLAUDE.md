@@ -274,11 +274,13 @@ on clean exit. This is an accepted artifact of MAX_TRACE_DEPTH; such
 deep stacks already lose resolve-state tracking.
 
 **Drift guards.** Both the `PrettyTimeTest.LengthMatchesConstant` unit
-test and a runtime `assert()` in `trace_begin()` verify that
+test and an always-on runtime check in `trace_begin()` verify that
 `pretty_time().size() == utils::PRETTY_TIME_LENGTH` — if anyone changes
 either of the time-format strings without updating the constant, the
-build fails fast (or the program aborts at startup) rather than
-silently corrupting trace files.
+test fails (and the program aborts at startup with a FATAL message)
+rather than silently corrupting trace files. The runtime check is a
+manual if+abort rather than `assert()` so it also holds in NDEBUG
+builds (README recommends RelWithDebInfo, which defines NDEBUG).
 
 **Zero overhead when off.** All LOG_ELAPSED-only code lives inside
 `#ifdef LOG_ELAPSED` blocks grouped per logical region (struct fields,
@@ -832,8 +834,8 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    Enter handler writes a 12-byte `[  pending ]` placeholder spliced after the
    timestamp; exit handler patches it in place with the SI-auto-scaled duration.
    Placeholder offset derived from `utils::PRETTY_TIME_LENGTH` (no magic
-   numbers); a unit test plus a runtime assert in `trace_begin()` guard against
-   format-string drift. Crash-safe: lines that don't get patched stay as
+   numbers); a unit test plus an always-on runtime check in `trace_begin()`
+   (active in NDEBUG builds too) guard against format-string drift. Crash-safe: lines that don't get patched stay as
    `[  pending ]`, identifying which frames were active at the crash. Zero
    overhead when `LOG_ELAPSED=OFF` — all code is `#ifdef`-guarded, the binary
    is byte-identical to a build without the option. See "Per-Function Timing
