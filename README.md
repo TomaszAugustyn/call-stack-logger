@@ -276,8 +276,8 @@ tree column**, so it never disturbs tree alignment and is independent of
 `LOG_ADDR` / `LOG_NOT_DEMANGLED`:
 
 ```
-[21-04-2026 15:00:00.123] [   0.105s ] |_ main  (called from: …libc-start.c:310)
-[21-04-2026 15:00:00.123] [   0.123us] |  |_ A::foo()  (called from: .../main.cpp:28)
+[21-04-2026 15:00:00.123] [ 105.323ms] |_ main  (called from: …libc-start.c:310)
+[21-04-2026 15:00:00.123] [ 123.000ns] |  |_ A::foo()  (called from: .../main.cpp:28)
 [21-04-2026 15:00:00.123] [  45.678ms] |  |_ B::foo()  (called from: .../main.cpp:33)
 [21-04-2026 15:00:00.124] [   1.234us] |  |  |_ A::foo()  (called from: .../main.cpp:18)
 ```
@@ -285,7 +285,7 @@ tree column**, so it never disturbs tree alignment and is independent of
 Combined with `LOG_ADDR=ON` the address column simply follows the duration:
 
 ```
-[21-04-2026 15:00:00.123] [   0.105s ] addr: [0x00007fff12345678] |_ main  (called from: …)
+[21-04-2026 15:00:00.123] [ 105.323ms] addr: [0x00007fff12345678] |_ main  (called from: …)
 ```
 
 ### Format ###
@@ -343,7 +343,8 @@ full spans, hooks included.
 
 ### Cost ###
 
-Adds two `steady_clock::now()` reads (~20 ns each) and one `pwrite()` syscall
+Adds two `steady_clock::now()` reads (~20 ns each with a TSC clocksource; over
+1 µs per read on VMs that fall back to `hpet`/`acpi_pm`) and one `pwrite()` syscall
 (~0.5–1 µs) per traced function call. Trace file size grows by ~13 bytes per
 line (the placeholder + separator space). For a debug-time tool this is
 negligible compared with the existing BFD symbol resolution. With

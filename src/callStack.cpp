@@ -372,10 +372,10 @@ std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* ca
     //   6: A::foo()  — the function being instrumented (callee)
     //   7: caller of A::foo() — captured here (one beyond the 6 increments)
     //
-    // If this call flow ever changes the constant must be recalculated. After multi-thread
-    // support landed, __cyg_profile_func_enter calls get_thread_fp(), which could add a
-    // frame between it and resolve(); get_thread_fp() is declared `inline` in trace.cpp
-    // precisely to prevent that. If frame numbers ever go off, check inlining first.
+    // If this call flow ever changes the constant must be recalculated. Only functions
+    // still on the stack when _Unwind_Backtrace runs count: helpers that
+    // __cyg_profile_func_enter calls BEFORE resolve() (e.g. get_thread_fp()) have
+    // already returned by then and can never shift the frame numbers, inlined or not.
     Callback callback(caller_address);
     unwind_nth_frame(callback, 6);
     return resolve_no_unwind(callee_address, callback.caller);

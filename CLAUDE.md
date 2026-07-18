@@ -85,7 +85,8 @@ The project uses a **two-tier exclusion approach** depending on the compiler:
 **GCC (compile-time exclusion):** The build system auto-discovers C++ standard library header
 paths using `${CMAKE_CXX_COMPILER} -xc++ -E -v -`, then passes them via
 `-finstrument-functions-exclude-file-list=<paths>`. The project's own instrumentation headers
-are also excluded: `callStack.h`, `unwinder.h`, `types.h`, `format.h`, `prettyTime.h`.
+are also excluded: `callStack.h`, `unwinder.h`, `types.h`, `format.h`, `prettyTime.h`,
+`traceFilePath.h`, `durationFormat.h`.
 With this approach, GCC never inserts instrumentation hooks into std library functions.
 
 **Clang (runtime exclusion):** Clang does not support `-finstrument-functions-exclude-file-list`.
@@ -291,8 +292,8 @@ included) sits inside the parent's body.
 enter line written with the `[  pending ]` placeholder so tree indentation
 remains visually correct, but they do not get a slot in the per-frame
 arrays — writing one would overwrite the topmost pushed frame's slot and
-corrupt its patch. The `pushed_to_stack` guard in the enter handler
-enforces this. Their placeholders therefore remain `[  pending ]` even
+corrupt its patch. The `frame_resolved_top` bounds check in the enter
+handler enforces this. Their placeholders therefore remain `[  pending ]` even
 on clean exit. This is an accepted artifact of MAX_TRACE_DEPTH; such
 deep stacks already lose resolve-state tracking.
 
@@ -835,8 +836,9 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    `localtime_r` replaces `std::localtime` for thread-safe timestamp formatting.
 3. **Frame 6 constant:** The unwinder hard-codes frame depth 6 - must be recalculated if the
    call chain between `__cyg_profile_func_enter` and `unwind_nth_frame` changes.
-   `get_thread_fp()` is explicit `inline` to avoid becoming a separate frame under
-   optimizer variation; if caller resolution ever regresses, check inlining first.
+   Only functions still on the stack during the unwind count: helpers that the enter
+   hook calls and that return before `resolve()` runs (e.g. `get_thread_fp()`) can
+   never shift the frame numbers, inlined or not.
 4. **Append mode:** Trace output is opened with `O_APPEND | O_NOFOLLOW` - multiple runs
    accumulate, separated by timestamped headers; output is line-buffered (`_IOLBF`)
    with `0600` permissions (owner read/write only). Note `O_NOFOLLOW` rejects a

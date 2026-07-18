@@ -38,15 +38,17 @@ static constexpr int MAX_TRACE_DEPTH = 2048;
 
 // Per-thread RAII wrapper around the thread's FILE*. On thread exit, the destructor
 // closes the file and removes this instance from the global registry. Coordinates
-// with trace_shutdown() via g_trace().open_files_mutex to prevent double-close.
+// with trace_shutdown() via g_trace().open_files_mutex.
 //
-// `fp` is std::atomic because the owning thread reads it lock-free on the hot path
-// (get_thread_fp() / __cyg_profile_func_exit) while shutdown on another thread may
-// concurrently null it via the open_files registry pointer. Without atomic, this is
-// a data race per the C++ memory model — even if benign on x86_64 in practice.
-// Relaxed ordering is sufficient: there is no piggy-backed data dependency on fp,
-// just the pointer value itself. Codegen on x86_64 / ARM64 is a single mov/LDR —
-// no measurable hot-path overhead.
+// `fp` is std::atomic because trace_shutdown() on another thread READS it through
+// the open_files registry (to fflush) while the owning thread accesses it lock-free
+// on the hot path. All writes (store on open, null on thread exit) happen on the
+// owning thread, ordered against shutdown by open_files_mutex — shutdown itself
+// deliberately never closes or nulls other threads' fps (see trace_shutdown()).
+// The atomic keeps the cross-thread read formally race-free per the C++ memory
+// model. Relaxed ordering is sufficient: no data is published through fp, just the
+// pointer value itself. Codegen on x86_64 / ARM64 is a single mov/LDR — no
+// measurable hot-path overhead.
 struct PerThreadTraceFile {
     std::atomic<FILE*> fp{nullptr};
     bool open_attempted = false;   // avoid retry after open failure
@@ -58,8 +60,9 @@ struct PerThreadTraceFile {
     // offsets. fp (above) still uses O_APPEND for sequential line writes —
     // the two fds share the kernel inode; writes never overlap in byte range
     // (fp writes NEW bytes beyond EOF, patch_fd rewrites EXISTING placeholder
-    // bytes). Atomic for the same reason as fp: shutdown on another thread may
-    // close it concurrently with the owning thread's hot-path reads.
+    // bytes). Atomic for consistency with fp: all accesses are owner-thread or
+    // mutex-ordered (trace_shutdown deliberately never touches patch_fd), so the
+    // atomic is formal belt-and-suspenders, not a contention point.
     std::atomic<int> patch_fd{-1};
 #endif
 
@@ -318,12 +321,10 @@ void open_this_thread_file(PerThreadState& self) {
 // Returns the FILE* for the current thread, opening it on first use. Returns nullptr
 // if trace is not ready, shutdown has completed, or the open failed earlier.
 //
-// IMPORTANT: declared `inline` so it is NOT a separate stack frame between
-// __cyg_profile_func_enter and the resolve pipeline. The unwinder in callStack.cpp
-// hardcodes frame depth 6 (see the comment there). A small NO_INSTRUMENT function in
-// an anonymous namespace is normally inlined by GCC/Clang anyway, but making it
-// explicit prevents a future compiler/optimization change from silently breaking
-// the caller-location resolution.
+// Note on the frame-depth-6 constant in callStack.cpp: this helper CANNOT affect it,
+// regardless of inlining — it returns before instrumentation::resolve() is invoked,
+// so it is never on the stack while the unwinder walks the resolve pipeline. The
+// `inline` keyword here is an ordinary code-size hint, not a correctness requirement.
 NO_INSTRUMENT inline
 FILE* get_thread_fp() {
     TraceGlobals& g = g_trace();
