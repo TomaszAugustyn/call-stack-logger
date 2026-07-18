@@ -114,7 +114,13 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     string(STRIP "${CPP_STD_INCLUDES}" CPP_STD_INCLUDES)
 
     # Also exclude the project's instrumentation headers from instrumentation.
-    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/format.h,include/prettyTime.h,include/traceFilePath.h,include/durationFormat.h" CACHE STRING "")
+    # Plain (non-cache) variable, deliberately: the execute_process above re-creates
+    # a normal CPP_STD_INCLUDES on every configure, which would shadow a cached
+    # value — set(... CACHE) would then be a no-op on reconfigure and the header
+    # suffixes appended here would silently vanish from INSTRUMENT_FLAGS. A plain
+    # variable keeps the full list (std paths + project headers) freshly computed
+    # each configure, and follows compiler upgrades in an existing build dir.
+    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/format.h,include/prettyTime.h,include/traceFilePath.h,include/durationFormat.h")
     message(STATUS "CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}]")
 
     set(INSTRUMENT_FLAGS -finstrument-functions
