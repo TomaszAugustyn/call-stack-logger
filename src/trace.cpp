@@ -220,10 +220,23 @@ void open_this_thread_file(PerThreadState& self) {
     // Second fd to the same file, WITHOUT O_APPEND, reserved for pwrite()-patching
     // the fixed-width "[  pending ]" placeholders with real durations on exit. A
     // single O_APPEND fd would force every pwrite to EOF on Linux (documented in
-    // pwrite(2)), so we need this separate handle. Both fds share the kernel
-    // inode; writes never overlap in byte range — fp only writes NEW bytes
-    // beyond EOF, pfd only rewrites EXISTING placeholder bytes.
-    int pfd = open(path.c_str(), O_WRONLY | O_NOFOLLOW);
+    // pwrite(2)), so we need this separate handle. dup() can't provide it either:
+    // duplicated descriptors share one open file description, so clearing
+    // O_APPEND via fcntl would clear it for fp too.
+    //
+    // Reopen through /proc/self/fd/<fd> rather than through the path: the magic
+    // symlink resolves to the already-open inode, so patch_fd is guaranteed to
+    // reference the SAME file as fp even if the path was replaced between the
+    // two opens (TOCTOU). /proc is already a hard dependency of this library
+    // (get_argv0, /proc/self/exe). Note: no O_NOFOLLOW here — /proc/self/fd/N
+    // is a kernel-controlled symlink that MUST be followed; the symlink-attack
+    // concern the first open guards against does not apply to it.
+    // Both fds share the kernel inode; writes never overlap in byte range —
+    // fp only writes NEW bytes beyond EOF, pfd only rewrites EXISTING
+    // placeholder bytes.
+    char fd_path[32];
+    snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
+    int pfd = open(fd_path, O_WRONLY);
     if (pfd < 0) {
         fclose(fp);
         fprintf(stderr,

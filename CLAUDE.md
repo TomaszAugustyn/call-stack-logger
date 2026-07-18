@@ -188,13 +188,17 @@ no second line, no reorder, no growth in line count.
 
 **Two-fd-per-thread design.** Each thread opens its trace file twice:
 the existing `FILE* fp` with `O_APPEND` (used for sequential writes —
-header lines, enter lines) and a new raw `int patch_fd` opened
-**without** `O_APPEND`, used only for `pwrite()`. Both descriptors share
-the kernel inode (it's one file on disk). Without the second fd, `pwrite`
-on Linux is silently redirected to EOF when the fd has `O_APPEND` — see
-`pwrite(2)`. The two fds never overlap in byte range: `fp` only writes
-**new** bytes beyond EOF, `patch_fd` only rewrites **existing**
-placeholder bytes.
+header lines, enter lines) and a new raw `int patch_fd` **without**
+`O_APPEND`, used only for `pwrite()`. `patch_fd` is obtained by
+reopening `/proc/self/fd/<fd>` of the already-open descriptor — the
+magic symlink resolves to the open inode itself, guaranteeing both
+descriptors reference the SAME file even if the path is swapped between
+the opens (TOCTOU), while giving a separate open file description so
+clearing `O_APPEND` doesn't affect `fp` (`dup()` couldn't do that).
+Without the second fd, `pwrite` on Linux is silently redirected to EOF
+when the fd has `O_APPEND` — see `pwrite(2)`. The two fds never overlap
+in byte range: `fp` only writes **new** bytes beyond EOF, `patch_fd`
+only rewrites **existing** placeholder bytes.
 
 **Fixed-width invariant.** Every duration field is exactly 12 bytes
 (`DURATION_FIELD_WIDTH` in `include/durationFormat.h`). The placeholder
@@ -802,8 +806,9 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    `durationFormat.h` contain inline implementations in headers (definitions in
    headers, not just declarations).
 8. **Per-function timing (`LOG_ELAPSED`)**: opt-in. Each thread opens a SECOND
-   non-O_APPEND fd to its trace file solely so `pwrite()` honors explicit byte
-   offsets (Linux silently redirects pwrite to EOF when the fd has O_APPEND).
+   non-O_APPEND fd to its trace file (reopened via `/proc/self/fd/<fd>` so it is
+   pinned to the same inode as the first fd) solely so `pwrite()` honors explicit
+   byte offsets (Linux silently redirects pwrite to EOF when the fd has O_APPEND).
    Enter handler writes a 12-byte `[  pending ]` placeholder spliced after the
    timestamp; exit handler patches it in place with the SI-auto-scaled duration.
    Placeholder offset derived from `utils::PRETTY_TIME_LENGTH` (no magic

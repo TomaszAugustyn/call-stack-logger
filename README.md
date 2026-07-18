@@ -323,6 +323,14 @@ the option — the entire feature is gated behind compile-time `#ifdef`s.
 each thread keeps its own pair of file descriptors and patches durations
 independently with no cross-thread synchronization on the write path.
 
+One limitation: do not point two *processes* at the same `CSLG_OUTPUT_FILE`
+concurrently when `LOG_ELAPSED` is on. Each process tracks its own byte cursor
+from the position it observed at startup; a second process appending to the
+same file shifts the real offsets and the in-place duration patches would land
+inside the other process's lines. (Concurrent *threads* are fine — they write
+to separate per-thread files. Sequential runs are fine too — each run re-reads
+the file size on start.)
+
 ## :shield: Thread Safety ##
 
 Call Stack Logger has **full multi-threaded support**: each thread writes to its own
