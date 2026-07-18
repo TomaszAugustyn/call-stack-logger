@@ -98,7 +98,7 @@ foreach(variant IN ITEMS log_addr log_not_demangled)
     target_compile_definitions(callstacklogger_${variant} PUBLIC ${variant_upper})
     target_compile_options(callstacklogger_${variant} INTERFACE -g)
     target_link_options(callstacklogger_${variant} INTERFACE -rdynamic)
-    target_link_libraries(callstacklogger_${variant} PUBLIC -ldl -lbfd)
+    target_link_libraries(callstacklogger_${variant} PUBLIC ${CSLG_BFD_LINK_LIBS})
 
     add_executable(traced_test_program_${variant} traced_program.cpp)
     target_compile_features(traced_test_program_${variant} PRIVATE cxx_std_17)
@@ -126,7 +126,7 @@ target_include_directories(callstacklogger_log_elapsed PUBLIC
 target_compile_definitions(callstacklogger_log_elapsed PUBLIC LOG_ELAPSED)
 target_compile_options(callstacklogger_log_elapsed INTERFACE -g)
 target_link_options(callstacklogger_log_elapsed INTERFACE -rdynamic)
-target_link_libraries(callstacklogger_log_elapsed PUBLIC -ldl -lbfd)
+target_link_libraries(callstacklogger_log_elapsed PUBLIC ${CSLG_BFD_LINK_LIBS})
 
 add_executable(traced_test_program_log_elapsed log_elapsed_traced_program.cpp)
 target_compile_features(traced_test_program_log_elapsed PRIVATE cxx_std_17)
@@ -157,7 +157,7 @@ target_compile_definitions(callstacklogger_${combined_variant} PUBLIC
     LOG_ELAPSED LOG_ADDR LOG_NOT_DEMANGLED)
 target_compile_options(callstacklogger_${combined_variant} INTERFACE -g)
 target_link_options(callstacklogger_${combined_variant} INTERFACE -rdynamic)
-target_link_libraries(callstacklogger_${combined_variant} PUBLIC -ldl -lbfd)
+target_link_libraries(callstacklogger_${combined_variant} PUBLIC ${CSLG_BFD_LINK_LIBS})
 
 add_executable(traced_test_program_${combined_variant} traced_program.cpp)
 target_compile_features(traced_test_program_${combined_variant} PRIVATE cxx_std_17)

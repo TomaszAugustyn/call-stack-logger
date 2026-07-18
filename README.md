@@ -27,6 +27,16 @@ library) necessary to get information about object files and manipulate them.
 sudo apt-get install binutils-dev
 ```
 
+On Fedora the package is called `binutils-devel`. With binutils ≥ 2.46
+(Fedora 41+), the static `libbfd.a` additionally depends on libzstd for
+zstd-compressed debug sections, while the distro's `-lbfd` linker script does
+not pull it in — so `libzstd-devel` is needed as well. The build detects this
+at configure time and links `zstd` automatically when required:
+
+```bash
+sudo dnf install binutils-devel libzstd-devel
+```
+
 ## :wrench: Building and running ##
 
 ```bash

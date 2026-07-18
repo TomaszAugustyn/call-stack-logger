@@ -498,10 +498,16 @@ make run                                # Run
 |---------|---------|
 | `-ldl` | Dynamic linking (`dladdr`) |
 | `-lbfd` | Binary File Descriptor (symbol/line resolution) |
+| `-lzstd` | Only when a configure-time probe detects static libbfd needs it (binutils ≥ 2.46, e.g. Fedora 41+ — the distro `-lbfd` linker script omits it) |
+
+The probe lives in the root `CMakeLists.txt` and produces `CSLG_BFD_LINK_LIBS`
+(`dl bfd` or `dl bfd zstd`), consumed by `src/CMakeLists.txt` and by the
+per-flag library variants in `tests/integration/CMakeLists.txt`.
 
 ### System Requirement
 
-- **GNU Binutils dev package:** `sudo apt-get install binutils-dev` (provides `libbfd`)
+- **GNU Binutils dev package:** `sudo apt-get install binutils-dev` (provides `libbfd`);
+  on Fedora: `sudo dnf install binutils-devel libzstd-devel` (see Link Dependencies)
 
 ### Library Targets
 

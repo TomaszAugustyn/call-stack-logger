@@ -137,6 +137,42 @@ if(DISABLE_INSTRUMENTATION)
 endif()
 
 # ============================================================================
+# BFD link dependencies
+# ============================================================================
+# Newer static libbfd builds (binutils >= 2.46, e.g. Fedora 41+) call into
+# libzstd for zstd-compressed debug sections, but distro linker scripts for
+# -lbfd don't always pull -lzstd in (Fedora's /usr/lib64/libbfd.so lists
+# libsframe / -lz / -ldl only), so every executable linking -lbfd fails with
+# "undefined reference to ZSTD_isError". Probe at configure time whether bfd
+# links standalone and append zstd only when needed — Ubuntu's binutils keeps
+# linking exactly as before. The resulting list is consumed by src/ (the main
+# library) and tests/integration/ (the per-flag library variants); it must be
+# set here because child scopes only see parent variables defined before
+# add_subdirectory().
+include(CheckCXXSourceCompiles)
+set(CSLG_BFD_PROBE_SOURCE "
+    #define PACKAGE
+    #define PACKAGE_VERSION
+    #include <bfd.h>
+    int main() { bfd_init(); return 0; }")
+set(CMAKE_REQUIRED_LIBRARIES bfd)
+check_cxx_source_compiles("${CSLG_BFD_PROBE_SOURCE}" CSLG_BFD_LINKS_STANDALONE)
+set(CSLG_BFD_LINK_LIBS dl bfd)
+if(NOT CSLG_BFD_LINKS_STANDALONE)
+    set(CMAKE_REQUIRED_LIBRARIES bfd zstd)
+    check_cxx_source_compiles("${CSLG_BFD_PROBE_SOURCE}" CSLG_BFD_LINKS_WITH_ZSTD)
+    if(CSLG_BFD_LINKS_WITH_ZSTD)
+        list(APPEND CSLG_BFD_LINK_LIBS zstd)
+        message(STATUS "libbfd requires libzstd — appending zstd to the BFD link libraries")
+    else()
+        message(WARNING "Could not link a probe program against libbfd (alone or with zstd). "
+                "Is binutils-dev / binutils-devel installed (plus libzstd-devel on Fedora)? "
+                "The build will likely fail at link time.")
+    endif()
+endif()
+unset(CMAKE_REQUIRED_LIBRARIES)
+
+# ============================================================================
 # Targets
 # ============================================================================
 add_subdirectory(src)

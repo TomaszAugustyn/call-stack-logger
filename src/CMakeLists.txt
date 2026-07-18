@@ -18,7 +18,9 @@ cslg_apply_sanitizers(callstacklogger)
 target_include_directories(callstacklogger PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>)
 
-target_link_libraries(callstacklogger PUBLIC -ldl -lbfd)
+# CSLG_BFD_LINK_LIBS is "dl bfd" plus, when the configure-time probe in the
+# root CMakeLists.txt detected that static libbfd needs it, "zstd".
+target_link_libraries(callstacklogger PUBLIC ${CSLG_BFD_LINK_LIBS})
 
 # INTERFACE compile option: -g is required for BFD to resolve source filenames
 # and line numbers in consumer code. Without it, trace output shows "???" for
