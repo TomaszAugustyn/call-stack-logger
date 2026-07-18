@@ -36,7 +36,12 @@ struct bfdResolver {
 public:
     /// Single bfd structure
     struct storedBfd {
-        typedef bfd_boolean(deleter_t)(bfd*);
+        // Deleter type derived from bfd_close itself rather than spelled with
+        // bfd_boolean: upstream binutils removed the bfd_boolean typedef (>= 2.38);
+        // current distro headers only provide it as a compat #define that can be
+        // poisoned via POISON_BFD_BOOLEAN. decltype tracks whatever return type
+        // the installed bfd.h declares (bfd_boolean, bool, int, ...).
+        using deleter_t = decltype(bfd_close);
 
         // Custom deleter that casts back to char* before delete[], matching the
         // allocation type (new char[]) used for the BFD symbol table storage.
