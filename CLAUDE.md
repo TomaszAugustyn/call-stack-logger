@@ -796,7 +796,10 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    optimizer variation; if caller resolution ever regresses, check inlining first.
 4. **Append mode:** Trace output is opened with `O_APPEND | O_NOFOLLOW` - multiple runs
    accumulate, separated by timestamped headers; output is line-buffered (`_IOLBF`)
-   with `0600` permissions (owner read/write only)
+   with `0600` permissions (owner read/write only). Note `O_NOFOLLOW` rejects a
+   symlink only as the FINAL path component — intermediate directories are still
+   followed, so the trace path should point at a trusted directory, and the library
+   must not be used in setuid/setgid binaries (the path comes from the environment).
 5. **Configurable output:** Set `CSLG_OUTPUT_FILE` environment variable to redirect trace
    output to a custom path (defaults to `"trace.out"`)
 6. **Performance overhead:** Every function call triggers symbol resolution via BFD; this tool

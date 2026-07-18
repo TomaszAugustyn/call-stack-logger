@@ -242,6 +242,13 @@ CSLG_OUTPUT_FILE=/tmp/my_trace.out ./build/runDemo
 # Multi-threaded program → /tmp/my_trace.out + /tmp/my_trace.out_tid_<N> per worker
 ```
 
+**Security note:** trace files are created with `0600` permissions and opened
+with `O_NOFOLLOW`, which rejects a symlink as the **final** path component but
+does not protect against symlinked *intermediate* directories. Point
+`CSLG_OUTPUT_FILE` only at directories you trust (avoid world-writable
+locations shared with untrusted users), and do not link the tracer into
+setuid/setgid binaries — the output path is taken from the environment.
+
 ## :stopwatch: Per-function timing (`LOG_ELAPSED`) ##
 
 Build with `-DLOG_ELAPSED=ON` to record how long every traced function takes
