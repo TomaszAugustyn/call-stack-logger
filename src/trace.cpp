@@ -505,7 +505,6 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
     const auto enter_time = std::chrono::steady_clock::now();
 #endif
     {
-        FILE* fp = get_thread_fp();
         // True when this frame produced a trace line: the file is open AND resolution
         // succeeded. Only logged frames adjust current_stack_depth on enter/exit and
         // (with LOG_ELAPSED) get a duration patch on exit.
