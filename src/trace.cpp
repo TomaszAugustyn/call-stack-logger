@@ -75,7 +75,7 @@ struct PerThreadTraceFile {
 // IMPORTANT member order: the re-entrancy guard `in_instrumentation` is declared FIRST
 // so it is destroyed LAST (members are destroyed in reverse declaration order). That
 // keeps the guard alive during destruction of `trace_file`, whose destructor may be
-// instrumented by Clang when added in step 4.
+// instrumented by Clang.
 struct PerThreadState {
     bool in_instrumentation = false;
     int current_stack_depth = -1;

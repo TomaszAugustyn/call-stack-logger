@@ -60,18 +60,21 @@ The `caller` address from `__cyg_profile_func_enter` points to the instrumentati
 not the original source location. To get the real caller, the framework uses `_Unwind_Backtrace`
 and `_Unwind_GetIPInfo` from `<unwind.h>` to walk the stack to frame 6.
 
-The constant frame depth of 6 is derived from this fixed call chain:
+The constant frame depth of 6 is derived from this fixed call chain (innermost first,
+matching the authoritative comment in `bfdResolver::resolve()`):
 ```
-Frame 6: instrumentation::FrameUnwinder::unwind_nth_frame
-Frame 5: bfdResolver::resolve / instrumentation::unwind_nth_frame
-Frame 4: instrumentation::bfdResolver::resolve
-Frame 3: instrumentation::resolve
-Frame 2: __cyg_profile_func_enter
-Frame 1: The actual user function being called
+Frame 1: FrameUnwinder::unwind_nth_frame
+Frame 2: instrumentation::unwind_nth_frame
+Frame 3: bfdResolver::resolve
+Frame 4: instrumentation::resolve
+Frame 5: __cyg_profile_func_enter
+Frame 6: the instrumented function itself (the callee)
+Frame 7: the caller of the instrumented function — captured (one beyond the 6 increments)
 ```
 
 **IMPORTANT:** If the resolution pipeline code is modified (adding/removing function calls in the
-chain), the frame number (currently 6) in `callStack.cpp:209` MUST be recalculated.
+chain), the frame number (currently 6) passed to `unwind_nth_frame()` inside
+`bfdResolver::resolve()` in `src/callStack.cpp` MUST be recalculated.
 
 ### Excluding Standard Library from Instrumentation
 
@@ -465,10 +468,13 @@ The core implementation. Key functions:
 
 ### `src/trace.cpp`
 The instrumentation entry points:
-- `trace_begin()` - Constructor: opens trace file, writes run separator, warns on failure
-- `trace_end()` - Destructor: closes trace file
+- `trace_begin()` - Constructor: opens main thread's trace file, writes run separator,
+  registers `trace_shutdown` via `atexit()`, warns on failure
+- `trace_shutdown()` - atexit handler: flushes every registered thread's file, clears
+  the registry, sets `shutdown_complete` (no `trace_end` destructor exists — it was
+  removed as dead code; see the comment in trace.cpp)
 - `__cyg_profile_func_enter()` - Resolves, logs function entry, pushes to resolution stack
-- `__cyg_profile_func_exit()` - Pops resolution stack, decrements depth if frame was resolved
+- `__cyg_profile_func_exit()` - Pops resolution stack, decrements depth if frame was logged
 - Guarded by `#ifndef DISABLE_INSTRUMENTATION`
 
 ### `src/main.cpp`
@@ -852,7 +858,7 @@ The tool is designed for scenarios where traditional debugging is impractical:
 
 ## Git History Summary
 
-The project evolved through ~30 commits from initial commit to current state:
+The project evolved through these milestones (earliest first):
 1. Initial commit with basic class/function name printing
 2. Added standard library exclusion from instrumentation
 3. Added filename and line number resolution via BFD

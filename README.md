@@ -269,7 +269,7 @@ tree column**, so it never disturbs tree alignment and is independent of
 [21-04-2026 15:00:00.123] [   0.105s ] |_ main  (called from: …libc-start.c:310)
 [21-04-2026 15:00:00.123] [   0.123us] |  |_ A::foo()  (called from: .../main.cpp:28)
 [21-04-2026 15:00:00.123] [  45.678ms] |  |_ B::foo()  (called from: .../main.cpp:33)
-[21-04-2026 15:00:00.124] [   1.234us] |  |  |_ std::sort<…>  (called from: …)
+[21-04-2026 15:00:00.124] [   1.234us] |  |  |_ A::foo()  (called from: .../main.cpp:18)
 ```
 
 Combined with `LOG_ADDR=ON` the address column simply follows the duration:
