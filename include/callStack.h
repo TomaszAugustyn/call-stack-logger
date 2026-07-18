@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #ifndef NO_INSTRUMENT
@@ -103,6 +104,12 @@ private:
     static void ensure_actual_executable(Dl_info& symbol_info);
 
     inline static std::map<void*, storedBfd> s_bfds = {};
+    // Negative cache: base addresses whose object file failed to load/parse.
+    // Without it, every traced call whose callee or caller lands in an
+    // unloadable object (deleted .so, unreadable file, unparsable format)
+    // would re-run bfd_openr + bfd_check_format — file I/O per call. Bounded
+    // by the number of distinct loaded objects. Protected by s_bfd_mutex.
+    inline static std::unordered_set<void*> s_bfd_load_failed = {};
     inline static bool s_bfd_initialized = false;
     inline static std::string s_argv0 = get_argv0();
     // Protects s_bfds, s_bfd_initialized, and BFD library calls which are not thread-safe.

@@ -133,16 +133,25 @@ bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
     // iterator is reused for the return — no separate count()/at() round trips.
     auto it = s_bfds.find(_info.dli_fbase);
     if (it == s_bfds.end()) {
+        // Negative cache: a previous load attempt for this object already failed.
+        // Don't retry bfd_openr on every traced call — the failure is sticky for
+        // the process lifetime (matching s_bfds, which is never invalidated).
+        if (s_bfd_load_failed.count(_info.dli_fbase) != 0) {
+            return nullptr;
+        }
         ensure_actual_executable(_info);
         auto newBfd = std::make_unique<storedBfd>(bfd_openr(_info.dli_fname, nullptr), &bfd_close);
         if (!newBfd || !newBfd->abfd) {
+            s_bfd_load_failed.insert(_info.dli_fbase);
             return nullptr;
         }
         if (!bfd_check_format(newBfd->abfd.get(), bfd_object)) {
+            s_bfd_load_failed.insert(_info.dli_fbase);
             return nullptr;
         }
         long storageNeeded = bfd_get_symtab_upper_bound(newBfd->abfd.get());
         if (storageNeeded < 0) {
+            s_bfd_load_failed.insert(_info.dli_fbase);
             return nullptr;
         }
         newBfd->symbols.reset(reinterpret_cast<asymbol**>(new char[static_cast<size_t>(storageNeeded)]));
