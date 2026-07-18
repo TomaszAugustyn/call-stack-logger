@@ -90,23 +90,25 @@ if(COVERAGE)
 endif()
 
 # Library variants for testing build-time flags. Each rebuilds the library sources
-# with one of the gated #defines so we can exercise the corresponding code path
-# without polluting the main build (the main library is built without these flags).
-#
-# Single-flag variants that reuse the existing traced_program.cpp driver:
-foreach(variant IN ITEMS log_addr log_not_demangled)
-    string(TOUPPER "${variant}" variant_upper)
+# with one or more of the gated #defines so we can exercise the corresponding code
+# path without polluting the main build (the main library is built without these
+# flags). cslg_add_flag_variant(<variant> <driver.cpp> <MACRO>...) creates the
+# callstacklogger_<variant> static library (library sources recompiled with the
+# macros PUBLIC) plus a traced_test_program_<variant> executable built from
+# <driver.cpp> with INSTRUMENT_FLAGS and linked against it — mirroring what the
+# main callstacklogger + traced_test_program pair does for the default build.
+function(cslg_add_flag_variant variant driver)
     add_library(callstacklogger_${variant} STATIC
         ${PROJECT_SOURCE_DIR}/src/callStack.cpp
         ${PROJECT_SOURCE_DIR}/src/trace.cpp)
     target_include_directories(callstacklogger_${variant} PUBLIC
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
-    target_compile_definitions(callstacklogger_${variant} PUBLIC ${variant_upper})
+    target_compile_definitions(callstacklogger_${variant} PUBLIC ${ARGN})
     target_compile_options(callstacklogger_${variant} INTERFACE -g)
     target_link_options(callstacklogger_${variant} INTERFACE -rdynamic)
     target_link_libraries(callstacklogger_${variant} PUBLIC ${CSLG_BFD_LINK_LIBS})
 
-    add_executable(traced_test_program_${variant} traced_program.cpp)
+    add_executable(traced_test_program_${variant} ${driver})
     target_compile_features(traced_test_program_${variant} PRIVATE cxx_std_17)
     target_compile_options(traced_test_program_${variant} PRIVATE ${INSTRUMENT_FLAGS})
     target_link_libraries(traced_test_program_${variant} PRIVATE callstacklogger_${variant})
@@ -119,66 +121,23 @@ foreach(variant IN ITEMS log_addr log_not_demangled)
         target_compile_options(traced_test_program_${variant} PRIVATE --coverage)
         target_link_options(traced_test_program_${variant} PRIVATE --coverage)
     endif()
-endforeach()
+endfunction()
 
-# LOG_ELAPSED variant — uses a DEDICATED driver (log_elapsed_traced_program.cpp)
-# with usleep() sentinels at known depths, so LogElapsedFlagTest can assert
-# specific lower bounds on the reported durations.
-add_library(callstacklogger_log_elapsed STATIC
-    ${PROJECT_SOURCE_DIR}/src/callStack.cpp
-    ${PROJECT_SOURCE_DIR}/src/trace.cpp)
-target_include_directories(callstacklogger_log_elapsed PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
-target_compile_definitions(callstacklogger_log_elapsed PUBLIC LOG_ELAPSED)
-target_compile_options(callstacklogger_log_elapsed INTERFACE -g)
-target_link_options(callstacklogger_log_elapsed INTERFACE -rdynamic)
-target_link_libraries(callstacklogger_log_elapsed PUBLIC ${CSLG_BFD_LINK_LIBS})
+cslg_add_flag_variant(log_addr traced_program.cpp LOG_ADDR)
+cslg_add_flag_variant(log_not_demangled traced_program.cpp LOG_NOT_DEMANGLED)
 
-add_executable(traced_test_program_log_elapsed log_elapsed_traced_program.cpp)
-target_compile_features(traced_test_program_log_elapsed PRIVATE cxx_std_17)
-target_compile_options(traced_test_program_log_elapsed PRIVATE ${INSTRUMENT_FLAGS})
-target_link_libraries(traced_test_program_log_elapsed PRIVATE callstacklogger_log_elapsed)
-
-cslg_apply_sanitizers(callstacklogger_log_elapsed)
-cslg_apply_sanitizers(traced_test_program_log_elapsed)
-
-if(COVERAGE)
-    target_compile_options(callstacklogger_log_elapsed PRIVATE --coverage)
-    target_compile_options(traced_test_program_log_elapsed PRIVATE --coverage)
-    target_link_options(traced_test_program_log_elapsed PRIVATE --coverage)
-endif()
+# LOG_ELAPSED uses a DEDICATED driver (log_elapsed_traced_program.cpp) with
+# usleep() sentinels at known depths, so LogElapsedFlagTest can assert specific
+# lower bounds on the reported durations.
+cslg_add_flag_variant(log_elapsed log_elapsed_traced_program.cpp LOG_ELAPSED)
 
 # Combined-flags variant: all three gated macros defined simultaneously. Exercises
 # LOG_ELAPSED's byte-offset math under the line-layout changes introduced by
 # LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the placeholder
 # position (right after the fixed-width timestamp) is independent of the tail
 # layout and that pwrite() never stomps the addr column.
-set(combined_variant log_elapsed_addr_not_demangled)
-add_library(callstacklogger_${combined_variant} STATIC
-    ${PROJECT_SOURCE_DIR}/src/callStack.cpp
-    ${PROJECT_SOURCE_DIR}/src/trace.cpp)
-target_include_directories(callstacklogger_${combined_variant} PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
-target_compile_definitions(callstacklogger_${combined_variant} PUBLIC
+cslg_add_flag_variant(log_elapsed_addr_not_demangled traced_program.cpp
     LOG_ELAPSED LOG_ADDR LOG_NOT_DEMANGLED)
-target_compile_options(callstacklogger_${combined_variant} INTERFACE -g)
-target_link_options(callstacklogger_${combined_variant} INTERFACE -rdynamic)
-target_link_libraries(callstacklogger_${combined_variant} PUBLIC ${CSLG_BFD_LINK_LIBS})
-
-add_executable(traced_test_program_${combined_variant} traced_program.cpp)
-target_compile_features(traced_test_program_${combined_variant} PRIVATE cxx_std_17)
-target_compile_options(traced_test_program_${combined_variant} PRIVATE ${INSTRUMENT_FLAGS})
-target_link_libraries(traced_test_program_${combined_variant} PRIVATE
-    callstacklogger_${combined_variant})
-
-cslg_apply_sanitizers(callstacklogger_${combined_variant})
-cslg_apply_sanitizers(traced_test_program_${combined_variant})
-
-if(COVERAGE)
-    target_compile_options(callstacklogger_${combined_variant} PRIVATE --coverage)
-    target_compile_options(traced_test_program_${combined_variant} PRIVATE --coverage)
-    target_link_options(traced_test_program_${combined_variant} PRIVATE --coverage)
-endif()
 
 # The integration test runner executes traced_test_program and parses output.
 # Compiled WITHOUT instrumentation — just gtest code.
