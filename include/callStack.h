@@ -17,7 +17,9 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #ifndef NO_INSTRUMENT
@@ -110,6 +112,27 @@ private:
     // would re-run bfd_openr + bfd_check_format — file I/O per call. Bounded
     // by the number of distinct loaded objects. Protected by s_bfd_mutex.
     inline static std::unordered_set<void*> s_bfd_load_failed = {};
+    // Memoization caches for fully-resolved per-address results, consulted in
+    // resolve_no_unwind() before the BFD machinery. s_bfds caches the PARSED
+    // OBJECT FILES, but each resolve still cost dladdr + a section walk +
+    // bfd_find_nearest_line (a DWARF line-table walk) + __cxa_demangle — per
+    // call, repeated in full every time the same function was called again.
+    // Memoizing by exact address turns repeat resolutions into one hash lookup.
+    // A cached nullopt in s_name_cache is meaningful: it records "this callee
+    // is filtered / not loggable" (e.g. Clang's std-library filter), making the
+    // filter itself a hash hit on repeat calls.
+    //
+    // Growth is bounded by the program text, not by runtime input: keys are
+    // code addresses, so distinct callees ≤ number of instrumented functions
+    // and distinct callers ≤ number of call sites in the loaded code — both
+    // fixed at link/load time. Typical programs: thousands of entries (hundreds
+    // of KB); worst realistic case for very large binaries: a few hundred
+    // thousand entries (tens of MB). Staleness caveat: dlclose + dlopen that
+    // reuses an address keeps serving the old entry — the same accepted
+    // trade-off as s_bfds. Protected by s_bfd_mutex.
+    inline static std::unordered_map<void*, std::optional<std::string>> s_name_cache = {};
+    inline static std::unordered_map<void*, std::pair<std::string, std::optional<unsigned int>>>
+            s_location_cache = {};
     inline static bool s_bfd_initialized = false;
     inline static std::string s_argv0 = get_argv0();
     // Protects s_bfds, s_bfd_initialized, and BFD library calls which are not thread-safe.

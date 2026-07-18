@@ -44,6 +44,16 @@ Address resolution happens in multiple stages (implemented in `src/callStack.cpp
 3. **`abi::__cxa_demangle()`** (from `<cxxabi.h>`) - Converts GCC-mangled C++ symbol names
    (e.g., `_ZN1A3fooEv`) into human-readable form (e.g., `A::foo()`).
 
+Results are **memoized per address**: `resolve_no_unwind()` consults two hash maps
+(callee address → demangled name, call-site address → file:line, both in
+`callStack.h`) before running the stages above, so the full dladdr + BFD + demangle
+pipeline executes only on first sight of each address — every repeat call is a hash
+lookup under the same mutex. A cached `nullopt` name records "filtered / not
+loggable", which also turns Clang's runtime std-library filter into a hash hit on
+repeat calls. Cache growth is bounded by the program text (distinct instrumented
+functions + call sites), not by runtime input; `dlclose`+`dlopen` address reuse
+serves stale entries — the same accepted trade-off as the `s_bfds` object cache.
+
 ### Stack Unwinding for Accurate Caller Location
 
 The `caller` address from `__cyg_profile_func_enter` points to the instrumentation call site,
@@ -806,9 +816,11 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    must not be used in setuid/setgid binaries (the path comes from the environment).
 5. **Configurable output:** Set `CSLG_OUTPUT_FILE` environment variable to redirect trace
    output to a custom path (defaults to `"trace.out"`)
-6. **Performance overhead:** Every function call triggers symbol resolution via BFD; this tool
-   is for debugging/tracing, not production use. `format()` uses `snprintf` with a stack
-   buffer to avoid per-call heap allocation.
+6. **Performance overhead:** The first call for each callee/call-site address triggers
+   full symbol resolution via BFD; repeat calls hit the per-address memoization caches
+   (see Symbol Resolution Pipeline) and cost a hash lookup plus the file write. Still
+   a debugging/tracing tool, not for production use. `format()` uses `snprintf` with a
+   stack buffer to avoid per-call heap allocation.
 7. **Header-only utilities:** `format.h`, `prettyTime.h`, `unwinder.h`,
    `durationFormat.h` contain inline implementations in headers (definitions in
    headers, not just declarations).
