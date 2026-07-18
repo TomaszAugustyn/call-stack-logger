@@ -146,10 +146,14 @@ The framing `=` lines are sized to match the middle line's length.
 - `TraceGlobals` struct: bundles process-wide state — `main_tid`, `base_path`,
   `open_files_mutex`, `open_files` registry (vector of `PerThreadTraceFile*`),
   and three atomic flags (`trace_ready`, `shutdown_started`, `shutdown_complete`).
-  Accessed via a Meyers-singleton function `g_trace()` because the struct contains
-  `std::string` and `std::vector` which need dynamic initialization — a plain file-scope
-  static would not be fully constructed when `trace_begin()` (a constructor function)
-  runs, causing a segfault on assignment.
+  Accessed via a lazily-initialized singleton function `g_trace()` because the struct
+  contains `std::string` and `std::vector` which need dynamic initialization — a plain
+  file-scope static would not be fully constructed when `trace_begin()` (a constructor
+  function) runs, causing a segfault on assignment. The instance is heap-allocated and
+  deliberately leaked: a worker thread exiting during the tail of static destruction
+  still locks `open_files_mutex` in `~PerThreadTraceFile`, which would be UB on a
+  destroyed function-local static. The kernel reclaims the memory at process exit and
+  LSan counts a reachable global as live, so nothing is reported as leaked.
 
 **Write path: zero cross-thread synchronization.** Each thread calls `get_thread_fp()`
 to obtain its own `FILE*` (lazy-opened on first use) and writes directly without any

@@ -121,7 +121,8 @@ struct PerThreadState {
 
 static thread_local PerThreadState t_state;
 
-// Process-wide globals bundled into one struct, wrapped in a Meyers-singleton accessor.
+// Process-wide globals bundled into one struct, behind a lazily-initialized (and
+// deliberately leaked — see g_trace()) singleton accessor.
 //
 // Why a function-local static (not a plain static): TraceGlobals contains `std::string`
 // and `std::vector`, which require dynamic initialization in C++17 (neither has a
@@ -151,8 +152,16 @@ struct TraceGlobals {
 
 NO_INSTRUMENT
 static TraceGlobals& g_trace() {
-    static TraceGlobals instance;
-    return instance;
+    // Deliberately heap-allocated and leaked (never destroyed). A thread that
+    // exits during the tail of static destruction — after a plain function-local
+    // static would already have been destroyed — still runs ~PerThreadTraceFile,
+    // which locks open_files_mutex and touches open_files. With a normal Meyers
+    // singleton that would operate on a destroyed mutex/vector (UB); the leaked
+    // instance stays valid until the process image disappears and the kernel
+    // reclaims everything. LSan treats a reachable global as live, so this does
+    // not appear as a leak.
+    static TraceGlobals* instance = new TraceGlobals;
+    return *instance;
 }
 
 namespace {
