@@ -155,7 +155,13 @@ bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
             return nullptr;
         }
         newBfd->symbols.reset(reinterpret_cast<asymbol**>(new char[static_cast<size_t>(storageNeeded)]));
-        /*size_t numSymbols = */ bfd_canonicalize_symtab(newBfd->abfd.get(), newBfd->symbols.get());
+        if (bfd_canonicalize_symtab(newBfd->abfd.get(), newBfd->symbols.get()) < 0) {
+            // Canonicalization failed (malformed symbol table): the buffer contents
+            // are undefined and bfd_find_nearest_line() would chase garbage pointers.
+            // Treat it like any other unloadable object.
+            s_bfd_load_failed.insert(_info.dli_fbase);
+            return nullptr;
+        }
 
         newBfd->offset = reinterpret_cast<intptr_t>(_info.dli_fbase);
         it = s_bfds.emplace(_info.dli_fbase, std::move(*newBfd)).first;
