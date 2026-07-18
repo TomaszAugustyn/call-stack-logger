@@ -84,7 +84,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # on the command line, and overwriting would silently discard it. No duplication
 # across reconfigures: this sets a normal variable that does not persist — every
 # configure re-reads the cache value and appends once.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -Wextra")
 
 # Note: -rdynamic is attached to the callstacklogger target as an INTERFACE link
 # option, so any executable that links against callstacklogger automatically gets

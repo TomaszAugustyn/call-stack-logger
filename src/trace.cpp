@@ -641,6 +641,11 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_exit(void *callee, void *caller) {
+    // The exit hook needs neither address: pairing is positional (LIFO pop of the
+    // per-thread frame stack). The parameters exist because the compiler-emitted
+    // call passes them; silence -Wextra's unused-parameter warning.
+    (void)callee;
+    (void)caller;
     if (t_state.in_instrumentation) { return; }
 #ifdef LOG_ELAPSED
     // Set the re-entrancy guard because below we call std::chrono::steady_clock::now()
