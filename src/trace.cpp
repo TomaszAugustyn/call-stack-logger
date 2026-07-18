@@ -528,24 +528,26 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                     std::string line = utils::format(*maybe_resolved,
                                                      t_state.current_stack_depth + 1,
                                                      "[  pending ] ");
+                    // Terminate while still in the throwing zone — push_back may
+                    // reallocate.
+                    line.push_back('\n');
                     // ---- no-throw zone ----
                     t_state.current_stack_depth++;
                     logged = true;
                     // Remember where this line starts: the placeholder offset for the
                     // per-frame slot is recorded after the push below.
                     line_start = t_state.cursor;
-                    // No mutex: this FILE* is private to this thread. fputs + fputc give
-                    // us a known-exact byte count (line.size() + 1) so cursor tracking
-                    // stays accurate without any ftello/fflush calls on the hot path.
-                    // Both results are checked: the fputc('\n') is the line-buffered
-                    // flush point, so a failing write(2) (ENOSPC, EIO) surfaces as EOF
-                    // here. On failure the cursor is not advanced and is marked invalid
-                    // — an unknown number of bytes reached the file, so any further
+                    // No mutex: this FILE* is private to this thread. One fwrite of the
+                    // newline-terminated line — a single stdio call (one FILE-lock
+                    // round trip) with a known-exact byte count, so cursor tracking
+                    // stays accurate without any ftello/fflush on the hot path. The
+                    // trailing '\n' is the line-buffered flush point, so a failing
+                    // write(2) (ENOSPC, EIO) surfaces as a short count here. On
+                    // failure the cursor is not advanced and is marked invalid — an
+                    // unknown number of bytes reached the file, so any further
                     // cursor-derived patch offset would corrupt existing lines.
-                    const int put_result = fputs(line.c_str(), fp);
-                    const int newline_result = fputc('\n', fp);
-                    if (put_result != EOF && newline_result != EOF) {
-                        t_state.cursor += static_cast<off_t>(line.size() + 1);
+                    if (fwrite(line.data(), 1, line.size(), fp) == line.size()) {
+                        t_state.cursor += static_cast<off_t>(line.size());
                     } else {
                         t_state.cursor_valid = false;
                     }

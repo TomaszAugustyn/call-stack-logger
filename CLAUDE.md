@@ -235,9 +235,10 @@ spliced immediately after `"[<timestamp>] "`, before the optional
 `addr:` column and the tree, which keeps the offset invariant under
 any combination of `LOG_ADDR` / `LOG_NOT_DEMANGLED`.
 
-**Cursor integrity on write failure.** The fputs/fputc results are
-checked (the `'\n'` is the line-buffered flush point, so ENOSPC/EIO
-surface there). On the first failed write — or if the initial lseek
+**Cursor integrity on write failure.** Each line goes out as one
+`fwrite` of the newline-terminated string, and the returned byte count
+is checked (the `'\n'` is the line-buffered flush point, so ENOSPC/EIO
+surface as a short count). On the first failed write — or if the initial lseek
 cannot determine EOF (non-seekable target) — the per-thread
 `cursor_valid` flag drops permanently: an unknown number of bytes
 reached the file, so every later cursor-derived offset would be a
