@@ -305,6 +305,11 @@ with the timestamps you also see roughly *when* each frame had been entered
 relative to the crash — additional signal that's hard to get from a stack
 trace alone.
 
+The same degraded mode protects against I/O failures: if a trace line write
+fails (disk full, I/O error), the logger stops patching from that point on for
+the affected thread — later lines keep `[  pending ]` rather than risking
+duration bytes being written at stale offsets into the middle of other lines.
+
 ### Cost ###
 
 Adds two `steady_clock::now()` reads (~20 ns each) and one `pwrite()` syscall

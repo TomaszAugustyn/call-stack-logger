@@ -221,6 +221,19 @@ spliced immediately after `"[<timestamp>] "`, before the optional
 `addr:` column and the tree, which keeps the offset invariant under
 any combination of `LOG_ADDR` / `LOG_NOT_DEMANGLED`.
 
+**Cursor integrity on write failure.** The fputs/fputc results are
+checked (the `'\n'` is the line-buffered flush point, so ENOSPC/EIO
+surface there). On the first failed write — or if the initial lseek
+cannot determine EOF (non-seekable target) — the per-thread
+`cursor_valid` flag drops permanently: an unknown number of bytes
+reached the file, so every later cursor-derived offset would be a
+guess. From then on new frames record a `-1` offset sentinel and the
+exit handler skips their pwrite — their `[  pending ]` stays, the
+documented degraded mode. Frames recorded while the cursor was still
+valid keep correct offsets and are still patched. This prevents
+duration bytes from being spliced into the middle of other lines
+after a disk-full event.
+
 **Crash-diagnostic feature.** A line on disk holds either a real
 `[   1.234ms]` (function returned cleanly) or `[  pending ]` (still
 executing at the crash). On crash, the chain of `[  pending ]` lines

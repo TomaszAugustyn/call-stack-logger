@@ -99,12 +99,23 @@ struct PerThreadState {
     // explicit at the use site.
     off_t frame_placeholder_offset[MAX_TRACE_DEPTH] = {};
 
-    // Running byte position for this thread's trace file. Seeded from
-    // stat().st_size when the file is opened (handles multi-run append where
+    // Running byte position for this thread's trace file. Seeded from the file's
+    // end position when the file is opened (handles multi-run append where
     // earlier runs already wrote content + separator headers). Advanced by
     // exactly the number of bytes we wrote for every line — lets us compute
     // placeholder offsets without calling ftello() on the hot path.
     off_t cursor = 0;
+
+    // True while `cursor` provably matches the file's real end position. Cleared
+    // permanently (for this thread) the first time a line write fails (ENOSPC,
+    // EIO, quota) or the initial lseek cannot determine EOF — after a failed
+    // write the number of bytes that actually reached the file is unknown, so
+    // every cursor-derived offset from then on would be a guess. Frames recorded
+    // while the cursor was still valid keep their correct offsets and are still
+    // patched; frames entered afterwards record a -1 offset sentinel and keep
+    // their "[  pending ]" placeholder (the documented degraded mode) instead of
+    // risking pwrite splicing duration bytes into the middle of other lines.
+    bool cursor_valid = true;
 #endif
 
     PerThreadTraceFile trace_file;
@@ -239,7 +250,15 @@ void open_this_thread_file(PerThreadState& self) {
     // '\n', so lseek on pfd observes the post-header size. SEEK_END on a
     // non-O_APPEND fd returns the file size without affecting fp's position.
     off_t eof = lseek(pfd, 0, SEEK_END);
-    self.cursor = (eof == static_cast<off_t>(-1)) ? 0 : eof;
+    if (eof == static_cast<off_t>(-1)) {
+        // Non-seekable target (pipe, some character devices): the placeholder
+        // offsets would be guesses that could land inside the header. Disable
+        // patching for this thread; placeholders stay "[  pending ]".
+        self.cursor = 0;
+        self.cursor_valid = false;
+    } else {
+        self.cursor = eof;
+    }
 #endif
 
     // Register this file so trace_shutdown() can close it at program exit if the
@@ -491,9 +510,18 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                 // No mutex: this FILE* is private to this thread. fputs + fputc give
                 // us a known-exact byte count (line.size() + 1) so cursor tracking
                 // stays accurate without any ftello/fflush calls on the hot path.
-                fputs(line.c_str(), fp);
-                fputc('\n', fp);
-                t_state.cursor += static_cast<off_t>(line.size() + 1);
+                // Both results are checked: the fputc('\n') is the line-buffered
+                // flush point, so a failing write(2) (ENOSPC, EIO) surfaces as EOF
+                // here. On failure the cursor is not advanced and is marked invalid
+                // — an unknown number of bytes reached the file, so any further
+                // cursor-derived patch offset would corrupt existing lines.
+                const int put_result = fputs(line.c_str(), fp);
+                const int newline_result = fputc('\n', fp);
+                if (put_result != EOF && newline_result != EOF) {
+                    t_state.cursor += static_cast<off_t>(line.size() + 1);
+                } else {
+                    t_state.cursor_valid = false;
+                }
 #else
                 // No mutex: this FILE* is private to this thread.
                 fprintf(fp, "%s\n",
@@ -516,11 +544,17 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 #ifdef LOG_ELAPSED
             if (logged) {
                 // Placeholder sits at "[<timestamp>] " offset = 1 + PRETTY_TIME_LENGTH + 2.
+                // Only when the cursor is still trustworthy (this line's write
+                // included — a failure in it invalidated the cursor above); with
+                // an untrusted cursor, record the -1 sentinel so the exit handler
+                // skips the pwrite and the placeholder stays "[  pending ]".
                 static constexpr std::size_t PLACEHOLDER_OFFSET_IN_LINE =
                         utils::PRETTY_TIME_LENGTH + 3;
                 t_state.frame_enter_time[t_state.frame_resolved_top] = enter_time;
                 t_state.frame_placeholder_offset[t_state.frame_resolved_top] =
-                        line_start + static_cast<off_t>(PLACEHOLDER_OFFSET_IN_LINE);
+                        t_state.cursor_valid
+                        ? line_start + static_cast<off_t>(PLACEHOLDER_OFFSET_IN_LINE)
+                        : static_cast<off_t>(-1);
             }
 #endif
         } else {
@@ -584,7 +618,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
             char buf[utils::DURATION_FIELD_WIDTH + 1];
             utils::format_duration_12chars(ns, buf);
             const int pfd = t_state.trace_file.patch_fd.load(std::memory_order_relaxed);
-            if (pfd >= 0) {
+            if (pfd >= 0 && t_state.frame_placeholder_offset[idx] >= 0) {
                 // pwrite is atomic for our 12 bytes (well under PIPE_BUF) and
                 // honors the explicit offset because patch_fd was opened WITHOUT
                 // O_APPEND. Return value intentionally unchecked: the only
