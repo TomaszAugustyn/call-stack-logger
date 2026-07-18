@@ -57,7 +57,13 @@ target_compile_features(stripped_caller PRIVATE cxx_std_17)
 add_custom_command(TARGET stripped_caller POST_BUILD
     COMMAND strip --strip-all $<TARGET_FILE:stripped_caller>
     COMMENT "Stripping symtab and debug info from stripped_caller")
-cslg_apply_sanitizers(stripped_caller)
+# Deliberately NOT sanitized (no cslg_apply_sanitizers): the fixture simulates a
+# foreign, stripped third-party library — real third-party .so files are not
+# sanitizer-instrumented either, and the lib is a trivial passthrough with no
+# allocations or synchronization for a sanitizer to check. Sanitizing a SHARED
+# library also requires the shared sanitizer runtime (libtsan.so / libasan.so),
+# which some distros ship as separate optional packages — keeping the fixture
+# clean avoids that portability trap while making the simulation more faithful.
 
 add_executable(stripped_caller_program stripped_caller_program.cpp)
 target_compile_features(stripped_caller_program PRIVATE cxx_std_17)
