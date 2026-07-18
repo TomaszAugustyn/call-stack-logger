@@ -497,13 +497,6 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
     // destructors of std library types may be instrumented, so in_instrumentation must
     // remain true until all destructors have run.
     t_state.in_instrumentation = true;
-#ifdef LOG_ELAPSED
-    // Snapshot monotonic time right after crossing the re-entrancy guard so the
-    // recorded enter-time is as close as possible to the instrumented function's
-    // actual call boundary. BFD resolution below adds tens of microseconds — we
-    // explicitly don't want that in the reported duration.
-    const auto enter_time = std::chrono::steady_clock::now();
-#endif
     {
         // True when this frame produced a trace line: the file is open AND resolution
         // succeeded. Only logged frames adjust current_stack_depth on enter/exit and
@@ -594,11 +587,20 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                 // skips the pwrite and the placeholder stays "[  pending ]".
                 static constexpr std::size_t PLACEHOLDER_OFFSET_IN_LINE =
                         utils::PRETTY_TIME_LENGTH + 3;
-                t_state.frame_enter_time[t_state.frame_resolved_top] = enter_time;
                 t_state.frame_placeholder_offset[t_state.frame_resolved_top] =
                         t_state.cursor_valid
                         ? line_start + static_cast<off_t>(PLACEHOLDER_OFFSET_IN_LINE)
                         : static_cast<off_t>(-1);
+                // Read the clock as the hook's LAST step for this frame, mirrored
+                // by the exit hook reading it FIRST (before its own format +
+                // pwrite work): the frame's reported span covers the function
+                // body but not the tracer's own per-call work (resolve + format +
+                // line write — microseconds even when the memoization caches hit,
+                // tens of microseconds cold). Hook overhead of calls nested
+                // INSIDE the function still lands in the parent's span —
+                // unavoidable without per-frame overhead accounting.
+                t_state.frame_enter_time[t_state.frame_resolved_top] =
+                        std::chrono::steady_clock::now();
             }
 #endif
         } else {

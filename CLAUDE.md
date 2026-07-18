@@ -267,6 +267,17 @@ and `off_t frame_placeholder_offset[MAX_TRACE_DEPTH]`. Indexed by
 exit handler computes `now() - enter_time[idx]`, formats into a 12-byte
 buffer, and `pwrite(patch_fd, buf, 12, frame_placeholder_offset[idx])`.
 
+**What the span measures.** `frame_enter_time` is filled as the enter
+hook's LAST step for the frame (after resolve, format, and the line
+write) and the exit hook reads the clock FIRST (before its own format +
+pwrite). A frame's reported duration therefore excludes the tracer's own
+per-call work for that frame — without this, every leaf function's
+duration would be dominated by hook overhead (microseconds even with
+warm memoization caches, tens of microseconds cold). Hook overhead of
+calls nested inside the function still lands in the parent's span;
+parent ≥ child always holds because a child's whole span (hooks
+included) sits inside the parent's body.
+
 **Overflow frames** (call depth > MAX_TRACE_DEPTH = 2048) still get an
 enter line written with the `[  pending ]` placeholder so tree indentation
 remains visually correct, but they do not get a slot in the per-frame

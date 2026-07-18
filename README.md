@@ -317,6 +317,16 @@ fails (disk full, I/O error), the logger stops patching from that point on for
 the affected thread — later lines keep `[  pending ]` rather than risking
 duration bytes being written at stale offsets into the middle of other lines.
 
+### What the duration measures ###
+
+The reported span covers the instrumented function itself: the enter hook reads
+the clock as its **last** step (after symbol resolution, formatting, and the
+line write) and the exit hook reads it **first** (before its own formatting and
+`pwrite`), so the tracer's per-call work is not billed to the function it
+traces. Tracing overhead of calls nested *inside* a function does remain part
+of that function's span — a parent's duration always contains its children's
+full spans, hooks included.
+
 ### Cost ###
 
 Adds two `steady_clock::now()` reads (~20 ns each) and one `pwrite()` syscall
