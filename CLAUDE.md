@@ -857,6 +857,22 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    overhead when `LOG_ELAPSED=OFF` — all code is `#ifdef`-guarded, the binary
    is byte-identical to a build without the option. See "Per-Function Timing
    (LOG_ELAPSED)" in the Architecture section above.
+9. **Exceptions under Clang (known limitation):** Clang's `-finstrument-functions`
+   does not emit `__cyg_profile_func_exit` on the exception-unwind path — frames
+   unwound by a throw never run their exit hook. GCC emits the exit call on the
+   exceptional path too (like a cleanup), so enter/exit stay paired (verified
+   empirically with a minimal probe at -O0 and -O2 on both compilers). Under
+   Clang, a caught exception that unwinds through instrumented frames leaves one
+   stale entry per unwound frame on the per-thread frame stack:
+   `current_stack_depth` and tree indentation drift deeper for the rest of the
+   thread, and with `LOG_ELAPSED` subsequent exits pop the stale slots, so
+   durations get patched onto the wrong (already-unwound) lines while the frames
+   that keep running stay `[  pending ]`. Documented in README's
+   "Compiler-specific instrumentation" section; prefer GCC for tracing
+   exception-heavy code. A code-level self-heal (recording the callee address
+   per slot and popping stale entries on mismatch) was considered and rejected
+   for now: it cannot disambiguate recursive frames (same callee address at
+   several depths).
 
 ## Use Cases (from the article)
 

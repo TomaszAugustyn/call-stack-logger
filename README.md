@@ -77,11 +77,21 @@ functions have the `NO_INSTRUMENT` attribute). Standard library exclusion differ
 | | GCC | Clang |
 |---|-----|-------|
 | **Std library exclusion** | Compile-time (`-finstrument-functions-exclude-file-list`) | Runtime (mangled name filter in `resolve_function_name()`) |
+| **Exit hooks on exception unwind** | Emitted — enter/exit stay paired | **Not emitted** (known limitation, see below) |
 
 GCC auto-discovers std library header paths and excludes them at compile time. Clang does
 not support the exclude-file-list flag, so std library functions are filtered at runtime by
 checking the Itanium C++ ABI mangled name for known `std::`, `__gnu_cxx::`, and
 `__cxxabiv1::` prefixes.
+
+**Known Clang limitation — exceptions.** Clang's `-finstrument-functions` does not call
+`__cyg_profile_func_exit` for frames unwound by a thrown exception, while GCC emits the
+exit call on the exceptional path too (like a cleanup), keeping enter/exit paired. In a
+Clang build, a caught exception that unwinds through instrumented frames leaves one
+unmatched enter per unwound frame: tree indentation drifts one level deeper for the rest
+of that thread's trace, and with `LOG_ELAPSED` later exits can patch durations onto the
+wrong lines while the unwound frames' own lines keep `[  pending ]`. If the code you
+trace throws exceptions across instrumented frames, prefer GCC.
 
 ## :jigsaw: Integrating into your own project ##
 
