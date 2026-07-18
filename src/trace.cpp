@@ -236,11 +236,17 @@ void open_this_thread_file(PerThreadState& self) {
     snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
     int pfd = open(fd_path, O_WRONLY);
     if (pfd < 0) {
-        fclose(fp);
+        // Degrade rather than disable: the trace itself is still valuable without
+        // durations. Keep tracing through fp; with pfd == -1 and cursor_valid
+        // false, every frame records the -1 offset sentinel, the exit handler
+        // skips its pwrite, and each line keeps the "[  pending ]" placeholder —
+        // the same documented degraded mode as a mid-run write failure.
+        // Realistic triggers: /proc not mounted (minimal chroot/container), fd
+        // limit exhaustion.
         fprintf(stderr,
-                "[call-stack-logger] WARNING: Could not open %s for duration patching\n",
+                "[call-stack-logger] WARNING: Could not reopen %s for duration patching "
+                "— tracing continues, durations stay \"[  pending ]\"\n",
                 path.c_str());
-        return;
     }
 #endif
 
@@ -255,20 +261,26 @@ void open_this_thread_file(PerThreadState& self) {
     write_run_separator_header(fp, tid);
 
 #ifdef LOG_ELAPSED
-    // Seed the per-thread byte cursor to the current EOF, which now reflects
-    // everything written by prior runs (multi-run append) AND the separator
-    // header we just wrote. Line-buffered stdio flushed the header on its final
-    // '\n', so lseek on pfd observes the post-header size. SEEK_END on a
-    // non-O_APPEND fd returns the file size without affecting fp's position.
-    off_t eof = lseek(pfd, 0, SEEK_END);
-    if (eof == static_cast<off_t>(-1)) {
-        // Non-seekable target (pipe, some character devices): the placeholder
-        // offsets would be guesses that could land inside the header. Disable
-        // patching for this thread; placeholders stay "[  pending ]".
-        self.cursor = 0;
-        self.cursor_valid = false;
+    if (pfd >= 0) {
+        // Seed the per-thread byte cursor to the current EOF, which now reflects
+        // everything written by prior runs (multi-run append) AND the separator
+        // header we just wrote. Line-buffered stdio flushed the header on its final
+        // '\n', so lseek on pfd observes the post-header size. SEEK_END on a
+        // non-O_APPEND fd returns the file size without affecting fp's position.
+        off_t eof = lseek(pfd, 0, SEEK_END);
+        if (eof == static_cast<off_t>(-1)) {
+            // Non-seekable target (pipe, some character devices): the placeholder
+            // offsets would be guesses that could land inside the header. Disable
+            // patching for this thread; placeholders stay "[  pending ]".
+            self.cursor = 0;
+            self.cursor_valid = false;
+        } else {
+            self.cursor = eof;
+        }
     } else {
-        self.cursor = eof;
+        // No patch fd (reopen failed above): offsets would be unusable anyway;
+        // disable patching for this thread, tracing continues.
+        self.cursor_valid = false;
     }
 #endif
 
@@ -282,7 +294,9 @@ void open_this_thread_file(PerThreadState& self) {
             fclose(fp);
             self.trace_file.fp.store(nullptr, std::memory_order_relaxed);
 #ifdef LOG_ELAPSED
-            close(pfd);
+            if (pfd >= 0) {
+                close(pfd);
+            }
             self.trace_file.patch_fd.store(-1, std::memory_order_relaxed);
 #endif
             return;

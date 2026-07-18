@@ -211,7 +211,12 @@ clearing `O_APPEND` doesn't affect `fp` (`dup()` couldn't do that).
 Without the second fd, `pwrite` on Linux is silently redirected to EOF
 when the fd has `O_APPEND` — see `pwrite(2)`. The two fds never overlap
 in byte range: `fp` only writes **new** bytes beyond EOF, `patch_fd`
-only rewrites **existing** placeholder bytes.
+only rewrites **existing** placeholder bytes. If the `/proc/self/fd`
+reopen fails (no `/proc` in a minimal chroot/container, fd exhaustion),
+the thread degrades instead of losing tracing: `fp` stays open,
+`patch_fd` stays `-1`, `cursor_valid` drops, and every line keeps its
+`[  pending ]` placeholder — the same degraded mode as a mid-run write
+failure, announced once on stderr.
 
 **Fixed-width invariant.** Every duration field is exactly 12 bytes
 (`DURATION_FIELD_WIDTH` in `include/durationFormat.h`). The placeholder

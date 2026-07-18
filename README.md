@@ -326,6 +326,10 @@ The same degraded mode protects against I/O failures: if a trace line write
 fails (disk full, I/O error), the logger stops patching from that point on for
 the affected thread — later lines keep `[  pending ]` rather than risking
 duration bytes being written at stale offsets into the middle of other lines.
+Likewise, if the second (patching) file descriptor cannot be opened at all —
+e.g. `/proc` is not mounted in a minimal container, or the process ran out of
+descriptors — tracing itself continues normally and every line simply keeps
+`[  pending ]`; a warning on `stderr` explains why.
 
 ### What the duration measures ###
 
