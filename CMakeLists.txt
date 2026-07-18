@@ -80,7 +80,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Base flags — no instrumentation (applied to all targets including library).
-set(CMAKE_CXX_FLAGS "-g -Wall")
+# Append rather than overwrite: users may pass -DCMAKE_CXX_FLAGS=... (e.g. -O2)
+# on the command line, and overwriting would silently discard it. No duplication
+# across reconfigures: this sets a normal variable that does not persist — every
+# configure re-reads the cache value and appends once.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall")
 
 # Note: -rdynamic is attached to the callstacklogger target as an INTERFACE link
 # option, so any executable that links against callstacklogger automatically gets
