@@ -655,12 +655,20 @@ Requires `lcov` 2.0+ (Ubuntu 24.04, Fedora 40+). Older lcov versions use differe
 cmake -B build -DBUILD_TESTS=ON -DCOVERAGE=ON
 cmake --build build
 cd build && ctest --output-on-failure && cd ..
-lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch
+lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,negative
 lcov --remove coverage.info '/usr/*' '*/tests/*' '*/_deps/*' --output-file coverage.info
 genhtml coverage.info --output-directory coverage-report
 ```
 
 Notes:
+- `COVERAGE=ON` compiles with `--coverage -fprofile-update=atomic`. The atomic
+  counter updates are load-bearing: the multi-threaded `threaded_traced_test_program`
+  runs the instrumented library (`trace.cpp`) on 4 worker threads that would otherwise
+  race on the default non-atomic gcov counters. A lost update can drive a counter
+  negative, and lcov 2.x's `geninfo` treats a negative count as a *fatal* error
+  (`Unexpected negative count '-1'`), producing a nondeterministic coverage-job failure.
+  Atomic updates remove the race; the `negative` entry in `--ignore-errors` is a
+  belt-and-suspenders tolerance for any residual artifact.
 - `--ignore-errors mismatch` bypasses lcov 2.0 strict checks that fail on gtest code.
 - `--no-external` is NOT used: in lcov 2.0 it uses `--directory` as the base for
   "external" checks, which would wrongly exclude our `src/` files (outside `build/`).

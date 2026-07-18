@@ -86,9 +86,16 @@ set(CMAKE_CXX_FLAGS "-g -Wall")
 # option, so any executable that links against callstacklogger automatically gets
 # it. This lets users integrate via add_subdirectory without per-target boilerplate.
 
-# Code coverage support (GCC --coverage flag)
+# Code coverage support (GCC --coverage flag).
+# -fprofile-update=atomic makes gcov counter updates thread-safe. Without it the
+# multi-threaded threaded_traced_test_program runs the instrumented library
+# (trace.cpp) on several worker threads that race on the default non-atomic
+# counters; a lost update can drive a counter negative, which lcov 2.x's geninfo
+# rejects with a fatal "Unexpected negative count" error — a nondeterministic
+# coverage-job failure. Atomic updates remove the race at the source rather than
+# relying on scheduling luck.
 if(COVERAGE)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -fprofile-update=atomic")
 endif()
 
 # Split compilation: the callstacklogger library is compiled WITHOUT instrumentation

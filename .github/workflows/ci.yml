@@ -34,8 +34,11 @@ jobs:
       run: |
         # Capture: skip --no-external (lcov 2.0 uses --directory as base, which would
         # exclude our src/ files since they're outside the build dir). --ignore-errors
-        # mismatch bypasses strict checks on gtest code that trigger false positives.
-        lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch
+        # mismatch bypasses strict checks on gtest code that trigger false positives;
+        # negative is a belt-and-suspenders tolerance for any residual gcov counter
+        # artifact from multi-threaded coverage (the real fix is -fprofile-update=atomic
+        # in CMakeLists.txt, which keeps the counters from going negative in the first place).
+        lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,negative
         # Remove system headers, test code, and fetched dependencies.
         lcov --remove coverage.info '/usr/*' '*/tests/*' '*/_deps/*' --output-file coverage.info
         genhtml coverage.info --output-directory coverage-report

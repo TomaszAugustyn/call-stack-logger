@@ -372,11 +372,16 @@ To generate a code coverage report (requires `lcov` 2.0+):
 cmake -B build -DBUILD_TESTS=ON -DCOVERAGE=ON
 cmake --build build
 cd build && ctest --output-on-failure && cd ..
-lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch
+lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,negative
 lcov --remove coverage.info '/usr/*' '*/tests/*' '*/_deps/*' --output-file coverage.info
 genhtml coverage.info --output-directory coverage-report
 # Open coverage-report/index.html in a browser
 ```
+
+`-DCOVERAGE=ON` compiles with `-fprofile-update=atomic` so gcov's counters stay
+thread-safe under the multi-threaded tests (otherwise racing counter updates can
+go negative and make `geninfo` fail). The `negative` entry in `--ignore-errors`
+is an extra tolerance for any residual counter artifact.
 
 ### On-demand call-stack capture ###
 
