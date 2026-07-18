@@ -63,8 +63,11 @@ public:
         NO_INSTRUMENT ~storedBfd() = default;
     };
 
+    /// Returns the cached (or freshly loaded) storedBfd for the object containing
+    /// `_info`, or nullptr when the object file cannot be opened/parsed. Pointer
+    /// stays valid for the process lifetime (s_bfds entries are never erased).
     NO_INSTRUMENT
-    static bool ensure_bfd_loaded(Dl_info& _info);
+    static storedBfd* ensure_bfd_loaded(Dl_info& _info);
 
     /// Resolves callee + caller using the unwinder to find the actual user-code
     /// caller from inside the instrumentation pipeline. The `caller_address`

@@ -127,28 +127,31 @@ bool is_std_library_symbol(const char* mangled_name) {
 namespace instrumentation {
 
 // Must be called with s_bfd_mutex already held (locked in resolve()).
-bool bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
-    // Load the corresponding bfd file (from file or map).
-    if (s_bfds.count(_info.dli_fbase) == 0) {
+bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
+    // Load the corresponding bfd file (from file or map). Single map lookup on
+    // the hot path: find() locates the cached entry, and on a miss the emplace's
+    // iterator is reused for the return — no separate count()/at() round trips.
+    auto it = s_bfds.find(_info.dli_fbase);
+    if (it == s_bfds.end()) {
         ensure_actual_executable(_info);
         auto newBfd = std::make_unique<storedBfd>(bfd_openr(_info.dli_fname, nullptr), &bfd_close);
         if (!newBfd || !newBfd->abfd) {
-            return false;
+            return nullptr;
         }
         if (!bfd_check_format(newBfd->abfd.get(), bfd_object)) {
-            return false;
+            return nullptr;
         }
         long storageNeeded = bfd_get_symtab_upper_bound(newBfd->abfd.get());
         if (storageNeeded < 0) {
-            return false;
+            return nullptr;
         }
         newBfd->symbols.reset(reinterpret_cast<asymbol**>(new char[static_cast<size_t>(storageNeeded)]));
         /*size_t numSymbols = */ bfd_canonicalize_symtab(newBfd->abfd.get(), newBfd->symbols.get());
 
         newBfd->offset = reinterpret_cast<intptr_t>(_info.dli_fbase);
-        s_bfds.insert(std::make_pair(_info.dli_fbase, std::move(*newBfd)));
+        it = s_bfds.emplace(_info.dli_fbase, std::move(*newBfd)).first;
     }
-    return true;
+    return &it->second;
 }
 
 // Must be called with s_bfd_mutex already held (locked in resolve()).
@@ -201,19 +204,19 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
     }
 #endif
 
-    if (!ensure_bfd_loaded(info)) {
+    storedBfd* currBfd = ensure_bfd_loaded(info);
+    if (currBfd == nullptr) {
         return "<could not open object file>";
     }
-    storedBfd& currBfd = s_bfds.at(info.dli_fbase);
 
-    asection* section = currBfd.abfd->sections;
+    asection* section = currBfd->abfd->sections;
     if (section == nullptr) {
         return "<no sections in object file>";
     }
-    const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
+    const bool relative = section->vma < static_cast<uintptr_t>(currBfd->offset);
 
     while (section != nullptr) {
-        const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd.offset : 0) -
+        const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd->offset : 0) -
                 static_cast<intptr_t>(section->vma);
 
         if (offset < 0 || static_cast<size_t>(offset) >= section->size) {
@@ -225,7 +228,7 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
         const char* func = nullptr;
         unsigned line = 0;
         if (bfd_find_nearest_line(
-                    currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
+                    currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
             if (func == nullptr) {
                 return std::nullopt;
             }
@@ -245,19 +248,19 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
         return std::make_pair("<caller address to object not found>", std::nullopt);
     }
 
-    if (!ensure_bfd_loaded(info)) {
+    storedBfd* currBfd = ensure_bfd_loaded(info);
+    if (currBfd == nullptr) {
         return std::make_pair("<could not open caller object file>", std::nullopt);
     }
-    storedBfd& currBfd = s_bfds.at(info.dli_fbase);
 
-    asection* section = currBfd.abfd->sections;
+    asection* section = currBfd->abfd->sections;
     if (section == nullptr) {
         return std::make_pair(std::string("<no sections in caller object>"), std::nullopt);
     }
-    const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
+    const bool relative = section->vma < static_cast<uintptr_t>(currBfd->offset);
 
     while (section != nullptr) {
-        const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd.offset : 0) -
+        const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd->offset : 0) -
                 static_cast<intptr_t>(section->vma);
 
         if (offset < 0 || static_cast<size_t>(offset) >= section->size) {
@@ -268,7 +271,7 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
         const char* func = nullptr;
         unsigned int line = 0;
         if (bfd_find_nearest_line(
-                    currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &file, &func, &line)) {
+                    currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
             if (file != nullptr) {
                 return std::make_pair(std::string(file), std::make_optional(line));
             }
