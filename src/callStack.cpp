@@ -277,9 +277,16 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
             }
             return std::make_pair(std::string("<unknown function>"), std::nullopt);
         }
+        // bfd_find_nearest_line failed for the section containing the address
+        // (typical for stripped objects: no symtab, no DWARF). Return
+        // unconditionally — the address cannot be in any other section, and
+        // falling through without advancing `section` would loop forever while
+        // holding s_bfd_mutex. Mirrors the unconditional <bfd_error> return in
+        // resolve_function_name().
         if (info.dli_sname != nullptr) {
             return std::make_pair(demangle_cxa(info.dli_sname) + " <bfd_error>", std::nullopt);
         }
+        return std::make_pair(std::string("<bfd_error>"), std::nullopt);
     }
 
     return std::make_pair("<not sectioned address>", std::nullopt);

@@ -46,6 +46,9 @@
 #ifndef CALLSTACK_API_PROGRAM_PATH
     #error "CALLSTACK_API_PROGRAM_PATH must be defined by CMake"
 #endif
+#ifndef STRIPPED_CALLER_PROGRAM_PATH
+    #error "STRIPPED_CALLER_PROGRAM_PATH must be defined by CMake"
+#endif
 #ifndef TRACED_PROGRAM_LOG_ELAPSED_PATH
     #error "TRACED_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
 #endif
@@ -615,6 +618,42 @@ TEST(BadOutputPathTest, OpenFailureIsNonFatalAndWarns) {
 
     // No trace file should have been created at the bad path (the parent
     // directory doesn't exist, so nothing to clean up).
+}
+
+// ============================================================================
+// Stripped-caller regression test — the callback's caller address lives in a
+// shared library with no .symtab and no debug info (stripped post-build), in a
+// file-local function not covered by .dynsym. dladdr() then yields no symbol
+// name and bfd_find_nearest_line() fails. resolve_filename_and_line() once
+// looped forever on exactly this input (holding the global BFD mutex), hanging
+// the traced program. The program runs under `timeout`, so a regression shows
+// up as exit code 124 instead of hanging the test suite. DEBUGINFOD_URLS is
+// cleared so libbfd builds with debuginfod support cannot fetch debug info
+// from the network and mask the stripped-object condition.
+// ============================================================================
+
+TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {
+    char tmp_path[] = "/tmp/cslg_stripped_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    std::string cmd = "DEBUGINFOD_URLS= CSLG_OUTPUT_FILE=\"" + std::string(tmp_path)
+                    + "\" timeout 10 \"" + STRIPPED_CALLER_PROGRAM_PATH + "\" > /dev/null 2>&1";
+    int ret = system(cmd.c_str());
+    // timeout(1) exits 124 when it had to kill the program — the historical
+    // infinite-loop failure mode of resolve_filename_and_line().
+    EXPECT_EQ(ret, 0) << "stripped_caller_program did not finish cleanly (raw status="
+                      << ret << "; status 124<<8 means killed by timeout — the "
+                         "caller-resolution hang has regressed)";
+
+    std::string content = read_file(tmp_path);
+    unlink(tmp_path);
+
+    // The callback must still be traced; its caller degrades gracefully (no
+    // symbol, no line info in the stripped .so — e.g. "<bfd_error>:???").
+    EXPECT_NE(content.find("traced_callback"), std::string::npos)
+            << "traced_callback entry missing from trace. Trace:\n" << content;
 }
 
 // ============================================================================

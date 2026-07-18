@@ -353,6 +353,8 @@ call-stack-logger/
 |       |-- threaded_traced_program.cpp # Instrumented multi-threaded program (per-thread files)
 |       |-- log_elapsed_traced_program.cpp # Instrumented program with usleep() sentinels for LOG_ELAPSED tests
 |       |-- callstack_api_program.cpp # Non-instrumented; exercises get_call_stack() API
+|       |-- stripped_caller_lib.cpp # Shared-lib fixture, stripped of symtab/debug info post-build
+|       |-- stripped_caller_program.cpp # Instrumented; callback invoked from the stripped lib
 |       |-- test_integration.cpp # All integration tests (single/multi-threaded + API)
 |-- lib/                        # Empty dir (placeholder for external libs)
 |   |-- .gitignore              # Keeps dir in git but ignores contents
@@ -552,13 +554,16 @@ Test pure/deterministic functions from the include headers:
   function names resolved, nesting depth correct, caller info present, timestamp format,
   run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
   exact trace line count (catches std library pollution regressions)
-- Built as four targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
+- Built as six targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
   `noninstrumented_test_program` (compiled WITHOUT — simulates
   `DISABLE_INSTRUMENTATION`), `threaded_traced_test_program` (spawns 4 worker
-  threads via `std::thread`, exercises per-thread trace files), and
+  threads via `std::thread`, exercises per-thread trace files),
   `callstack_api_program` (compiled WITHOUT `INSTRUMENT_FLAGS`; exercises the
   public on-demand `instrumentation::get_call_stack()` API by walking a known
-  nested chain and printing each resolved frame).
+  nested chain and printing each resolved frame), `stripped_caller` (shared
+  library, `strip --strip-all`-ed post-build), and `stripped_caller_program`
+  (instrumented; its callback is invoked from a file-local function inside the
+  stripped library).
   The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs
   the non-instrumented version and verifies zero trace entries are produced.
 - `CallStackApiTest.GetCallStackResolvesAncestors` — runs `callstack_api_program`,
@@ -569,6 +574,15 @@ Test pure/deterministic functions from the include headers:
   with `CSLG_OUTPUT_FILE` pointing to a non-existent directory, captures stderr,
   verifies the program exits 0 (graceful degradation) and emits the documented
   `[call-stack-logger] WARNING` with the attempted path.
+- `StrippedCallerTest.CallerInStrippedLibraryDoesNotHang` — regression test for
+  the `resolve_filename_and_line()` infinite loop: the instrumented callback's
+  caller address lies in a file-local function of the stripped
+  `libstripped_caller.so`, so `dladdr` yields no symbol and
+  `bfd_find_nearest_line` fails; the resolver must return the `<bfd_error>`
+  fallback instead of spinning forever while holding `s_bfd_mutex`. The program
+  runs under `timeout 10` (with `DEBUGINFOD_URLS` cleared so libbfd cannot
+  fetch debug info from the network), so a regression fails fast with exit
+  code 124 instead of hanging the suite.
 - `LogAddrFlagTest` (2 tests) and `LogNotDemangledFlagTest` (1 test) exercise the
   build-time CMake options `-DLOG_ADDR=ON` and `-DLOG_NOT_DEMANGLED=ON`. Each flag
   has its own library variant in `tests/integration/CMakeLists.txt` —

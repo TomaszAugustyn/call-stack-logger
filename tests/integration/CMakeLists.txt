@@ -46,6 +46,30 @@ if(COVERAGE)
     target_link_options(callstack_api_program PRIVATE --coverage)
 endif()
 
+# Stripped-caller regression fixture: a shared library whose file-local function
+# invokes a callback in instrumented user code. Post-build, strip --strip-all
+# removes .symtab and all debug sections (.dynsym survives — it's needed at
+# runtime), so the callback's caller address resolves to an object where
+# dladdr() finds no symbol and BFD finds no line info — the exact input that
+# once made resolve_filename_and_line() loop forever (see StrippedCallerTest).
+add_library(stripped_caller SHARED stripped_caller_lib.cpp)
+target_compile_features(stripped_caller PRIVATE cxx_std_17)
+add_custom_command(TARGET stripped_caller POST_BUILD
+    COMMAND strip --strip-all $<TARGET_FILE:stripped_caller>
+    COMMENT "Stripping symtab and debug info from stripped_caller")
+cslg_apply_sanitizers(stripped_caller)
+
+add_executable(stripped_caller_program stripped_caller_program.cpp)
+target_compile_features(stripped_caller_program PRIVATE cxx_std_17)
+target_link_libraries(stripped_caller_program PRIVATE callstacklogger_instrumented stripped_caller)
+cslg_apply_sanitizers(stripped_caller_program)
+
+if(COVERAGE)
+    target_compile_options(stripped_caller_program PRIVATE --coverage)
+    target_link_options(stripped_caller_program PRIVATE --coverage)
+    target_link_options(stripped_caller PRIVATE --coverage)
+endif()
+
 # Multi-threaded traced test program. Exercises per-thread trace files by spawning
 # worker threads, each of which produces its own <base>_tid_<tid> file.
 find_package(Threads REQUIRED)
@@ -164,6 +188,7 @@ target_compile_definitions(integration_tests PRIVATE
     NONINSTRUMENTED_PROGRAM_PATH="$<TARGET_FILE:noninstrumented_test_program>"
     THREADED_TRACED_PROGRAM_PATH="$<TARGET_FILE:threaded_traced_test_program>"
     CALLSTACK_API_PROGRAM_PATH="$<TARGET_FILE:callstack_api_program>"
+    STRIPPED_CALLER_PROGRAM_PATH="$<TARGET_FILE:stripped_caller_program>"
     TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
     TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH="$<TARGET_FILE:traced_test_program_log_not_demangled>"
     TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed>"
