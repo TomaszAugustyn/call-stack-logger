@@ -306,44 +306,49 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
 
 std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
         void* callee_address, void* caller_address) {
-    // Lock covers ALL BFD operations: initialization, loading, symbol/section iteration,
-    // and bfd_find_nearest_line(). BFD library is not thread-safe — concurrent calls on
-    // the same bfd* object corrupt internal state. This lock serializes all BFD access
-    // and also protects the s_name_cache / s_location_cache memoization maps.
-    std::lock_guard<std::mutex> lock(s_bfd_mutex);
-    check_bfd_initialized();
-
-    // Memoized callee-name resolution — see the cache comments in callStack.h.
-    // A cached nullopt means "filtered / not loggable" and is honored as such.
-    std::optional<std::string> maybe_func_name;
-    auto name_it = s_name_cache.find(callee_address);
-    if (name_it != s_name_cache.end()) {
-        maybe_func_name = name_it->second;
-    } else {
-        maybe_func_name = resolve_function_name(callee_address);
-        s_name_cache.emplace(callee_address, maybe_func_name);
-    }
-    if (!maybe_func_name) {
-        return std::nullopt;
-    }
     ResolvedFrame resolved;
-    resolved.callee_function_name = *maybe_func_name;
+    {
+        // Lock covers ALL BFD operations: initialization, loading, symbol/section
+        // iteration, and bfd_find_nearest_line(). BFD library is not thread-safe —
+        // concurrent calls on the same bfd* object corrupt internal state. This lock
+        // serializes all BFD access and also protects the s_name_cache /
+        // s_location_cache memoization maps. Scoped so pretty_time() below — which
+        // needs no BFD state — runs after the lock is released instead of extending
+        // the global serialization window every traced call shares.
+        std::lock_guard<std::mutex> lock(s_bfd_mutex);
+        check_bfd_initialized();
+
+        // Memoized callee-name resolution — see the cache comments in callStack.h.
+        // A cached nullopt means "filtered / not loggable" and is honored as such.
+        // The cached value is read in place: no optional<string> copy on a hit, and
+        // on a miss the freshly resolved value moves straight into the map.
+        auto name_it = s_name_cache.find(callee_address);
+        if (name_it == s_name_cache.end()) {
+            name_it = s_name_cache.emplace(callee_address,
+                                           resolve_function_name(callee_address)).first;
+        }
+        const std::optional<std::string>& maybe_func_name = name_it->second;
+        if (!maybe_func_name) {
+            return std::nullopt;
+        }
+        resolved.callee_function_name = *maybe_func_name;
+
+        // Memoized caller-location resolution (same call site → same file:line).
+        auto loc_it = s_location_cache.find(caller_address);
+        if (loc_it == s_location_cache.end()) {
+            loc_it = s_location_cache.emplace(caller_address,
+                                              resolve_filename_and_line(caller_address)).first;
+        }
+        resolved.caller_filename = loc_it->second.first;
+        resolved.caller_line_number = loc_it->second.second;
+    }
 
 #ifdef LOG_ADDR
     resolved.callee_address = std::make_optional(callee_address);
 #endif
-
-    // Memoized caller-location resolution (same call site → same file:line).
-    auto loc_it = s_location_cache.find(caller_address);
-    if (loc_it == s_location_cache.end()) {
-        loc_it = s_location_cache.emplace(caller_address,
-                                          resolve_filename_and_line(caller_address)).first;
-    }
-    resolved.caller_filename = loc_it->second.first;
-    resolved.caller_line_number = loc_it->second.second;
     resolved.timestamp = utils::pretty_time();
 
-    return std::make_optional(resolved);
+    return std::make_optional(std::move(resolved));
 }
 
 std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* caller_address) {
