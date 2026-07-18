@@ -272,8 +272,13 @@ A `thread_local` `current_stack_depth` counter in `trace.cpp`:
 - Increments on each successfully resolved function entry
 - Decrements on function exit (only if the entry was resolved)
 - A fixed-size `frame_resolved_stack[2048]` array (also `thread_local`) tracks per-frame
-  whether the entry was resolved: every `__cyg_profile_func_enter` pushes (resolved or not),
-  every `__cyg_profile_func_exit` pops, and depth is only adjusted for resolved frames
+  whether the entry was logged (file open AND resolution succeeded): every
+  `__cyg_profile_func_enter` pushes and every `__cyg_profile_func_exit` pops
+  **unconditionally** — pairing depends only on call structure, never on whether the
+  trace file happens to be available. This keeps enter/exit matched across the
+  trace-ready and shutdown boundaries (a frame entered before shutdown and exited
+  after it still pops its own slot, so LOG_ELAPSED patches the right line). Depth is
+  only adjusted for logged frames.
 - An overflow counter handles the edge case when call depth exceeds `MAX_TRACE_DEPTH` (2048),
   preventing stack desynchronization. Indentation remains correct at any depth.
 
