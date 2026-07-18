@@ -11,8 +11,6 @@
 #include <iostream>
 #include <vector>
 
-#include "callStack.h"
-
 class A {
 public:
     static void foo() { std::cout << "static foo \n"; }
