@@ -50,7 +50,12 @@ Results are **memoized per address**: `resolve_no_unwind()` consults two hash ma
 pipeline executes only on first sight of each address — every repeat call is a hash
 lookup under the same mutex. A cached `nullopt` name records "filtered / not
 loggable", which also turns Clang's runtime std-library filter into a hash hit on
-repeat calls. Cache growth is bounded by the program text (distinct instrumented
+repeat calls. `bfdResolver::resolve()` additionally consults that cached-nullopt
+state (via `is_cached_filtered()`) BEFORE running the stack unwinder, so
+permanently-filtered callees — internal-linkage (`static`) functions on both
+compilers, std-library instantiations on Clang — skip the per-call
+`_Unwind_Backtrace` walk entirely; the helper returns before the unwind runs, so
+it cannot shift the frame-6 constant. Cache growth is bounded by the program text (distinct instrumented
 functions + call sites), not by runtime input; `dlclose`+`dlopen` address reuse
 serves stale entries — the same accepted trade-off as the `s_bfds` object cache.
 

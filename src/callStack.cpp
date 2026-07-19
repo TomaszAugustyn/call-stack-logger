@@ -357,7 +357,25 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
     return std::make_optional(std::move(resolved));
 }
 
+bool bfdResolver::is_cached_filtered(void* callee_address) {
+    std::lock_guard<std::mutex> lock(s_bfd_mutex);
+    auto it = s_name_cache.find(callee_address);
+    return it != s_name_cache.end() && !it->second;
+}
+
 std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* caller_address) {
+    // Fast path for callees whose cached resolution is "filtered / not loggable"
+    // (every internal-linkage function on both compilers, every std-library
+    // instantiation on Clang). Without it, each call to such a function still
+    // paid the full _Unwind_Backtrace walk below — per call, forever — only for
+    // resolve_no_unwind() to return nullopt from the name cache. The helper
+    // RETURNS before unwind_nth_frame() runs, so like get_thread_fp() it is
+    // never on the stack during the unwind and cannot shift the frame-6
+    // constant. First sight of an address still takes the slow path (the cache
+    // entry does not exist yet), which populates the cache.
+    if (is_cached_filtered(callee_address)) {
+        return std::nullopt;
+    }
     // The caller_address passed by __cyg_profile_func_enter is the call site INSIDE the
     // instrumentation pipeline (resolve → __cyg_profile_func_enter → ...) — not the actual
     // user-code caller. Walk up the fixed depth of the pipeline to find the real one.

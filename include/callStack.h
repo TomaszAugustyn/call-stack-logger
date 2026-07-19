@@ -102,6 +102,15 @@ public:
             void* callee_address, void* caller_address);
 
 private:
+    /// Returns true when s_name_cache already records this callee as filtered
+    /// (cached nullopt: Clang std-library filter, internal-linkage functions
+    /// with no dladdr symbol, failed demangling). Used by resolve() to skip
+    /// the _Unwind_Backtrace walk for callees that can never produce a trace
+    /// line — the unwind exists only to key the caller-location lookup, which
+    /// such callees never reach. Takes s_bfd_mutex internally.
+    NO_INSTRUMENT
+    static bool is_cached_filtered(void* callee_address);
+
     NO_INSTRUMENT
     static std::optional<std::string> resolve_function_name(void* callee_address);
 
