@@ -10,6 +10,19 @@
 #pragma once
 
 #include "types.h"
+
+// Workaround for deliberately incompatible bfd.h header files on some systems.
+// binutils < 2.39 (e.g. Ubuntu 22.04, Debian 11) #errors out unless PACKAGE /
+// PACKAGE_VERSION are defined — without this guard, consumers of the public
+// get_call_stack() API could not include this header on those distros.
+// Mirrors the same workaround in src/callStack.cpp.
+#ifndef PACKAGE
+    #define PACKAGE
+#endif
+#ifndef PACKAGE_VERSION
+    #define PACKAGE_VERSION
+#endif
+
 #include <bfd.h>
 #include <dlfcn.h>
 #include <map>
