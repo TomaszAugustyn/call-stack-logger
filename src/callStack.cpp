@@ -30,7 +30,34 @@
 #include <stdexcept>
 #include <unistd.h>
 
+namespace instrumentation {
+// Defined in trace.cpp: save-set / restore the per-thread in_instrumentation
+// re-entrancy guard. Used by the public API entry points below via
+// ScopedNoInstrument — see that struct's comment for why this is load-bearing.
+NO_INSTRUMENT bool enter_no_instrument_scope();
+NO_INSTRUMENT void exit_no_instrument_scope(bool prev);
+} // namespace instrumentation
+
 namespace {
+
+// RAII: while alive, the per-thread re-entrancy guard is set, so
+// __cyg_profile_func_enter no-ops. The public API entry points
+// (get_call_stack(), instrumentation::resolve()) hold one for their whole
+// duration: the resolver holds s_bfd_mutex while running std container/string
+// template code, and under Clang the linker may pick those templates' COMDAT
+// instantiations from the USER's instrumented TU — a hook firing there would
+// re-lock s_bfd_mutex on the same thread (self-deadlock, observed via
+// unordered_map::find inside resolve_no_unwind). Saving/restoring the previous
+// value keeps the wrapper correct when the enter hook (guard already set)
+// calls instrumentation::resolve(). The destructor also restores the guard if
+// the wrapped code throws (get_call_stack's backtrace-failure path).
+struct ScopedNoInstrument {
+    bool prev;
+    NO_INSTRUMENT ScopedNoInstrument() : prev(instrumentation::enter_no_instrument_scope()) {}
+    NO_INSTRUMENT ~ScopedNoInstrument() { instrumentation::exit_no_instrument_scope(prev); }
+    ScopedNoInstrument(const ScopedNoInstrument&) = delete;
+    ScopedNoInstrument& operator=(const ScopedNoInstrument&) = delete;
+};
 
 // Takes const char* directly to avoid constructing a temporary std::string at each
 // call site — all callers pass const char* from BFD/dladdr.
@@ -401,6 +428,10 @@ std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* ca
 }
 
 std::vector<std::optional<ResolvedFrame>> get_call_stack() {
+    // Public API entry point — hold the re-entrancy guard for the whole capture
+    // (deadlock rationale on ScopedNoInstrument). Also keeps the resolver's own
+    // std internals out of the trace when the calling program is instrumented.
+    ScopedNoInstrument guard;
     const size_t MAX_FRAMES = 1000;
     std::vector<void*> stack(MAX_FRAMES);
     int num = backtrace(&stack[0], MAX_FRAMES);
@@ -442,6 +473,12 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
 }
 
 std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address) {
+    // Public API entry point — same guard as get_call_stack(). When the enter
+    // hook is the caller the guard is already set and this saves/restores it
+    // unchanged. Frame-depth note: the guard's constructor returns before
+    // bfdResolver::resolve() runs, so it is never on the stack during the
+    // unwind and cannot shift the frame-6 constant.
+    ScopedNoInstrument guard;
     return bfdResolver::resolve(callee_address, caller_address);
 }
 

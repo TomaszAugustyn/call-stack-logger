@@ -443,6 +443,23 @@ Declares the `bfdResolver` struct with:
 - Static state: `s_bfds` (map cache), `s_bfd_initialized`, `s_argv0`
 - Free functions: `get_call_stack()`, `resolve()`
 
+**Public-API re-entrancy guard (load-bearing):** both free functions hold the
+per-thread `in_instrumentation` guard for their whole duration (RAII
+`ScopedNoInstrument` in `callStack.cpp`, backed by
+`enter_no_instrument_scope()` / `exit_no_instrument_scope()` exported from
+`trace.cpp`; no-op definitions exist for `DISABLE_INSTRUMENTATION` builds).
+Without it, calling `get_call_stack()` from a **Clang-instrumented** program
+self-deadlocks: the resolver holds `s_bfd_mutex` while running std
+container/string template code, and the linker may resolve those COMDAT
+instantiations to the copies compiled in the user's instrumented TU (any TU
+including `callStack.h` emits them) — the enter hook then fires mid-resolver
+and re-locks `s_bfd_mutex` (observed via `unordered_map::find` inside
+`resolve_no_unwind`). GCC is immune only because its compile-time
+exclude-file-list keeps user-TU std instantiations hook-free. The guard's
+constructor returns before `bfdResolver::resolve()` runs, so it never shifts
+the frame-6 constant. Regression-pinned by
+`CallStackApiTest.WorksFromInstrumentedProgram` (runs under `timeout 10`).
+
 ### `include/unwinder.h`
 Template class `FrameUnwinder<F>` that uses `_Unwind_Backtrace` to walk to the N-th stack
 frame and invoke a callback. The `Callback` struct captures the caller address.

@@ -831,10 +831,16 @@ TEST(CallStackApiTest, WorksFromInstrumentedProgram) {
     ASSERT_GE(sfd, 0) << "mkstemp failed";
     close(sfd);
 
-    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(trace_tmpl) + "\" \""
+    // timeout(1): a regression of the re-entrancy guard on the public API
+    // deadlocks on s_bfd_mutex under Clang (hook firing inside the resolver via
+    // user-TU COMDAT template instantiations) — fail fast with status 124<<8
+    // instead of hanging the suite.
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(trace_tmpl) + "\" timeout 10 \""
                     + CALLSTACK_API_PROGRAM_INSTRUMENTED_PATH + "\" > \"" + stdout_tmpl + "\"";
     int ret = system(cmd.c_str());
-    ASSERT_EQ(ret, 0) << "callstack_api_program_instrumented failed, exit=" << ret;
+    ASSERT_EQ(ret, 0) << "callstack_api_program_instrumented failed, exit=" << ret
+                      << " (raw status 124<<8 means killed by timeout — the public-API "
+                         "re-entrancy guard deadlock has regressed)";
 
     std::string out = read_file(stdout_tmpl);
     std::string trace = read_file(trace_tmpl);
