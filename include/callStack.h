@@ -111,6 +111,14 @@ private:
     NO_INSTRUMENT
     static bool is_cached_filtered(void* callee_address);
 
+    /// Walks the object's section list to find the section containing `address`
+    /// and writes the section-relative offset to `offset_out`. Returns nullptr
+    /// when no section contains the address. Shared by resolve_function_name()
+    /// and resolve_filename_and_line(). Must be called with s_bfd_mutex held.
+    NO_INSTRUMENT
+    static asection* find_containing_section(storedBfd& currBfd, void* address,
+                                             intptr_t& offset_out);
+
     NO_INSTRUMENT
     static std::optional<std::string> resolve_function_name(void* callee_address);
 

@@ -198,6 +198,25 @@ void bfdResolver::ensure_actual_executable(Dl_info& symbol_info) {
     }
 }
 
+asection* bfdResolver::find_containing_section(storedBfd& currBfd, void* address,
+                                               intptr_t& offset_out) {
+    asection* section = currBfd.abfd->sections;
+    // Rebasing heuristic: when the first section's VMA lies below the object's
+    // load base, the object is position-independent and the raw address must
+    // have the load base subtracted to become a section-relative VMA.
+    const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
+    while (section != nullptr) {
+        const intptr_t offset = reinterpret_cast<intptr_t>(address)
+                - (relative ? currBfd.offset : 0) - static_cast<intptr_t>(section->vma);
+        if (offset >= 0 && static_cast<size_t>(offset) < section->size) {
+            offset_out = offset;
+            return section;
+        }
+        section = section->next;
+    }
+    return nullptr;
+}
+
 std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
     Dl_info info;
     // dladdr returns 0 on failure; on failure the Dl_info contents are undefined.
@@ -224,35 +243,27 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
         return "<could not open object file>";
     }
 
-    asection* section = currBfd->abfd->sections;
-    if (section == nullptr) {
+    if (currBfd->abfd->sections == nullptr) {
         return "<no sections in object file>";
     }
-    const bool relative = section->vma < static_cast<uintptr_t>(currBfd->offset);
-
-    while (section != nullptr) {
-        const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd->offset : 0) -
-                static_cast<intptr_t>(section->vma);
-
-        if (offset < 0 || static_cast<size_t>(offset) >= section->size) {
-            section = section->next;
-            continue;
-        }
-
-        const char* file = nullptr;
-        const char* func = nullptr;
-        unsigned line = 0;
-        if (bfd_find_nearest_line(
-                    currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
-            if (func == nullptr) {
-                return std::nullopt;
-            }
-            auto demangled = demangle_cxa(func);
-            return demangled.empty() ? std::nullopt : std::make_optional(demangled);
-        }
-        return demangle_cxa(info.dli_sname != nullptr ? info.dli_sname : "") + " <bfd_error>";
+    intptr_t offset = 0;
+    asection* section = find_containing_section(*currBfd, address, offset);
+    if (section == nullptr) {
+        return "<not sectioned address>";
     }
-    return "<not sectioned address>";
+
+    const char* file = nullptr;
+    const char* func = nullptr;
+    unsigned line = 0;
+    if (bfd_find_nearest_line(
+                currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
+        if (func == nullptr) {
+            return std::nullopt;
+        }
+        auto demangled = demangle_cxa(func);
+        return demangled.empty() ? std::nullopt : std::make_optional(demangled);
+    }
+    return demangle_cxa(info.dli_sname != nullptr ? info.dli_sname : "") + " <bfd_error>";
 }
 
 std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filename_and_line(void* address) {
@@ -268,46 +279,36 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
         return std::make_pair("<could not open caller object file>", std::nullopt);
     }
 
-    asection* section = currBfd->abfd->sections;
-    if (section == nullptr) {
+    if (currBfd->abfd->sections == nullptr) {
         return std::make_pair(std::string("<no sections in caller object>"), std::nullopt);
     }
-    const bool relative = section->vma < static_cast<uintptr_t>(currBfd->offset);
-
-    while (section != nullptr) {
-        const intptr_t offset = reinterpret_cast<intptr_t>(address) - (relative ? currBfd->offset : 0) -
-                static_cast<intptr_t>(section->vma);
-
-        if (offset < 0 || static_cast<size_t>(offset) >= section->size) {
-            section = section->next;
-            continue;
-        }
-        const char* file = nullptr;
-        const char* func = nullptr;
-        unsigned int line = 0;
-        if (bfd_find_nearest_line(
-                    currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
-            if (file != nullptr) {
-                return std::make_pair(std::string(file), std::make_optional(line));
-            }
-            if (func != nullptr) {
-                return std::make_pair(demangle_cxa(func), std::nullopt);
-            }
-            return std::make_pair(std::string("<unknown function>"), std::nullopt);
-        }
-        // bfd_find_nearest_line failed for the section containing the address
-        // (typical for stripped objects: no symtab, no DWARF). Return
-        // unconditionally — the address cannot be in any other section, and
-        // falling through without advancing `section` would loop forever while
-        // holding s_bfd_mutex. Mirrors the unconditional <bfd_error> return in
-        // resolve_function_name().
-        if (info.dli_sname != nullptr) {
-            return std::make_pair(demangle_cxa(info.dli_sname) + " <bfd_error>", std::nullopt);
-        }
-        return std::make_pair(std::string("<bfd_error>"), std::nullopt);
+    intptr_t offset = 0;
+    asection* section = find_containing_section(*currBfd, address, offset);
+    if (section == nullptr) {
+        return std::make_pair("<not sectioned address>", std::nullopt);
     }
 
-    return std::make_pair("<not sectioned address>", std::nullopt);
+    const char* file = nullptr;
+    const char* func = nullptr;
+    unsigned int line = 0;
+    if (bfd_find_nearest_line(
+                currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
+        if (file != nullptr) {
+            return std::make_pair(std::string(file), std::make_optional(line));
+        }
+        if (func != nullptr) {
+            return std::make_pair(demangle_cxa(func), std::nullopt);
+        }
+        return std::make_pair(std::string("<unknown function>"), std::nullopt);
+    }
+    // bfd_find_nearest_line failed for the section containing the address
+    // (typical for stripped objects: no symtab, no DWARF). Degrade to the
+    // <bfd_error> fallback — the address cannot be in any other section.
+    // Mirrors the <bfd_error> return in resolve_function_name().
+    if (info.dli_sname != nullptr) {
+        return std::make_pair(demangle_cxa(info.dli_sname) + " <bfd_error>", std::nullopt);
+    }
+    return std::make_pair(std::string("<bfd_error>"), std::nullopt);
 }
 
 std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
