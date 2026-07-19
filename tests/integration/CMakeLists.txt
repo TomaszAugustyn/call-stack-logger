@@ -46,6 +46,20 @@ if(COVERAGE)
     target_link_options(callstack_api_program PRIVATE --coverage)
 endif()
 
+# Same source as callstack_api_program, but compiled WITH instrumentation and
+# linked against callstacklogger_instrumented — proves the on-demand
+# get_call_stack() API and the per-call hooks coexist in one process (the API
+# takes s_bfd_mutex outside any hook while hooks fire around it).
+add_executable(callstack_api_program_instrumented callstack_api_program.cpp)
+target_compile_features(callstack_api_program_instrumented PRIVATE cxx_std_17)
+target_link_libraries(callstack_api_program_instrumented PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(callstack_api_program_instrumented)
+
+if(COVERAGE)
+    target_compile_options(callstack_api_program_instrumented PRIVATE --coverage)
+    target_link_options(callstack_api_program_instrumented PRIVATE --coverage)
+endif()
+
 # Stripped-caller regression fixture: a shared library whose file-local function
 # invokes a callback in instrumented user code. Post-build, strip --strip-all
 # removes .symtab and all debug sections (.dynsym survives — it's needed at
@@ -131,6 +145,12 @@ cslg_add_flag_variant(log_not_demangled traced_program.cpp LOG_NOT_DEMANGLED)
 # lower bounds on the reported durations.
 cslg_add_flag_variant(log_elapsed log_elapsed_traced_program.cpp LOG_ELAPSED)
 
+# LOG_ELAPSED + multi-threading: the threaded driver against the LOG_ELAPSED
+# library variant, proving each thread's cursor / patch_fd patches its own file
+# independently (per-thread placeholder offsets never cross-contaminate).
+cslg_add_flag_variant(log_elapsed_threaded threaded_traced_program.cpp LOG_ELAPSED)
+target_link_libraries(traced_test_program_log_elapsed_threaded PRIVATE Threads::Threads)
+
 # Combined-flags variant: all three gated macros defined simultaneously. Exercises
 # LOG_ELAPSED's byte-offset math under the line-layout changes introduced by
 # LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the placeholder
@@ -153,10 +173,12 @@ target_compile_definitions(integration_tests PRIVATE
     NONINSTRUMENTED_PROGRAM_PATH="$<TARGET_FILE:noninstrumented_test_program>"
     THREADED_TRACED_PROGRAM_PATH="$<TARGET_FILE:threaded_traced_test_program>"
     CALLSTACK_API_PROGRAM_PATH="$<TARGET_FILE:callstack_api_program>"
+    CALLSTACK_API_PROGRAM_INSTRUMENTED_PATH="$<TARGET_FILE:callstack_api_program_instrumented>"
     STRIPPED_CALLER_PROGRAM_PATH="$<TARGET_FILE:stripped_caller_program>"
     TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
     TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH="$<TARGET_FILE:traced_test_program_log_not_demangled>"
     TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed>"
+    THREADED_TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed_threaded>"
     TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed_addr_not_demangled>"
 )
 

@@ -609,18 +609,24 @@ Test pure/deterministic functions from the include headers:
 ### Integration Tests (`tests/integration/`)
 
 - `traced_program.cpp` — small instrumented program with varied call patterns (free functions,
-  static methods, templates, constructors, inline functions, STL usage via `func_with_stl()`)
+  static methods, templates, constructors, inline functions, STL usage via `func_with_stl()`,
+  self-recursion via `recursive_countdown(3)` — same callee at three depths)
 - `test_integration.cpp` — executes `traced_test_program`, parses trace output, verifies:
-  function names resolved, nesting depth correct, caller info present, timestamp format,
-  run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
+  function names resolved, nesting depth correct (including one-entry-per-level
+  recursion via `RecursionProducesOneEntryPerLevel`), caller info present, timestamp
+  format, run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
   exact trace line count (catches std library pollution regressions)
-- Built as six targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
+- Built as seven non-variant targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
   `noninstrumented_test_program` (compiled WITHOUT — simulates
   `DISABLE_INSTRUMENTATION`), `threaded_traced_test_program` (spawns 4 worker
   threads via `std::thread`, exercises per-thread trace files),
   `callstack_api_program` (compiled WITHOUT `INSTRUMENT_FLAGS`; exercises the
   public on-demand `instrumentation::get_call_stack()` API by walking a known
-  nested chain and printing each resolved frame), `stripped_caller` (shared
+  nested chain and printing each resolved frame),
+  `callstack_api_program_instrumented` (same source compiled WITH
+  `INSTRUMENT_FLAGS` — proves the on-demand API and the per-call hooks coexist
+  in one process; `CallStackApiTest.WorksFromInstrumentedProgram` checks both
+  the printed stack and the trace file), `stripped_caller` (shared
   library, `strip --strip-all`-ed post-build), and `stripped_caller_program`
   (instrumented; its callback is invoked from a file-local function inside the
   stripped library).
@@ -634,6 +640,10 @@ Test pure/deterministic functions from the include headers:
   with `CSLG_OUTPUT_FILE` pointing to a non-existent directory, captures stderr,
   verifies the program exits 0 (graceful degradation) and emits the documented
   `[call-stack-logger] WARNING` with the attempted path.
+- `BadOutputPathTest.SymlinkOutputPathIsRejectedAndWarns` — points
+  `CSLG_OUTPUT_FILE` at a symlink; `O_NOFOLLOW` must refuse it (ELOOP), the
+  program still exits 0 with the documented warning, and the symlink's target
+  stays empty (pins the security behavior).
 - `StrippedCallerTest.CallerInStrippedLibraryDoesNotHang` — regression test for
   the `resolve_filename_and_line()` infinite loop: the instrumented callback's
   caller address lies in a file-local function of the stripped
@@ -684,6 +694,16 @@ Test pure/deterministic functions from the include headers:
   `LogElapsedDefaultBuildTest.NoDurationFieldWithoutFlag` is a negative test
   on the default build (skipped when the build is configured with
   `-DLOG_ELAPSED=ON`, via `CSLG_DEFAULT_HAS_LOG_ELAPSED`).
+- `LogElapsedMultiRunAppendTest.SecondRunPatchesCorrectlyAfterAppend` — runs the
+  LOG_ELAPSED program twice into the same file, so the second run seeds its byte
+  cursor from `lseek(SEEK_END)` on a non-empty appended file. Asserts two run
+  separators, zero `[  pending ]` leftovers, and a duration field on every entry
+  in both runs — a mis-seeded cursor would fail all three.
+- `LogElapsedThreadedTest.PerThreadFilesPatchIndependently` — drives
+  `traced_test_program_log_elapsed_threaded` (the threaded driver built against
+  the LOG_ELAPSED library variant, linked with Threads::Threads). Asserts 4
+  worker files exist and every per-thread file (main + workers) is fully
+  patched — proves per-thread cursor / patch_fd isolation.
 - `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the all-three-flags
   variant `traced_test_program_log_elapsed_addr_not_demangled`. Asserts the
   ordering "timestamp → duration → addr" via regex, the tree column stays

@@ -16,6 +16,7 @@
  * - Template function
  * - Constructor and non-static member method
  * - Inline function
+ * - Self-recursion (same callee address at several depths)
  *
  * The integration tests execute this program and parse its trace output.
  */
@@ -47,6 +48,17 @@ inline int inline_func(int x) {
 void func_with_stl() {
     std::vector<int> vec{1, 55, 78, 3, 11, 7, 90};
     std::sort(vec.begin(), vec.end());
+}
+
+// Self-recursive: produces repeated frames of the SAME callee at increasing
+// depths, exercising the LIFO frame-resolution stack (and, in the LOG_ELAPSED
+// variants, the per-frame enter-time/offset slots under same-callee stacking).
+// The addition after the recursive call keeps it a genuine non-tail call.
+int recursive_countdown(int n) {
+    if (n <= 1) {
+        return 1;
+    }
+    return n + recursive_countdown(n - 1);
 }
 
 void func_c() {
@@ -81,6 +93,10 @@ int main() {
 
     // STL usage — only func_with_stl should appear in trace, not std:: internals
     func_with_stl();
+
+    // Recursion: 3 nested frames of the same function
+    int sum = recursive_countdown(3);
+    (void)sum; // suppress unused warning
 
     return 0;
 }

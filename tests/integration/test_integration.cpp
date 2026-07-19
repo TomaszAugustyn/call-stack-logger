@@ -46,11 +46,17 @@
 #ifndef CALLSTACK_API_PROGRAM_PATH
     #error "CALLSTACK_API_PROGRAM_PATH must be defined by CMake"
 #endif
+#ifndef CALLSTACK_API_PROGRAM_INSTRUMENTED_PATH
+    #error "CALLSTACK_API_PROGRAM_INSTRUMENTED_PATH must be defined by CMake"
+#endif
 #ifndef STRIPPED_CALLER_PROGRAM_PATH
     #error "STRIPPED_CALLER_PROGRAM_PATH must be defined by CMake"
 #endif
 #ifndef TRACED_PROGRAM_LOG_ELAPSED_PATH
     #error "TRACED_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
+#endif
+#ifndef THREADED_TRACED_PROGRAM_LOG_ELAPSED_PATH
+    #error "THREADED_TRACED_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
 #endif
 #ifndef TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH
     #error "TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH must be defined by CMake"
@@ -206,6 +212,27 @@ TEST_F(IntegrationTest, NestingDepthCorrect) {
     EXPECT_LT(depth_b, depth_c) << "func_c should be more indented than func_b";
 }
 
+// Verify recursion: three nested frames of the SAME function must each get
+// their own entry, one indentation level deeper than the previous. Guards the
+// LIFO frame-resolution stack under same-callee stacking — the case a
+// callee-address-based self-heal could never disambiguate.
+TEST_F(IntegrationTest, RecursionProducesOneEntryPerLevel) {
+    std::vector<int> depths;
+    for (const auto& line : trace_lines) {
+        if (line.find("recursive_countdown") != std::string::npos
+            && line.find("(called from:") != std::string::npos) {
+            depths.push_back(count_indentation_depth(line));
+        }
+    }
+    ASSERT_EQ(depths.size(), 3u)
+            << "Expected exactly 3 recursive_countdown entries (n=3), got " << depths.size();
+    for (std::size_t i = 1; i < depths.size(); ++i) {
+        EXPECT_EQ(depths[i], depths[i - 1] + 1)
+                << "Recursive frame " << i << " should be exactly one level deeper "
+                << "than its parent (got depth " << depths[i] << " after " << depths[i - 1] << ")";
+    }
+}
+
 // Verify caller info format (called from: filename:line).
 TEST_F(IntegrationTest, CallerInfoPresent) {
     std::regex caller_pattern(R"(\(called from: .+:\d+\))");
@@ -265,8 +292,9 @@ TEST_F(IntegrationTest, StlUsageFunctionPresent) {
 }
 
 // Verify trace has exactly the expected number of function entries.
-// The traced program calls 10 user-defined functions. Without std library filtering,
-// Clang would produce hundreds of entries from template instantiations.
+// The traced program produces 13 user-defined function entries. Without std
+// library filtering, Clang would produce hundreds of entries from template
+// instantiations.
 TEST_F(IntegrationTest, ExactTraceLineCount) {
     int entry_count = 0;
     for (const auto& line : trace_lines) {
@@ -275,9 +303,10 @@ TEST_F(IntegrationTest, ExactTraceLineCount) {
         }
     }
     // Expected: main, func_a, func_b, func_c, static_method, TracedClass (ctor),
-    // instance_method, template_func, inline_func, func_with_stl = 10 entries.
-    EXPECT_EQ(entry_count, 10)
-            << "Expected exactly 10 function entries; got " << entry_count
+    // instance_method, template_func, inline_func, func_with_stl,
+    // recursive_countdown x3 = 13 entries.
+    EXPECT_EQ(entry_count, 13)
+            << "Expected exactly 13 function entries; got " << entry_count
             << ". If count is much higher, std library functions may be leaking through.";
 }
 
@@ -620,6 +649,43 @@ TEST(BadOutputPathTest, OpenFailureIsNonFatalAndWarns) {
     // directory doesn't exist, so nothing to clean up).
 }
 
+// O_NOFOLLOW hardening: when CSLG_OUTPUT_FILE is a symlink, open() must refuse
+// to follow it (ELOOP). The program still runs to completion, emits the
+// documented warning, and the symlink's target stays untouched.
+TEST(BadOutputPathTest, SymlinkOutputPathIsRejectedAndWarns) {
+    char dir_tmpl[] = "/tmp/cslg_symlink_XXXXXX";
+    char* d = mkdtemp(dir_tmpl);
+    ASSERT_NE(d, nullptr) << "mkdtemp failed";
+    const std::string dir = d;
+    const std::string target = dir + "/target.out";
+    const std::string link = dir + "/link.out";
+    { std::ofstream ofs(target); } // create the (empty) symlink target
+    ASSERT_EQ(symlink(target.c_str(), link.c_str()), 0) << "symlink() failed";
+
+    char stderr_tmpl[] = "/tmp/cslg_symlink_stderr_XXXXXX";
+    int fd = mkstemp(stderr_tmpl);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + link + "\" \"" + TRACED_PROGRAM_PATH
+                    + "\" > /dev/null 2> \"" + stderr_tmpl + "\"";
+    int ret = system(cmd.c_str());
+    EXPECT_EQ(ret, 0) << "traced_test_program exited non-zero with symlinked path: " << ret;
+
+    std::string err_content = read_file(stderr_tmpl);
+    unlink(stderr_tmpl);
+
+    EXPECT_NE(err_content.find("[call-stack-logger] WARNING"), std::string::npos)
+            << "Expected stderr warning for a symlinked output path. stderr was:\n" << err_content;
+    EXPECT_NE(err_content.find(link), std::string::npos)
+            << "Expected the attempted path in the warning. stderr was:\n" << err_content;
+    // The target must not have been written through the symlink.
+    EXPECT_TRUE(read_file(target).empty())
+            << "Symlink target received data — O_NOFOLLOW protection has regressed.";
+
+    remove_dir_tree(dir);
+}
+
 // ============================================================================
 // Stripped-caller regression test — the callback's caller address lives in a
 // shared library with no .symtab and no debug info (stripped post-build), in a
@@ -748,6 +814,46 @@ TEST(CallStackApiTest, GetCallStackResolvesAncestors) {
             << "All resolved caller locations are identical (" << caller_locs.size()
             << " entries, " << distinct_locs.size() << " distinct) — likely the "
                "hard-coded-unwind bug has regressed. Output:\n" << content;
+}
+
+// The on-demand API and the per-call hooks must coexist in one process: the
+// same program source compiled WITH -finstrument-functions calls
+// get_call_stack() (which takes s_bfd_mutex outside any hook) while the hooks
+// fire around it. Verifies both outputs: the printed stack (API worked) and
+// the trace file (hooks worked).
+TEST(CallStackApiTest, WorksFromInstrumentedProgram) {
+    char trace_tmpl[] = "/tmp/cslg_cs_instr_trace_XXXXXX";
+    int tfd = mkstemp(trace_tmpl);
+    ASSERT_GE(tfd, 0) << "mkstemp failed";
+    close(tfd);
+    char stdout_tmpl[] = "/tmp/cslg_cs_instr_stdout_XXXXXX";
+    int sfd = mkstemp(stdout_tmpl);
+    ASSERT_GE(sfd, 0) << "mkstemp failed";
+    close(sfd);
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(trace_tmpl) + "\" \""
+                    + CALLSTACK_API_PROGRAM_INSTRUMENTED_PATH + "\" > \"" + stdout_tmpl + "\"";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "callstack_api_program_instrumented failed, exit=" << ret;
+
+    std::string out = read_file(stdout_tmpl);
+    std::string trace = read_file(trace_tmpl);
+    unlink(stdout_tmpl);
+    unlink(trace_tmpl);
+
+    // The on-demand API resolved the ancestor chain...
+    EXPECT_NE(out.find("FRAME: print_stack_from_leaf"), std::string::npos)
+            << "API output missing print_stack_from_leaf. Output:\n" << out;
+    EXPECT_NE(out.find("FRAME: callstack_mid"), std::string::npos)
+            << "API output missing callstack_mid";
+    EXPECT_NE(out.find("FRAME: callstack_top"), std::string::npos)
+            << "API output missing callstack_top";
+
+    // ...while the hooks traced the same functions into the trace file.
+    EXPECT_NE(trace.find("callstack_top"), std::string::npos)
+            << "Trace file missing callstack_top — hooks did not run. Trace:\n" << trace;
+    EXPECT_NE(trace.find("callstack_mid"), std::string::npos)
+            << "Trace file missing callstack_mid — hooks did not run";
 }
 
 // ============================================================================
@@ -1075,6 +1181,93 @@ TEST(LogElapsedDefaultBuildTest, NoDurationFieldWithoutFlag) {
     EXPECT_EQ(content.find("[  pending ]"), std::string::npos)
             << "Default build unexpectedly has a pending placeholder.";
 #endif
+}
+
+// Multi-run append: a second run appends past the first run's content, so the
+// per-thread byte cursor is seeded from lseek(SEEK_END) on a NON-empty file.
+// Every placeholder in BOTH runs must still be patched at the correct offset —
+// a mis-seeded cursor would leave pending placeholders or splice duration
+// bytes into the first run's lines.
+TEST(LogElapsedMultiRunAppendTest, SecondRunPatchesCorrectlyAfterAppend) {
+    char tmp_path[] = "/tmp/cslg_elapsed_append_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    const std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(tmp_path) + "\" \""
+                          + TRACED_PROGRAM_LOG_ELAPSED_PATH + "\" > /dev/null 2>&1";
+    ASSERT_EQ(system(cmd.c_str()), 0) << "first run failed";
+    ASSERT_EQ(system(cmd.c_str()), 0) << "second run failed";
+
+    std::string content = read_file(tmp_path);
+    unlink(tmp_path);
+
+    // Two run-separator headers — the file really contains both runs.
+    const std::size_t first = content.find("=== New trace run:");
+    ASSERT_NE(first, std::string::npos) << "no run separator found";
+    EXPECT_NE(content.find("=== New trace run:", first + 1), std::string::npos)
+            << "second run's separator missing — append did not happen";
+
+    // No placeholder anywhere: both runs' exits patched their own lines.
+    EXPECT_EQ(content.find("[  pending ]"), std::string::npos)
+            << "Un-patched placeholder after multi-run append — the cursor "
+               "seeding from the appended file's EOF has regressed.\nTrace:\n" << content;
+
+    // Every entry line in both runs carries a well-formed duration field.
+    int entries = 0;
+    int with_duration = 0;
+    for (const auto& line : split_lines(content)) {
+        if (line.find("(called from:") == std::string::npos) continue;
+        ++entries;
+        if (std::regex_search(line, duration_field_regex())) ++with_duration;
+    }
+    ASSERT_GT(entries, 0) << "no function entries in trace";
+    EXPECT_EQ(with_duration, entries)
+            << "Some lines lost their duration field after append. Trace:\n" << content;
+}
+
+// LOG_ELAPSED + multi-threading: each thread owns an independent cursor and
+// patch_fd for its own file. After a clean run, every per-thread file (main +
+// 4 workers) must be fully patched — a cross-thread mix-up of offsets or fds
+// would leave pending placeholders or corrupt another thread's file.
+TEST(LogElapsedThreadedTest, PerThreadFilesPatchIndependently) {
+    char dir_tmpl[] = "/tmp/cslg_elapsed_threaded_XXXXXX";
+    char* d = mkdtemp(dir_tmpl);
+    ASSERT_NE(d, nullptr) << "mkdtemp failed";
+    const std::string tmpdir = d;
+    const std::string base = "thread_trace.out";
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + tmpdir + "/" + base + "\" \""
+                    + THREADED_TRACED_PROGRAM_LOG_ELAPSED_PATH + "\" > /dev/null 2>&1";
+    ASSERT_EQ(system(cmd.c_str()), 0) << "threaded LOG_ELAPSED program failed";
+
+    int worker_files = 0;
+    for (const std::string& name : list_files_in(tmpdir)) {
+        const bool is_main = (name == base);
+        const bool is_worker = parse_tid_suffix(name, base) >= 0;
+        if (!is_main && !is_worker) continue;
+        if (is_worker) ++worker_files;
+
+        const std::string content = read_file(tmpdir + "/" + name);
+        EXPECT_EQ(content.find("[  pending ]"), std::string::npos)
+                << "Un-patched placeholder in " << name << ":\n" << content;
+
+        int entries = 0;
+        int with_duration = 0;
+        for (const auto& line : split_lines(content)) {
+            if (line.find("(called from:") == std::string::npos) continue;
+            ++entries;
+            if (std::regex_search(line, duration_field_regex())) ++with_duration;
+        }
+        if (is_worker) {
+            EXPECT_GT(entries, 0) << "worker file " << name << " has no entries";
+        }
+        EXPECT_EQ(with_duration, entries)
+                << "File " << name << " has entries without a duration field:\n" << content;
+    }
+    EXPECT_EQ(worker_files, 4) << "expected 4 worker trace files";
+
+    remove_dir_tree(tmpdir);
 }
 
 // ============================================================================
