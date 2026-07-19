@@ -383,7 +383,6 @@ call-stack-logger/
 |-- CMakeLists.txt              # Root CMake config (project definition, run target)
 |-- Dockerfile                  # Ubuntu 24.04 build environment
 |-- docker-compose.yml          # Build, test, coverage services
-|-- Makefile_legacy             # Legacy root Makefile (delegates to src/)
 |-- README.md                   # Project overview, build instructions
 |-- CONTRIBUTING.md             # Contribution guidelines
 |-- CONTRIBUTOR_AGREEMENT.md    # CLA for contributors
@@ -401,7 +400,6 @@ call-stack-logger/
 |   |-- unwinder.h              # FrameUnwinder template, Callback, unwind_nth_frame()
 |-- src/
 |   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, library + executable)
-|   |-- Makefile_legacy         # Legacy Makefile with same logic
 |   |-- callStack.cpp           # Core implementation: BFD loading, symbol resolution
 |   |-- trace.cpp               # __cyg_profile_func_enter/exit, trace file I/O
 |   |-- main.cpp                # Demo program exercising various C++ features
@@ -422,8 +420,6 @@ call-stack-logger/
 |       |-- stripped_caller_lib.cpp # Shared-lib fixture, stripped of symtab/debug info post-build
 |       |-- stripped_caller_program.cpp # Instrumented; callback invoked from the stripped lib
 |       |-- test_integration.cpp # All integration tests (single/multi-threaded + API)
-|-- lib/                        # Empty dir (placeholder for external libs)
-|   |-- .gitignore              # Keeps dir in git but ignores contents
 |-- misc/
 |   |-- call-stack-logger-capture.gif  # Demo capture for README
 |-- .github/
@@ -517,7 +513,7 @@ Demo program testing instrumentation with:
 
 ## Build System
 
-### CMake (Primary)
+### CMake
 
 ```bash
 mkdir build && cd build
@@ -528,17 +524,6 @@ cmake -DLOG_ADDR=ON -DLOG_NOT_DEMANGLED=ON ..  # Both flags
 cmake -DDISABLE_INSTRUMENTATION=ON ..       # No instrumentation at all
 make                                        # Build
 make run                                    # Build and run (generates trace.out)
-```
-
-### Legacy Makefiles
-
-Rename `Makefile_legacy` -> `Makefile` and `src/Makefile_legacy` -> `src/Makefile`, then:
-```bash
-make                                    # Default
-make log_with_addr=1                    # With addresses
-make log_not_demangled=1                # With undemangled names
-make disable_instrumentation=1          # No instrumentation
-make run                                # Run
 ```
 
 ### Compilation Flags
@@ -910,5 +895,6 @@ The project evolved through these milestones (earliest first):
 4. Added unwinder for correct caller location resolution
 5. Added NO_INSTRUMENT macro, formatting, timestamps
 6. Added optional LOG_ADDR and LOG_NOT_DEMANGLED flags
-7. Migrated to CMake build system (Makefiles became legacy)
+7. Migrated to CMake build system (legacy Makefiles kept for a while, since removed —
+   they predated split compilation, LOG_ELAPSED, and the zstd link probe)
 8. Added documentation, article link, licensing, contribution guidelines

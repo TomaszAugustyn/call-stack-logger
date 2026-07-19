@@ -537,26 +537,6 @@ GitHub Actions runs on every push and pull request to `master`:
 
 Clang sanitizer runs are intentionally NOT part of CI — GCC covers the core sweep, and Clang's LSan behaviour drifts across toolchain versions which would add maintenance noise. They remain available locally via `docker compose run sanitize-asan-clang` / `sanitize-tsan-clang`.
 
-## :wrench: Building and running - legacy (Makefiles) ##
-
-```bash
-git clone https://github.com/TomaszAugustyn/call-stack-logger.git
-cd call-stack-logger
-
-mv Makefile_legacy Makefile
-mv src/Makefile_legacy src/Makefile
-
-# Build with default logging
-make
-# or for extended logging you can play with these flags
-make log_with_addr=1 log_not_demangled=1
-# or to compile your application with disabled instrumentation (no logging)
-make disable_instrumentation=1
-
-# Build and Run (as the result trace.out file will be generated)
-make run
-```
-
 ## :balance_scale: Copyright and License ##
 
 Call Stack Logger is a single-copyright project: all the source code in this [Call Stack Logger
