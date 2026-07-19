@@ -131,7 +131,13 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # suffixes appended here would silently vanish from INSTRUMENT_FLAGS. A plain
     # variable keeps the full list (std paths + project headers) freshly computed
     # each configure, and follows compiler upgrades in an existing build dir.
-    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},include/callStack.h,include/unwinder.h,include/types.h,include/format.h,include/prettyTime.h,include/traceFilePath.h,include/durationFormat.h")
+    # Absolute paths, deliberately: GCC matches exclude-file-list entries as
+    # SUBSTRINGS of the compiled file's path. Relative entries like
+    # "include/format.h" or "include/types.h" would also match a consumer
+    # project's own headers with those common names (when cslg is pulled in via
+    # add_subdirectory / FetchContent), silently de-instrumenting them. Anchoring
+    # to this project's source dir matches only cslg's own headers.
+    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},${CMAKE_CURRENT_SOURCE_DIR}/include/callStack.h,${CMAKE_CURRENT_SOURCE_DIR}/include/unwinder.h,${CMAKE_CURRENT_SOURCE_DIR}/include/types.h,${CMAKE_CURRENT_SOURCE_DIR}/include/format.h,${CMAKE_CURRENT_SOURCE_DIR}/include/prettyTime.h,${CMAKE_CURRENT_SOURCE_DIR}/include/traceFilePath.h,${CMAKE_CURRENT_SOURCE_DIR}/include/durationFormat.h")
     message(STATUS "CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}]")
 
     set(INSTRUMENT_FLAGS -finstrument-functions
