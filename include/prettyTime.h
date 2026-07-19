@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <ctime>
 #include <string>
 
@@ -51,13 +52,29 @@ inline std::string pretty_time() {
     auto tp = std::chrono::system_clock::now();
     std::time_t current_time = std::chrono::system_clock::to_time_t(tp);
 
-    // Use localtime_r (POSIX thread-safe variant) instead of std::localtime which
-    // uses a static global buffer and is not thread-safe.
-    std::tm time_info_buf{};
-    localtime_r(&current_time, &time_info_buf);
+    // The rendered "DD-MM-YYYY HH:MM:SS" prefix only changes once per second,
+    // while a traced program calls pretty_time() for every logged line. Cache
+    // the prefix per thread and re-run localtime_r + strftime only when the
+    // second rolls over; the millisecond suffix is appended fresh every call.
+    // thread_local keeps the cache race-free with zero synchronization. A DST
+    // or timezone-offset change cannot serve a stale prefix: the UTC offset
+    // shifts on a whole-second boundary, so `current_time` changes with it and
+    // the cache misses. localtime_r (POSIX thread-safe variant) is used instead
+    // of std::localtime, which shares a static global buffer.
+    thread_local std::time_t cached_second = 0;
+    thread_local int cached_size = 0;
+    thread_local char cached_prefix[64];
+    if (current_time != cached_second || cached_size == 0) {
+        std::tm time_info_buf{};
+        localtime_r(&current_time, &time_info_buf);
+        cached_size = static_cast<int>(
+                strftime(cached_prefix, sizeof(cached_prefix), LOGGER_PRETTY_TIME_FORMAT, &time_info_buf));
+        cached_second = current_time;
+    }
 
     char buffer[128];
-    int string_size = strftime(buffer, sizeof(buffer), LOGGER_PRETTY_TIME_FORMAT, &time_info_buf);
+    std::memcpy(buffer, cached_prefix, static_cast<std::size_t>(cached_size));
+    int string_size = cached_size;
     auto ms = to_ms(tp) % 1000;
     int ms_size =
             std::snprintf(buffer + string_size, sizeof(buffer) - string_size, LOGGER_PRETTY_MS_FORMAT, ms);
