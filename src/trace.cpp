@@ -583,11 +583,17 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                     // depth; the actual increment follows in the no-throw zone.
                     std::string line = utils::format(*maybe_resolved,
                                                      t_state.current_stack_depth + 1);
+                    // Terminate while still in the throwing zone — push_back may
+                    // reallocate.
+                    line.push_back('\n');
                     // ---- no-throw zone ----
                     t_state.current_stack_depth++;
                     logged = true;
-                    // No mutex: this FILE* is private to this thread.
-                    fprintf(fp, "%s\n", line.c_str());
+                    // No mutex: this FILE* is private to this thread. One fwrite of
+                    // the newline-terminated line — a single stdio call with no
+                    // per-line format-string parsing, mirroring the LOG_ELAPSED
+                    // branch minus its cursor bookkeeping.
+                    (void)fwrite(line.data(), 1, line.size(), fp);
 #endif
                 }
             } // maybe_resolved destructor runs here, still under guard
