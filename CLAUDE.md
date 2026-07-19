@@ -876,6 +876,14 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    per slot and popping stale entries on mismatch) was considered and rejected
    for now: it cannot disambiguate recursive frames (same callee address at
    several depths).
+10. **Signal handlers must not be instrumented (known limitation):** the hooks
+   allocate, lock `s_bfd_mutex`, and use stdio — none async-signal-safe. A signal
+   interrupting a thread mid-`malloc` whose handler runs instrumented functions
+   re-enters the allocator on the same thread and can deadlock. (The
+   `in_instrumentation` guard incidentally covers signals landing *inside* the
+   resolve pipeline, but not the interrupted-allocator case.) Signal handlers
+   should live in a TU compiled without `-finstrument-functions` or carry
+   `NO_INSTRUMENT`. Documented in README's Thread Safety section.
 
 ## Use Cases (from the article)
 

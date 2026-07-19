@@ -400,6 +400,14 @@ line, bounded by line-buffered mode to at most one per thread.
 `fork()` is not supported — the child process inherits the parent's `thread_local`
 state including `FILE*` pointers pointing to inherited file descriptors.
 
+**Signal handlers are not safe to trace.** The instrumentation hooks allocate
+memory, take a mutex, and use stdio — none of which is async-signal-safe. If a
+signal interrupts a thread mid-`malloc` (or mid-resolution) and the handler runs
+instrumented functions, the enter hook re-enters the allocator on the same
+thread and can deadlock. Keep signal handlers non-instrumented: define them in a
+translation unit compiled without `-finstrument-functions`, or mark them (and
+everything they call) with `__attribute__((no_instrument_function))`.
+
 ## :test_tube: Testing ##
 
 The project includes unit tests (for formatting and timestamp functions) and integration tests
