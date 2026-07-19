@@ -124,20 +124,34 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     )
     string(STRIP "${CPP_STD_INCLUDES}" CPP_STD_INCLUDES)
 
-    # Also exclude the project's instrumentation headers from instrumentation.
-    # Plain (non-cache) variable, deliberately: the execute_process above re-creates
-    # a normal CPP_STD_INCLUDES on every configure, which would shadow a cached
-    # value — set(... CACHE) would then be a no-op on reconfigure and the header
-    # suffixes appended here would silently vanish from INSTRUMENT_FLAGS. A plain
-    # variable keeps the full list (std paths + project headers) freshly computed
-    # each configure, and follows compiler upgrades in an existing build dir.
+    # The project's own instrumentation headers, excluded from instrumentation
+    # alongside the std library paths discovered above.
+    set(CSLG_EXCLUDED_HEADERS
+        callStack.h
+        durationFormat.h
+        format.h
+        prettyTime.h
+        traceFilePath.h
+        types.h
+        unwinder.h
+    )
+
     # Absolute paths, deliberately: GCC matches exclude-file-list entries as
     # SUBSTRINGS of the compiled file's path. Relative entries like
     # "include/format.h" or "include/types.h" would also match a consumer
     # project's own headers with those common names (when cslg is pulled in via
     # add_subdirectory / FetchContent), silently de-instrumenting them. Anchoring
     # to this project's source dir matches only cslg's own headers.
-    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},${CMAKE_CURRENT_SOURCE_DIR}/include/callStack.h,${CMAKE_CURRENT_SOURCE_DIR}/include/unwinder.h,${CMAKE_CURRENT_SOURCE_DIR}/include/types.h,${CMAKE_CURRENT_SOURCE_DIR}/include/format.h,${CMAKE_CURRENT_SOURCE_DIR}/include/prettyTime.h,${CMAKE_CURRENT_SOURCE_DIR}/include/traceFilePath.h,${CMAKE_CURRENT_SOURCE_DIR}/include/durationFormat.h")
+    list(TRANSFORM CSLG_EXCLUDED_HEADERS PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/include/")
+    list(JOIN CSLG_EXCLUDED_HEADERS "," CSLG_EXCLUDED_HEADERS_JOINED)
+
+    # Plain (non-cache) variable, deliberately: the execute_process above re-creates
+    # a normal CPP_STD_INCLUDES on every configure, which would shadow a cached
+    # value — set(... CACHE) would then be a no-op on reconfigure and the header
+    # suffixes appended here would silently vanish from INSTRUMENT_FLAGS. A plain
+    # variable keeps the full list (std paths + project headers) freshly computed
+    # each configure, and follows compiler upgrades in an existing build dir.
+    set(CPP_STD_INCLUDES "${CPP_STD_INCLUDES},${CSLG_EXCLUDED_HEADERS_JOINED}")
     message(STATUS "CPP_STD_INCLUDES is [${CPP_STD_INCLUDES}]")
 
     set(INSTRUMENT_FLAGS -finstrument-functions
