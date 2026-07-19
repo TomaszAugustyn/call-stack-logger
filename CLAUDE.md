@@ -127,7 +127,9 @@ The main thread's file is opened eagerly in `trace_begin()` (via
 `__attribute__((constructor))`, before `main()` runs). Worker threads lazily open their
 file on the first `__cyg_profile_func_enter` call for that thread.
 
-All files are opened with `O_NOFOLLOW` (prevents symlink attacks) and `0600` permissions.
+All files are opened with `O_NOFOLLOW` (prevents symlink attacks), `O_CLOEXEC` (an
+exec'd child of the traced program must not inherit writable trace descriptors — this
+covers the LOG_ELAPSED patch_fd too), and `0600` permissions.
 Output is line-buffered (`_IOLBF`) for crash safety without per-call `fflush` overhead.
 
 Each file's header identifies the owning thread:

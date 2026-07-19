@@ -210,10 +210,13 @@ void open_this_thread_file(PerThreadState& self) {
     const bool is_main = (tid == g.main_tid);
     const std::string path = utils::build_trace_filename(g.base_path, is_main, tid);
 
-    // Same security-hardening flags as the original trace_begin(): O_NOFOLLOW to
-    // prevent symlink attacks, 0600 permissions so traces (which can leak internal
-    // paths and function names) are not world-readable.
-    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
+    // Security-hardening flags: O_NOFOLLOW to prevent symlink attacks, 0600
+    // permissions so traces (which can leak internal paths and function names)
+    // are not world-readable, and O_CLOEXEC so an exec'd child of the traced
+    // program does not inherit a writable descriptor to the trace file
+    // (spawning subprocesses is normal in traced applications; only continuing
+    // to trace after fork() is unsupported).
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) {
         fprintf(stderr, "[call-stack-logger] WARNING: Could not open %s for writing\n",
                 path.c_str());
@@ -240,13 +243,15 @@ void open_this_thread_file(PerThreadState& self) {
     // two opens (TOCTOU). /proc is already a hard dependency of this library
     // (get_argv0, /proc/self/exe). Note: no O_NOFOLLOW here — /proc/self/fd/N
     // is a kernel-controlled symlink that MUST be followed; the symlink-attack
-    // concern the first open guards against does not apply to it.
+    // concern the first open guards against does not apply to it. O_CLOEXEC
+    // for the same reason as the first fd — this one is even more sensitive,
+    // since without O_APPEND it can pwrite anywhere in the file.
     // Both fds share the kernel inode; writes never overlap in byte range —
     // fp only writes NEW bytes beyond EOF, pfd only rewrites EXISTING
     // placeholder bytes.
     char fd_path[32];
     snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
-    int pfd = open(fd_path, O_WRONLY);
+    int pfd = open(fd_path, O_WRONLY | O_CLOEXEC);
     if (pfd < 0) {
         // Degrade rather than disable: the trace itself is still valuable without
         // durations. Keep tracing through fp; with pfd == -1 and cursor_valid
