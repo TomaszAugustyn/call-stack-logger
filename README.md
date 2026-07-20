@@ -200,6 +200,13 @@ In practice this drops the unresolved-caller rate from ~20 % down to ~2–3 %. (
 against a spdlog 1.14 integration: 20.1 % `:???` in Release, 2.7 % in `RelWithDebInfo`.)
 The residual ~2 % is mostly inlined helpers where the compiler dropped line info.
 
+One caveat at optimized levels (`-O2` and up): when the compiler **inlines** an
+instrumented function into its caller, the enter/exit hooks still fire (the call
+tree stays complete, durations and nesting are unaffected), but the inlined call
+has no physical stack frame — its `(called from: ...)` then reports the nearest
+*enclosing* physical frame's call site, one level up. Functions the compiler
+keeps out-of-line get exact caller locations at every optimization level.
+
 ### Available CMake targets ###
 
 | Target                             | What it adds to your executable                                                                                                                                                                                      |

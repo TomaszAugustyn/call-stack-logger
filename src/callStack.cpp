@@ -365,6 +365,11 @@ std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* ca
     // still on the stack when _Unwind_Backtrace runs count: helpers that
     // __cyg_profile_func_enter calls BEFORE resolve() (e.g. get_thread_fp()) have
     // already returned by then and can never shift the frame numbers, inlined or not.
+    //
+    // Every function in frames 1-5 carries NO_INLINE (see callStack.h): without it,
+    // -O2 inlines both unwind_nth_frame layers into this function (observed with
+    // GCC 16 at CMAKE_BUILD_TYPE=RelWithDebInfo), the chain loses two frames, the
+    // walk overshoots the real caller by two, and every line gets junk caller info.
     Callback callback(caller_address);
     unwind_nth_frame(callback, 6);
     return resolve_no_unwind(callee_address, callback.caller);

@@ -553,7 +553,11 @@ void trace_begin() {
 // to eliminate the dead code and the theoretical UAF. Line-buffered output plus
 // the kernel's close-on-exit guarantees cover the cases that trace_end did not.
 
-extern "C" NO_INSTRUMENT
+// NO_INLINE: frame 5 of the fixed chain behind the frame-6 constant in
+// callStack.cpp. The call to this hook is emitted by codegen (never inlined in
+// a normal build), but under LTO the definition becomes visible to user TUs —
+// noinline keeps the chain shape stable there too.
+extern "C" NO_INSTRUMENT NO_INLINE
 void __cyg_profile_func_enter(void *callee, void *caller) {
     if (t_state.in_instrumentation) { return; }
     // Set the guard BEFORE any work and clear it AFTER all local variables (especially

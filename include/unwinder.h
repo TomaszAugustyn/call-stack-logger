@@ -14,6 +14,10 @@
 #include <sys/types.h> // ssize_t — POSIX type, not guaranteed by <cstdlib> (glibc leaks it, musl does not)
 #include <unwind.h>
 
+#ifndef NO_INLINE
+    #define NO_INLINE __attribute__((noinline))
+#endif
+
 namespace instrumentation {
 
 struct Callback {
@@ -27,11 +31,24 @@ template <typename F>
 class FrameUnwinder {
 
 public:
-    void unwind_nth_frame(F& f, size_t frame_number) {
+    // NO_INLINE is load-bearing: this function is frame 1 of the fixed call chain
+    // behind the frame-6 constant in bfdResolver::resolve(). At -O2 (e.g. a
+    // RelWithDebInfo build of the library) the optimizer otherwise inlines it into
+    // its caller, shortening the chain — the unwind then overshoots the real
+    // caller and every trace line gets wrong "called from" info.
+    NO_INLINE void unwind_nth_frame(F& f, size_t frame_number) {
         m_depth = frame_number;
         m_index = -1;
         m_pF = &f;
-        _Unwind_Backtrace(&this->nth_frame_trampoline, this);
+        // The result lands in a volatile local: a volatile write is an
+        // observable side effect that must happen AFTER the call returns,
+        // which keeps the call out of tail position. noinline alone is not
+        // enough — at -O2 GCC otherwise turns this into `jmp _Unwind_Backtrace`
+        // (sibling-call optimization, observed with GCC 16), recycling this
+        // frame and removing it from the walked stack, shifting every captured
+        // caller by one frame.
+        volatile _Unwind_Reason_Code rc = _Unwind_Backtrace(&this->nth_frame_trampoline, this);
+        (void)rc;
     }
 
 private:
@@ -79,8 +96,10 @@ private:
 };
 
 // Do not pass copy here, as we want to mutate `f` to get address of the n-th frame.
+// NO_INLINE: frame 2 of the fixed chain behind the frame-6 constant — see the
+// note on FrameUnwinder::unwind_nth_frame above.
 template <typename F>
-void unwind_nth_frame(F& f, size_t frame_number) {
+NO_INLINE void unwind_nth_frame(F& f, size_t frame_number) {
     FrameUnwinder<F> unwinder;
     unwinder.unwind_nth_frame(f, frame_number);
 }

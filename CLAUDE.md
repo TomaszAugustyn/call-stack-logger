@@ -81,6 +81,32 @@ Frame 7: the caller of the instrumented function — captured (one beyond the 6 
 chain), the frame number (currently 6) passed to `unwind_nth_frame()` inside
 `bfdResolver::resolve()` in `src/callStack.cpp` MUST be recalculated.
 
+**NO_INLINE is load-bearing for this constant.** Every function in frames 1–5
+(`FrameUnwinder::unwind_nth_frame`, `instrumentation::unwind_nth_frame`,
+`bfdResolver::resolve`, `instrumentation::resolve`, `__cyg_profile_func_enter`)
+carries `__attribute__((noinline))` (the `NO_INLINE` macro in `callStack.h`).
+Without it, an optimized build of the library (-O2, e.g.
+`CMAKE_BUILD_TYPE=RelWithDebInfo` — which FetchContent consumers inherit and the
+README recommends) inlines both `unwind_nth_frame` layers into
+`bfdResolver::resolve` (observed with GCC 16), the chain loses two frames, the
+walk overshoots the real caller, and every trace line silently reports junk
+caller info. `NO_INLINE` keeps the chain shape identical at all optimization
+levels; the cost (one genuine call per chain function per traced call) is noise
+next to the resolve pipeline itself, and default/-O0 builds are unchanged since
+nothing was inlined there anyway. `noinline` alone is NOT sufficient:
+GCC additionally turns the tail-position `_Unwind_Backtrace` call into a
+sibling-call `jmp` at -O2, recycling frame 1 and shifting every captured caller
+by one — `FrameUnwinder::unwind_nth_frame` therefore stores the call's result
+into a `volatile` local (an observable side effect after the call, keeping it
+out of tail position with plain C++ semantics).
+
+Remaining -O2 semantic (inherent, documented in README's RelWithDebInfo tip):
+when the OPTIMIZER inlines an instrumented USER function, its hooks still fire
+(GCC instruments inlined copies, so tree/depth/durations stay complete), but no
+physical frame exists — the reported `called from` is the enclosing physical
+frame's call site, one level up. No stack-walk can recover the conceptual
+caller of an inlined copy.
+
 ### Excluding Standard Library from Instrumentation
 
 Standard library functions (e.g., `std::sort`, `std::vector::push_back`) must be excluded
@@ -923,7 +949,10 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    call chain between `__cyg_profile_func_enter` and `unwind_nth_frame` changes.
    Only functions still on the stack during the unwind count: helpers that the enter
    hook calls and that return before `resolve()` runs (e.g. `get_thread_fp()`) can
-   never shift the frame numbers, inlined or not.
+   never shift the frame numbers, inlined or not. The chain functions themselves
+   (frames 1–5) all carry `NO_INLINE` — required, because -O2 otherwise inlines the
+   `unwind_nth_frame` layers into `bfdResolver::resolve` and shifts the constant
+   (see "Stack Unwinding for Accurate Caller Location").
 4. **Append mode:** Trace output is opened with `O_APPEND | O_NOFOLLOW` - multiple runs
    accumulate, separated by timestamped headers; output is line-buffered (`_IOLBF`)
    with `0600` permissions (owner read/write only). Note `O_NOFOLLOW` rejects a

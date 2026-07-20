@@ -39,6 +39,18 @@
     #define NO_INSTRUMENT __attribute__((no_instrument_function))
 #endif
 
+// Applied to every function in the fixed call chain behind the frame-6 constant
+// (see bfdResolver::resolve in callStack.cpp). Without it, an optimized build of
+// the library (-O2, e.g. CMAKE_BUILD_TYPE=RelWithDebInfo — the build type the
+// README recommends to integrators) inlines parts of the chain, the hard-coded
+// frame count no longer matches the real stack, and every trace line silently
+// reports a wrong caller. NO_INLINE keeps the chain shape identical at every
+// optimization level; the cost is one genuine call per chain function per traced
+// call — noise next to the resolve pipeline itself.
+#ifndef NO_INLINE
+    #define NO_INLINE __attribute__((noinline))
+#endif
+
 namespace instrumentation {
 
 /**
@@ -90,7 +102,8 @@ public:
     /// parameter is the call site passed by `__cyg_profile_func_enter`; the
     /// unwinder walks up the fixed depth of the resolve pipeline to reach the
     /// real caller. Use this from instrumentation hooks.
-    NO_INSTRUMENT
+    /// NO_INLINE: frame 3 of the fixed chain behind the frame-6 constant.
+    NO_INSTRUMENT NO_INLINE
     static std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address);
 
     /// Resolves callee + caller using both addresses verbatim — does NOT run the
@@ -225,7 +238,9 @@ NO_INSTRUMENT
 std::vector<std::optional<ResolvedFrame>> get_call_stack();
 
 /// Returns the ResolvedFrame if address resolution succeeds, std::nullopt if fails.
-NO_INSTRUMENT
+/// NO_INLINE: frame 4 of the fixed chain behind the frame-6 constant (relevant
+/// under LTO, where even the cross-TU call from the enter hook could inline).
+NO_INSTRUMENT NO_INLINE
 std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address);
 
 } // namespace instrumentation
