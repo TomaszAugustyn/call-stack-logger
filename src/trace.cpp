@@ -376,8 +376,16 @@ FILE* get_thread_fp() {
 
 } // namespace
 
-// Flushes per-thread stdio buffers and signals shutdown. Called via atexit() so it
-// runs BEFORE static destructors (like the bfds() map). Idempotent via g.shutdown_started CAS.
+// Flushes per-thread stdio buffers and signals shutdown. Registered via atexit()
+// in trace_begin(). Exit handlers run in REVERSE registration order, so anything
+// registered later — including destructors of function-local statics first
+// constructed during main() — runs BEFORE this handler. That ordering is exactly
+// why the resolver's static caches in callStack.h are deliberately leaked: with
+// real destructors they would be destroyed before shutdown_complete is set here,
+// while worker threads can still be inside resolve(). Conversely, statics
+// constructed BEFORE trace_begin ran (user globals, under normal link order)
+// destruct AFTER this handler — their possibly-instrumented destructors then hit
+// disabled hooks. Idempotent via g.shutdown_started CAS.
 //
 // Shutdown race handling. A worker thread may be mid-fprintf (or mid-pwrite) when
 // this runs. To bound the degraded mode to what the design promises — "EBADF at
@@ -535,9 +543,12 @@ void trace_begin() {
     // programs (main's file exists immediately after trace_begin returns).
     open_this_thread_file(t_state);
 
-    // Register shutdown via atexit so it runs before static destructors.
-    // Critical for Clang where static destructors (like the bfds() map) may be
-    // instrumented — shutdown must close trace file(s) before those destructors fire.
+    // Register shutdown via atexit. Handlers run in reverse registration order,
+    // so registering this early (pre-main) means destructors of user statics
+    // constructed before trace_begin run AFTER shutdown — their possibly
+    // instrumented destructors (a real concern under Clang) find the hooks
+    // already disabled instead of half-dead state. Resolver-side statics need
+    // no ordering at all: they are deliberately leaked (see callStack.h).
     std::atexit(trace_shutdown);
 
     g.trace_ready.store(true, std::memory_order_release);

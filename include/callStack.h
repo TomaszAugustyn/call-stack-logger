@@ -82,9 +82,11 @@ public:
         intptr_t offset;
 
         NO_INSTRUMENT storedBfd(bfd* _abfd, deleter_t* _del) : abfd(_abfd, _del) {}
-        // Explicit move operations and destructor with NO_INSTRUMENT prevent the
-        // compiler-generated special members from being instrumented during static
-        // cleanup of the bfds() map. Declaring a destructor suppresses implicit move
+        // Explicit move operations and destructor with NO_INSTRUMENT keep the
+        // compiler-generated special members uninstrumented (they run during
+        // emplace into the bfds() map and on the failure paths in
+        // ensure_bfd_loaded; the map itself is deliberately leaked, so there is
+        // no static cleanup). Declaring a destructor suppresses implicit move
         // generation in C++, so move operations must be explicitly defaulted.
         NO_INSTRUMENT storedBfd(storedBfd&&) = default;
         NO_INSTRUMENT storedBfd& operator=(storedBfd&&) = default;
@@ -163,13 +165,29 @@ private:
     // either run after the unwind or return before it), so the frame-6 constant
     // is unaffected.
     //
+    // Each instance is heap-allocated and deliberately LEAKED (never destroyed),
+    // again mirroring g_trace(): these caches are first used during tracing,
+    // i.e. AFTER trace_begin() registered trace_shutdown via atexit, and exit
+    // handlers run in reverse registration order — so with plain function-local
+    // statics their destructors would run BEFORE trace_shutdown. In that window
+    // shutdown_complete is not yet set, so a worker thread can still be inside
+    // resolve() mutating these maps while the exiting thread destroys them — a
+    // use-after-free that defeats the documented "torn final line at worst"
+    // shutdown guarantee. (Under Clang the map destructors themselves could
+    // additionally fire hooks through instrumented COMDAT std internals from a
+    // user TU, mid-destruction.) Leaking removes static destruction of resolver
+    // state entirely: the kernel reclaims the memory at process exit, LSan
+    // treats reachable globals as live (nothing is reported), and the skipped
+    // bfd_close calls only release read-only descriptors the kernel closes
+    // anyway.
+    //
     // s_bfd_mutex and s_bfd_initialized stay as plain statics below: std::mutex
     // has a constexpr constructor and bool is zero-initialized, so both are
     // constant-initialized before any code runs — no order hazard.
     NO_INSTRUMENT
     static std::map<void*, storedBfd>& bfds() {
-        static std::map<void*, storedBfd> instance;
-        return instance;
+        static auto* instance = new std::map<void*, storedBfd>();
+        return *instance;
     }
 
     /// Negative cache: base addresses whose object file failed to load/parse.
@@ -179,8 +197,8 @@ private:
     /// by the number of distinct loaded objects. Protected by s_bfd_mutex.
     NO_INSTRUMENT
     static std::unordered_set<void*>& bfd_load_failed() {
-        static std::unordered_set<void*> instance;
-        return instance;
+        static auto* instance = new std::unordered_set<void*>();
+        return *instance;
     }
 
     // Memoization caches for fully-resolved per-address results, consulted in
@@ -203,24 +221,24 @@ private:
     // trade-off as bfds(). Protected by s_bfd_mutex.
     NO_INSTRUMENT
     static std::unordered_map<void*, std::optional<std::string>>& name_cache() {
-        static std::unordered_map<void*, std::optional<std::string>> instance;
-        return instance;
+        static auto* instance = new std::unordered_map<void*, std::optional<std::string>>();
+        return *instance;
     }
 
     NO_INSTRUMENT
     static std::unordered_map<void*, std::pair<std::string, std::optional<unsigned int>>>&
     location_cache() {
-        static std::unordered_map<void*, std::pair<std::string, std::optional<unsigned int>>>
-                instance;
-        return instance;
+        static auto* instance =
+                new std::unordered_map<void*, std::pair<std::string, std::optional<unsigned int>>>();
+        return *instance;
     }
 
     /// argv[0] as read from /proc/self/cmdline. Lazily initialized on first
     /// resolve (programs that never resolve don't read the file at all).
     NO_INSTRUMENT
     static const std::string& argv0() {
-        static const std::string instance = get_argv0();
-        return instance;
+        static const std::string* instance = new std::string(get_argv0());
+        return *instance;
     }
 
     inline static bool s_bfd_initialized = false;

@@ -208,8 +208,15 @@ and on x86_64 / ARM64 compiles to a single `mov` / `LDR` — no hot-path overhea
 for why that was changed.)
 
 **Shutdown coordination (no cross-thread close)**:
-- `atexit(trace_shutdown)` registered in `trace_begin()` — runs BEFORE static
-  destructors (critical for Clang where those destructors may be instrumented).
+- `atexit(trace_shutdown)` registered in `trace_begin()`. Exit handlers run in
+  REVERSE registration order: user statics constructed BEFORE `trace_begin`
+  (normal link order) destruct AFTER `trace_shutdown` — their possibly
+  instrumented destructors (a Clang concern) find the hooks already disabled.
+  Statics first constructed DURING tracing would destruct BEFORE
+  `trace_shutdown`, which is exactly why the resolver caches in `callStack.h`
+  are deliberately leaked (see the bfdResolver section below) — otherwise a
+  worker still inside `resolve()` could race their destruction, since
+  `shutdown_complete` is only set later.
 - `trace_shutdown()` acquires `open_files_mutex`, iterates the registry, calls
   `fflush()` on each thread's `FILE*` (pushes any buffered partial line to the
   kernel — thread-safe, per-FILE implicit lock), then clears the registry and
@@ -488,7 +495,15 @@ Declares the `bfdResolver` struct with:
   `bfds()` (object-file cache), `bfd_load_failed()` (negative cache), `name_cache()` /
   `location_cache()` (memoization), `argv0()` — so an instrumented static constructor
   in a user TU can never reach them before their dynamic initialization has run
-  (same rationale as `g_trace()` in `trace.cpp`). Only the constant-initialized
+  (same rationale as `g_trace()` in `trace.cpp`). Each instance is heap-allocated
+  and deliberately LEAKED, also mirroring `g_trace()`: the caches are first used
+  during tracing (after `trace_begin` registered `trace_shutdown` via atexit), so
+  plain function-local statics would be destroyed BEFORE `trace_shutdown` runs
+  (exit handlers are LIFO) — i.e. before `shutdown_complete` gates workers out of
+  `resolve()`, letting a worker mutate a map mid-destruction (UAF). Leaking
+  removes resolver static destruction entirely; the kernel reclaims everything,
+  LSan sees reachable globals as live, and the skipped `bfd_close` calls only
+  release read-only descriptors. Only the constant-initialized
   `s_bfd_mutex` (constexpr ctor) and `s_bfd_initialized` (bool) remain plain statics.
 - Free functions: `get_call_stack()`, `resolve()`
 
@@ -923,8 +938,10 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    library uses `std::string` extensively but doesn't need instrumentation. A thread_local
    re-entrancy guard in
    `__cyg_profile_func_enter` prevents recursive instrumentation from within the resolve
-   pipeline (critical for Clang). Shutdown uses `atexit()` to disable instrumentation before
-   static destructors run. The enter hook is additionally an **exception barrier**: its
+   pipeline (critical for Clang). Shutdown uses `atexit()` to disable instrumentation
+   before the destructors of user statics constructed pre-`trace_begin` run (exit
+   handlers are LIFO; resolver-side statics are deliberately leaked, so no ordering
+   with them exists at all). The enter hook is additionally an **exception barrier**: its
    resolve/format/log work runs inside `try/catch(...)` with state mutations placed after
    the last throwing operation, so an OOM-time `bad_alloc` can never propagate out of the
    hook into the traced program — the frame just goes untraced and pairing stays intact
