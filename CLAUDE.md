@@ -293,6 +293,13 @@ spliced immediately after `"[<timestamp>] "`, before the optional
 `addr:` column and the tree, which keeps the offset invariant under
 any combination of `LOG_ADDR` / `LOG_NOT_DEMANGLED`.
 
+**64-bit offsets everywhere.** The library (and each test variant library) is
+compiled with a PRIVATE `_FILE_OFFSET_BITS=64`, so the cursor and pwrite patch
+offsets use 64-bit `off_t` even on 32-bit Linux targets — per-function trace
+files pass 2 GiB easily. PRIVATE is load-bearing: `off_t` never crosses the
+public API, and the macro must not leak into consumer TUs where it would
+change their own off_t-based ABIs.
+
 **Single-writer assumption (documented limitation).** The cursor makes each
 per-thread file single-writer by design: two *processes* pointed at the same
 `CSLG_OUTPUT_FILE` with LOG_ELAPSED would each track a cursor from their own

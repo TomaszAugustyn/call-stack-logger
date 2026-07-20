@@ -22,6 +22,13 @@ target_include_directories(callstacklogger PUBLIC
 # root CMakeLists.txt detected that static libbfd needs it, "zstd".
 target_link_libraries(callstacklogger PUBLIC ${CSLG_BFD_LINK_LIBS})
 
+# 64-bit file offsets on 32-bit Linux targets: the LOG_ELAPSED cursor and
+# pwrite() patch offsets are off_t, which defaults to 32 bits there, and
+# per-function trace files can exceed 2 GiB easily. PRIVATE is load-bearing:
+# off_t never crosses the public API, and the definition must not leak into
+# consumers' TUs where it would change THEIR off_t-based ABIs.
+target_compile_definitions(callstacklogger PRIVATE _FILE_OFFSET_BITS=64)
+
 # INTERFACE compile option: -g is required for BFD to resolve source filenames
 # and line numbers in consumer code. Without it, trace output shows "???" for
 # the "called from" field. Propagating means users get it automatically —

@@ -470,6 +470,16 @@ frame first). Unlike the automatic instrumentation, this does NOT require
 `-finstrument-functions` — it uses `backtrace()` + BFD resolution at the point of call.
 Useful for logging a stack snapshot from an error handler or logging site.
 
+**Optimized builds:** `backtrace()` only sees *physical* stack frames. At `-O2`
+and above the compiler may inline a function into its caller, or turn a call in
+tail position into a jump (sibling-call optimization) — such frames silently
+disappear from the captured stack. If you need complete stacks from optimized,
+non-instrumented code, compile the relevant translation units with
+`-fno-optimize-sibling-calls` and mark must-appear functions
+`__attribute__((noinline))`. (Code traced via `-finstrument-functions` is not
+affected by the tail-call part — the exit hook after every call keeps calls out
+of tail position.)
+
 ## :bug: Sanitizers ##
 
 For debugging, the build supports AddressSanitizer (ASan), UndefinedBehaviorSanitizer

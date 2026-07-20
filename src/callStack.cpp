@@ -96,6 +96,13 @@ bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
             return nullptr;
         }
         ensure_actual_executable(_info);
+        // dladdr() can succeed (dli_fbase set) yet leave dli_fname null — e.g.
+        // for objects the dynamic linker knows no path for. bfd_openr must not
+        // receive a null filename; negative-cache like any other unloadable object.
+        if (_info.dli_fname == nullptr) {
+            bfd_load_failed().insert(_info.dli_fbase);
+            return nullptr;
+        }
         // Stack local (moved into the map on success) — no reason to heap-allocate
         // a temporary that is unconditionally consumed or discarded in this scope.
         storedBfd newBfd(bfd_openr(_info.dli_fname, nullptr), &bfd_close);
@@ -144,8 +151,9 @@ std::string bfdResolver::get_argv0() {
 
 void bfdResolver::ensure_actual_executable(Dl_info& symbol_info) {
     // Mutates symbol_info.dli_fname to be filename to open and returns filename
-    // to display
-    if (symbol_info.dli_fname == argv0()) {
+    // to display. The null check is load-bearing: comparing a null const char*
+    // against std::string is undefined behavior.
+    if (symbol_info.dli_fname != nullptr && symbol_info.dli_fname == argv0()) {
         // dladdr returns argv[0] in dli_fname for symbols contained in
         // the main executable, which is not a valid path if the
         // executable was found by a search of the PATH environment

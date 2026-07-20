@@ -29,6 +29,11 @@ cslg_apply_sanitizers(noninstrumented_test_program)
 add_executable(callstack_api_program callstack_api_program.cpp)
 target_compile_features(callstack_api_program PRIVATE cxx_std_17)
 target_link_libraries(callstack_api_program PRIVATE callstacklogger)
+# Keep every chain frame physically on the stack in optimized suite builds:
+# backtrace() cannot see frames removed by sibling-call optimization, and the
+# test asserts the exact ancestor chain. Complements the noinline attributes
+# in the driver source (which only prevent inlining, not tail calls).
+target_compile_options(callstack_api_program PRIVATE -fno-optimize-sibling-calls)
 cslg_apply_sanitizers(callstack_api_program)
 
 # Same source as callstack_api_program, but compiled WITH instrumentation and
@@ -102,6 +107,9 @@ function(cslg_add_flag_variant variant driver)
     target_include_directories(callstacklogger_${variant} PUBLIC
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
     target_compile_definitions(callstacklogger_${variant} PUBLIC ${ARGN})
+    # Mirror the main library's private 64-bit off_t setting (src/CMakeLists.txt)
+    # so the variant libraries compile the same code the shipped library does.
+    target_compile_definitions(callstacklogger_${variant} PRIVATE _FILE_OFFSET_BITS=64)
     target_compile_options(callstacklogger_${variant} INTERFACE -g)
     target_link_options(callstacklogger_${variant} INTERFACE -rdynamic)
     target_link_libraries(callstacklogger_${variant} PUBLIC ${CSLG_BFD_LINK_LIBS})
