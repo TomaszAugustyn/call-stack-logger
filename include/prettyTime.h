@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <string>
@@ -34,11 +35,14 @@ namespace utils {
 // (notably LOG_ELAPSED in trace.cpp) derives byte offsets from this value.
 inline constexpr std::size_t PRETTY_TIME_LENGTH = 23;
 
-// Convert current time to milliseconds since unix epoch.
+// Convert current time to milliseconds since unix epoch. Returns int64_t, not
+// long: milliseconds since 1970 (~1.7e12) overflow a 32-bit long, so `long`
+// would truncate on 32-bit Linux targets (e.g. ARM32) and corrupt the .mmm
+// field. On LP64 the codegen is identical.
 // NO_INSTRUMENT: called from the instrumentation pipeline (resolve -> pretty_time -> to_ms).
 template <typename T>
 NO_INSTRUMENT
-long to_ms(const std::chrono::time_point<T>& tp) {
+std::int64_t to_ms(const std::chrono::time_point<T>& tp) {
     using namespace std::chrono;
 
     auto dur = tp.time_since_epoch();
@@ -75,7 +79,9 @@ inline std::string pretty_time() {
     char buffer[128];
     std::memcpy(buffer, cached_prefix, static_cast<std::size_t>(cached_size));
     int string_size = cached_size;
-    auto ms = to_ms(tp) % 1000;
+    // % 1000 keeps the value in [0, 999], so the narrowing cast to long (the
+    // type LOGGER_PRETTY_MS_FORMAT's %03ld expects) is always lossless.
+    auto ms = static_cast<long>(to_ms(tp) % 1000);
     int ms_size =
             std::snprintf(buffer + string_size, sizeof(buffer) - string_size, LOGGER_PRETTY_MS_FORMAT, ms);
     if (ms_size > 0) {
