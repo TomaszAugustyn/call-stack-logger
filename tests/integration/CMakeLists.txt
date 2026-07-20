@@ -16,11 +16,6 @@ target_compile_features(traced_test_program PRIVATE cxx_std_17)
 target_link_libraries(traced_test_program PRIVATE callstacklogger_instrumented)
 cslg_apply_sanitizers(traced_test_program)
 
-if(COVERAGE)
-    target_compile_options(traced_test_program PRIVATE --coverage)
-    target_link_options(traced_test_program PRIVATE --coverage)
-endif()
-
 # Non-instrumented version of the same program. Links plain callstacklogger so no
 # INSTRUMENT_FLAGS are applied. Catches regressions in DISABLE_INSTRUMENTATION
 # and split compilation.
@@ -29,22 +24,12 @@ target_compile_features(noninstrumented_test_program PRIVATE cxx_std_17)
 target_link_libraries(noninstrumented_test_program PRIVATE callstacklogger)
 cslg_apply_sanitizers(noninstrumented_test_program)
 
-if(COVERAGE)
-    target_compile_options(noninstrumented_test_program PRIVATE --coverage)
-    target_link_options(noninstrumented_test_program PRIVATE --coverage)
-endif()
-
 # Exercises the public get_call_stack() API (on-demand stack capture).
 # Links plain callstacklogger — no per-call hooks needed.
 add_executable(callstack_api_program callstack_api_program.cpp)
 target_compile_features(callstack_api_program PRIVATE cxx_std_17)
 target_link_libraries(callstack_api_program PRIVATE callstacklogger)
 cslg_apply_sanitizers(callstack_api_program)
-
-if(COVERAGE)
-    target_compile_options(callstack_api_program PRIVATE --coverage)
-    target_link_options(callstack_api_program PRIVATE --coverage)
-endif()
 
 # Same source as callstack_api_program, but compiled WITH instrumentation and
 # linked against callstacklogger_instrumented — proves the on-demand
@@ -54,11 +39,6 @@ add_executable(callstack_api_program_instrumented callstack_api_program.cpp)
 target_compile_features(callstack_api_program_instrumented PRIVATE cxx_std_17)
 target_link_libraries(callstack_api_program_instrumented PRIVATE callstacklogger_instrumented)
 cslg_apply_sanitizers(callstack_api_program_instrumented)
-
-if(COVERAGE)
-    target_compile_options(callstack_api_program_instrumented PRIVATE --coverage)
-    target_link_options(callstack_api_program_instrumented PRIVATE --coverage)
-endif()
 
 # Stripped-caller regression fixture: a shared library whose file-local function
 # invokes a callback in instrumented user code. Post-build, strip --strip-all
@@ -84,12 +64,6 @@ target_compile_features(stripped_caller_program PRIVATE cxx_std_17)
 target_link_libraries(stripped_caller_program PRIVATE callstacklogger_instrumented stripped_caller)
 cslg_apply_sanitizers(stripped_caller_program)
 
-if(COVERAGE)
-    target_compile_options(stripped_caller_program PRIVATE --coverage)
-    target_link_options(stripped_caller_program PRIVATE --coverage)
-    target_link_options(stripped_caller PRIVATE --coverage)
-endif()
-
 # Multi-threaded traced test program. Exercises per-thread trace files by spawning
 # worker threads, each of which produces its own <base>_tid_<tid> file.
 find_package(Threads REQUIRED)
@@ -97,11 +71,6 @@ add_executable(threaded_traced_test_program threaded_traced_program.cpp)
 target_compile_features(threaded_traced_test_program PRIVATE cxx_std_17)
 target_link_libraries(threaded_traced_test_program PRIVATE callstacklogger_instrumented Threads::Threads)
 cslg_apply_sanitizers(threaded_traced_test_program)
-
-if(COVERAGE)
-    target_compile_options(threaded_traced_test_program PRIVATE --coverage)
-    target_link_options(threaded_traced_test_program PRIVATE --coverage)
-endif()
 
 # Library variants for testing build-time flags. Each rebuilds the library sources
 # with one or more of the gated #defines so we can exercise the corresponding code
@@ -129,12 +98,6 @@ function(cslg_add_flag_variant variant driver)
 
     cslg_apply_sanitizers(callstacklogger_${variant})
     cslg_apply_sanitizers(traced_test_program_${variant})
-
-    if(COVERAGE)
-        target_compile_options(callstacklogger_${variant} PRIVATE --coverage)
-        target_compile_options(traced_test_program_${variant} PRIVATE --coverage)
-        target_link_options(traced_test_program_${variant} PRIVATE --coverage)
-    endif()
 endfunction()
 
 cslg_add_flag_variant(log_addr traced_program.cpp LOG_ADDR)
@@ -194,11 +157,6 @@ if(LOG_NOT_DEMANGLED)
 endif()
 if(LOG_ELAPSED)
     target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_ELAPSED)
-endif()
-
-if(COVERAGE)
-    target_compile_options(integration_tests PRIVATE --coverage)
-    target_link_options(integration_tests PRIVATE --coverage)
 endif()
 
 add_test(NAME integration_tests COMMAND integration_tests)

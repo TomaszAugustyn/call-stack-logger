@@ -21,9 +21,4 @@ target_compile_features(unit_tests PRIVATE cxx_std_17)
 target_link_libraries(unit_tests gtest_main)
 cslg_apply_sanitizers(unit_tests)
 
-if(COVERAGE)
-    target_compile_options(unit_tests PRIVATE --coverage)
-    target_link_options(unit_tests PRIVATE --coverage)
-endif()
-
 add_test(NAME unit_tests COMMAND unit_tests)

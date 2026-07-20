@@ -31,9 +31,11 @@
 // clang-format off
 #ifndef DISABLE_INSTRUMENTATION
 
-// Maximum tracked call depth for the frame resolution stack. Each entry is 1 byte (bool).
-// If call depth exceeds this limit, an overflow counter prevents stack desynchronization.
-// This value can be increased if needed — the memory cost is MAX_TRACE_DEPTH bytes per thread.
+// Maximum tracked call depth for the frame resolution stack. Each entry is 1 byte (bool);
+// with LOG_ELAPSED, two parallel per-frame arrays (time_point + off_t, 16 bytes) join it,
+// so the per-thread cost is MAX_TRACE_DEPTH bytes without LOG_ELAPSED and ~17x that
+// (~34 KB at 2048) with it. If call depth exceeds this limit, an overflow counter
+// prevents stack desynchronization. The value can be increased if needed.
 static constexpr int MAX_TRACE_DEPTH = 2048;
 
 // Per-thread RAII wrapper around the thread's FILE*. On thread exit, the destructor

@@ -167,22 +167,24 @@ bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
             return nullptr;
         }
         ensure_actual_executable(_info);
-        auto newBfd = std::make_unique<storedBfd>(bfd_openr(_info.dli_fname, nullptr), &bfd_close);
-        if (!newBfd || !newBfd->abfd) {
+        // Stack local (moved into the map on success) — no reason to heap-allocate
+        // a temporary that is unconditionally consumed or discarded in this scope.
+        storedBfd newBfd(bfd_openr(_info.dli_fname, nullptr), &bfd_close);
+        if (!newBfd.abfd) {
             bfd_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
-        if (!bfd_check_format(newBfd->abfd.get(), bfd_object)) {
+        if (!bfd_check_format(newBfd.abfd.get(), bfd_object)) {
             bfd_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
-        long storageNeeded = bfd_get_symtab_upper_bound(newBfd->abfd.get());
+        long storageNeeded = bfd_get_symtab_upper_bound(newBfd.abfd.get());
         if (storageNeeded < 0) {
             bfd_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
-        newBfd->symbols.reset(reinterpret_cast<asymbol**>(new char[static_cast<size_t>(storageNeeded)]));
-        if (bfd_canonicalize_symtab(newBfd->abfd.get(), newBfd->symbols.get()) < 0) {
+        newBfd.symbols.reset(reinterpret_cast<asymbol**>(new char[static_cast<size_t>(storageNeeded)]));
+        if (bfd_canonicalize_symtab(newBfd.abfd.get(), newBfd.symbols.get()) < 0) {
             // Canonicalization failed (malformed symbol table): the buffer contents
             // are undefined and bfd_find_nearest_line() would chase garbage pointers.
             // Treat it like any other unloadable object.
@@ -190,8 +192,8 @@ bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
             return nullptr;
         }
 
-        newBfd->offset = reinterpret_cast<intptr_t>(_info.dli_fbase);
-        it = bfds().emplace(_info.dli_fbase, std::move(*newBfd)).first;
+        newBfd.offset = reinterpret_cast<intptr_t>(_info.dli_fbase);
+        it = bfds().emplace(_info.dli_fbase, std::move(newBfd)).first;
     }
     return &it->second;
 }

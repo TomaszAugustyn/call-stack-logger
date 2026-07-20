@@ -13,6 +13,15 @@ project(call-stack-logger)
 option(BUILD_TESTS "Build unit and integration tests" OFF)
 option(COVERAGE "Enable code coverage (requires GCC)" OFF)
 
+# Output-content flags (consumed in src/CMakeLists.txt as PUBLIC compile
+# definitions on the library) and the instrumentation kill-switch. Declared
+# here as first-class options so they show up in ccmake / cmake-gui alongside
+# the rest, matching the README's CMake-options table — behavior with plain
+# -D<flag>=ON on the command line is unchanged.
+option(LOG_ADDR "Include callee addresses in trace output" OFF)
+option(LOG_NOT_DEMANGLED "Log functions even when demangling fails" OFF)
+option(DISABLE_INSTRUMENTATION "Compile without any instrumentation hooks" OFF)
+
 # Opt-in per-function duration tracking. When ON, every instrumented function's
 # exit patches the in-place "[  pending ]" placeholder on its enter line with the
 # actual elapsed duration (auto-scaled SI units), using a second non-O_APPEND fd
@@ -98,6 +107,11 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -Wextra")
 # rejects with a fatal "Unexpected negative count" error — a nondeterministic
 # coverage-job failure. Atomic updates remove the race at the source rather than
 # relying on scheduling luck.
+#
+# Appending to CMAKE_CXX_FLAGS is sufficient for EVERY target in the tree:
+# CMake passes the language flags to the compiler driver on the link line too,
+# so --coverage reaches both compilation and linking without any per-target
+# target_compile_options/target_link_options in the test CMake files.
 if(COVERAGE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -fprofile-update=atomic")
 endif()
