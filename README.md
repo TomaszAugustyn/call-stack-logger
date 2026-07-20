@@ -50,6 +50,8 @@ mkdir build && cd build
 cmake ..
 # or to build with Clang instead of GCC
 cmake -DCMAKE_CXX_COMPILER=clang++ ..
+# or to log the execution time of each function entry
+cmake -DLOG_ELAPSED=ON ..
 # or for extended logging you can play with these flags
 cmake -DLOG_ADDR=ON -DLOG_NOT_DEMANGLED=ON ..
 # or to compile your application with disabled instrumentation (no logging)
@@ -74,10 +76,10 @@ Both GCC and Clang use `-finstrument-functions` for user code and produce identi
 output. The `callstacklogger` library itself is compiled without instrumentation flags (all its
 functions have the `NO_INSTRUMENT` attribute). Standard library exclusion differs by compiler:
 
-| | GCC | Clang |
-|---|-----|-------|
-| **Std library exclusion** | Compile-time (`-finstrument-functions-exclude-file-list`) | Runtime (mangled name filter in `resolve_function_name()`) |
-| **Exit hooks on exception unwind** | Emitted — enter/exit stay paired | **Not emitted** (known limitation, see below) |
+|                                    | GCC                                                       | Clang                                                      |
+| ---------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------- |
+| **Std library exclusion**          | Compile-time (`-finstrument-functions-exclude-file-list`) | Runtime (mangled name filter in `resolve_function_name()`) |
+| **Exit hooks on exception unwind** | Emitted — enter/exit stay paired                          | **Not emitted** (known limitation, see below)              |
 
 GCC auto-discovers std library header paths and excludes them at compile time. Clang does
 not support the exclude-file-list flag, so std library functions are filtered at runtime by
@@ -200,9 +202,9 @@ The residual ~2 % is mostly inlined helpers where the compiler dropped line info
 
 ### Available CMake targets ###
 
-| Target | What it adds to your executable |
-|--------|----------------------------------|
-| `callstacklogger::instrumented` | `-finstrument-functions` (with GCC's exclude-file-list), `-g`, `-rdynamic`, library, `-ldl -lbfd`, include path. **Use this for per-call tracing (the common case).** |
+| Target                             | What it adds to your executable                                                                                                                                                                                      |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `callstacklogger::instrumented`    | `-finstrument-functions` (with GCC's exclude-file-list), `-g`, `-rdynamic`, library, `-ldl -lbfd`, include path. **Use this for per-call tracing (the common case).**                                                |
 | `callstacklogger::callstacklogger` | Library only: `-g`, `-rdynamic`, `-ldl -lbfd`, include path — no `-finstrument-functions`. Use this when you want just the on-demand [`get_call_stack()`](#on-demand-call-stack-capture) API without per-call hooks. |
 
 ### Disabling tracing in a build ###
@@ -229,20 +231,20 @@ the consumers you choose.
 
 ### CMake Options ###
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `LOG_ADDR` | `OFF` | Include function addresses in trace output |
-| `LOG_NOT_DEMANGLED` | `OFF` | Log functions even when demangling fails |
-| `LOG_ELAPSED` | `OFF` | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed). |
-| `DISABLE_INSTRUMENTATION` | `OFF` | Compile without any instrumentation hooks |
-| `BUILD_TESTS` | `OFF` | Build unit and integration tests (fetches Google Test) |
-| `COVERAGE` | `OFF` | Enable code coverage via GCC `--coverage` flag |
-| `SANITIZE` | (empty) | Enable a sanitizer for all cslg-owned targets: `address`, `undefined`, `address+undefined`, or `thread`. See [Sanitizers](#bug-sanitizers). |
+| Option                    | Default | Description                                                                                                                                 |
+| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LOG_ADDR`                | `OFF`   | Include function addresses in trace output                                                                                                  |
+| `LOG_NOT_DEMANGLED`       | `OFF`   | Log functions even when demangling fails                                                                                                    |
+| `LOG_ELAPSED`             | `OFF`   | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed).                        |
+| `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks                                                                                                   |
+| `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test)                                                                                      |
+| `COVERAGE`                | `OFF`   | Enable code coverage via GCC `--coverage` flag                                                                                              |
+| `SANITIZE`                | (empty) | Enable a sanitizer for all cslg-owned targets: `address`, `undefined`, `address+undefined`, or `thread`. See [Sanitizers](#bug-sanitizers). |
 
 ### Environment Variables ###
 
-| Variable | Default | Description |
-|----------|---------|-------------|
+| Variable           | Default     | Description                                                                                                                                  |
+| ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CSLG_OUTPUT_FILE` | `trace.out` | Path to the trace output file for the main thread. Worker threads append `_tid_<gettid>` to this path (e.g., `/tmp/my_trace.out_tid_12345`). |
 
 Example:
@@ -292,13 +294,13 @@ Combined with `LOG_ADDR=ON` the address column simply follows the duration:
 
 ### Format ###
 
-| Range | Example | Notes |
-|---|---|---|
-| `< 1 µs`   | `[ 123.000ns]` | `ns` unit |
-| `< 1 ms`   | `[ 123.456us]` | `us` unit |
-| `< 1 s`    | `[ 123.456ms]` | `ms` unit |
+| Range      | Example        | Notes                                     |
+| ---------- | -------------- | ----------------------------------------- |
+| `< 1 µs`   | `[ 123.000ns]` | `ns` unit                                 |
+| `< 1 ms`   | `[ 123.456us]` | `us` unit                                 |
+| `< 1 s`    | `[ 123.456ms]` | `ms` unit                                 |
 | `< 1000 s` | `[   1.234s ]` | `s ` unit (trailing space pads the field) |
-| `≥ 1000 s` | `[  >999.9s ]` | saturation sentinel |
+| `≥ 1000 s` | `[  >999.9s ]` | saturation sentinel                       |
 
 Auto-scales to keep the output readable. The placeholder while a function is
 still executing is `[  pending ]`.
