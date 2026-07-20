@@ -72,7 +72,7 @@ public:
         NO_INSTRUMENT storedBfd(bfd* _abfd, deleter_t* _del) : abfd(_abfd, _del) {}
         // Explicit move operations and destructor with NO_INSTRUMENT prevent the
         // compiler-generated special members from being instrumented during static
-        // cleanup of s_bfds. Declaring a destructor suppresses implicit move
+        // cleanup of the bfds() map. Declaring a destructor suppresses implicit move
         // generation in C++, so move operations must be explicitly defaulted.
         NO_INSTRUMENT storedBfd(storedBfd&&) = default;
         NO_INSTRUMENT storedBfd& operator=(storedBfd&&) = default;
@@ -81,7 +81,7 @@ public:
 
     /// Returns the cached (or freshly loaded) storedBfd for the object containing
     /// `_info`, or nullptr when the object file cannot be opened/parsed. Pointer
-    /// stays valid for the process lifetime (s_bfds entries are never erased).
+    /// stays valid for the process lifetime (bfds() entries are never erased).
     NO_INSTRUMENT
     static storedBfd* ensure_bfd_loaded(Dl_info& _info);
 
@@ -102,7 +102,7 @@ public:
             void* callee_address, void* caller_address);
 
 private:
-    /// Returns true when s_name_cache already records this callee as filtered
+    /// Returns true when name_cache() already records this callee as filtered
     /// (cached nullopt: Clang std-library filter, internal-linkage functions
     /// with no dladdr symbol, failed demangling). Used by resolve() to skip
     /// the _Unwind_Backtrace walk for callees that can never produce a trace
@@ -135,20 +135,48 @@ private:
     NO_INSTRUMENT
     static void ensure_actual_executable(Dl_info& symbol_info);
 
-    inline static std::map<void*, storedBfd> s_bfds = {};
-    // Negative cache: base addresses whose object file failed to load/parse.
-    // Without it, every traced call whose callee or caller lands in an
-    // unloadable object (deleted .so, unreadable file, unparsable format)
-    // would re-run bfd_openr + bfd_check_format — file I/O per call. Bounded
-    // by the number of distinct loaded objects. Protected by s_bfd_mutex.
-    inline static std::unordered_set<void*> s_bfd_load_failed = {};
+    // Static-state accessors. Function-local statics rather than namespace-scope
+    // inline statics, deliberately: containers and std::string require DYNAMIC
+    // initialization, and initialization order across translation units is
+    // unspecified. An instrumented static constructor in a user TU that runs
+    // after trace_begin() (so trace_ready is already true) but before this TU's
+    // dynamic initializers would reach resolve() through unconstructed maps —
+    // UB. Function-local statics are constructed on first use (thread-safely,
+    // per C++11 magic statics), closing that window. Same rationale as the
+    // g_trace() singleton in trace.cpp. The per-call cost is one
+    // already-initialized guard check on paths that already take s_bfd_mutex
+    // and do hash lookups — negligible, and none of these accessors run while
+    // the unwinder walks the stack (resolve_no_unwind() and is_cached_filtered()
+    // either run after the unwind or return before it), so the frame-6 constant
+    // is unaffected.
+    //
+    // s_bfd_mutex and s_bfd_initialized stay as plain statics below: std::mutex
+    // has a constexpr constructor and bool is zero-initialized, so both are
+    // constant-initialized before any code runs — no order hazard.
+    NO_INSTRUMENT
+    static std::map<void*, storedBfd>& bfds() {
+        static std::map<void*, storedBfd> instance;
+        return instance;
+    }
+
+    /// Negative cache: base addresses whose object file failed to load/parse.
+    /// Without it, every traced call whose callee or caller lands in an
+    /// unloadable object (deleted .so, unreadable file, unparsable format)
+    /// would re-run bfd_openr + bfd_check_format — file I/O per call. Bounded
+    /// by the number of distinct loaded objects. Protected by s_bfd_mutex.
+    NO_INSTRUMENT
+    static std::unordered_set<void*>& bfd_load_failed() {
+        static std::unordered_set<void*> instance;
+        return instance;
+    }
+
     // Memoization caches for fully-resolved per-address results, consulted in
-    // resolve_no_unwind() before the BFD machinery. s_bfds caches the PARSED
+    // resolve_no_unwind() before the BFD machinery. bfds() caches the PARSED
     // OBJECT FILES, but each resolve still cost dladdr + a section walk +
     // bfd_find_nearest_line (a DWARF line-table walk) + __cxa_demangle — per
     // call, repeated in full every time the same function was called again.
     // Memoizing by exact address turns repeat resolutions into one hash lookup.
-    // A cached nullopt in s_name_cache is meaningful: it records "this callee
+    // A cached nullopt in name_cache() is meaningful: it records "this callee
     // is filtered / not loggable" (e.g. Clang's std-library filter), making the
     // filter itself a hash hit on repeat calls.
     //
@@ -159,13 +187,32 @@ private:
     // of KB); worst realistic case for very large binaries: a few hundred
     // thousand entries (tens of MB). Staleness caveat: dlclose + dlopen that
     // reuses an address keeps serving the old entry — the same accepted
-    // trade-off as s_bfds. Protected by s_bfd_mutex.
-    inline static std::unordered_map<void*, std::optional<std::string>> s_name_cache = {};
-    inline static std::unordered_map<void*, std::pair<std::string, std::optional<unsigned int>>>
-            s_location_cache = {};
+    // trade-off as bfds(). Protected by s_bfd_mutex.
+    NO_INSTRUMENT
+    static std::unordered_map<void*, std::optional<std::string>>& name_cache() {
+        static std::unordered_map<void*, std::optional<std::string>> instance;
+        return instance;
+    }
+
+    NO_INSTRUMENT
+    static std::unordered_map<void*, std::pair<std::string, std::optional<unsigned int>>>&
+    location_cache() {
+        static std::unordered_map<void*, std::pair<std::string, std::optional<unsigned int>>>
+                instance;
+        return instance;
+    }
+
+    /// argv[0] as read from /proc/self/cmdline. Lazily initialized on first
+    /// resolve (programs that never resolve don't read the file at all).
+    NO_INSTRUMENT
+    static const std::string& argv0() {
+        static const std::string instance = get_argv0();
+        return instance;
+    }
+
     inline static bool s_bfd_initialized = false;
-    inline static std::string s_argv0 = get_argv0();
-    // Protects s_bfds, s_bfd_initialized, and BFD library calls which are not thread-safe.
+    // Protects bfds(), s_bfd_initialized, the memoization caches, and BFD
+    // library calls which are not thread-safe.
     inline static std::mutex s_bfd_mutex;
 };
 

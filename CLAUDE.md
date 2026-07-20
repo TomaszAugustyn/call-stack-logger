@@ -57,7 +57,7 @@ compilers, std-library instantiations on Clang — skip the per-call
 `_Unwind_Backtrace` walk entirely; the helper returns before the unwind runs, so
 it cannot shift the frame-6 constant. Cache growth is bounded by the program text (distinct instrumented
 functions + call sites), not by runtime input; `dlclose`+`dlopen` address reuse
-serves stale entries — the same accepted trade-off as the `s_bfds` object cache.
+serves stale entries — the same accepted trade-off as the `bfds()` object cache.
 
 ### Stack Unwinding for Accurate Caller Location
 
@@ -440,7 +440,12 @@ Declares the `bfdResolver` struct with:
 - Static methods: `ensure_bfd_loaded()`, `resolve()`, `resolve_function_name()`,
   `resolve_filename_and_line()`, `check_bfd_initialized()`, `get_argv0()`,
   `ensure_actual_executable()`
-- Static state: `s_bfds` (map cache), `s_bfd_initialized`, `s_argv0`
+- Static state behind lazily-initialized function-local-static accessors —
+  `bfds()` (object-file cache), `bfd_load_failed()` (negative cache), `name_cache()` /
+  `location_cache()` (memoization), `argv0()` — so an instrumented static constructor
+  in a user TU can never reach them before their dynamic initialization has run
+  (same rationale as `g_trace()` in `trace.cpp`). Only the constant-initialized
+  `s_bfd_mutex` (constexpr ctor) and `s_bfd_initialized` (bool) remain plain statics.
 - Free functions: `get_call_stack()`, `resolve()`
 
 **Public-API re-entrancy guard (load-bearing):** both free functions hold the

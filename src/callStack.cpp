@@ -158,27 +158,27 @@ bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
     // Load the corresponding bfd file (from file or map). Single map lookup on
     // the hot path: find() locates the cached entry, and on a miss the emplace's
     // iterator is reused for the return — no separate count()/at() round trips.
-    auto it = s_bfds.find(_info.dli_fbase);
-    if (it == s_bfds.end()) {
+    auto it = bfds().find(_info.dli_fbase);
+    if (it == bfds().end()) {
         // Negative cache: a previous load attempt for this object already failed.
         // Don't retry bfd_openr on every traced call — the failure is sticky for
-        // the process lifetime (matching s_bfds, which is never invalidated).
-        if (s_bfd_load_failed.count(_info.dli_fbase) != 0) {
+        // the process lifetime (matching bfds(), which is never invalidated).
+        if (bfd_load_failed().count(_info.dli_fbase) != 0) {
             return nullptr;
         }
         ensure_actual_executable(_info);
         auto newBfd = std::make_unique<storedBfd>(bfd_openr(_info.dli_fname, nullptr), &bfd_close);
         if (!newBfd || !newBfd->abfd) {
-            s_bfd_load_failed.insert(_info.dli_fbase);
+            bfd_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
         if (!bfd_check_format(newBfd->abfd.get(), bfd_object)) {
-            s_bfd_load_failed.insert(_info.dli_fbase);
+            bfd_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
         long storageNeeded = bfd_get_symtab_upper_bound(newBfd->abfd.get());
         if (storageNeeded < 0) {
-            s_bfd_load_failed.insert(_info.dli_fbase);
+            bfd_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
         newBfd->symbols.reset(reinterpret_cast<asymbol**>(new char[static_cast<size_t>(storageNeeded)]));
@@ -186,12 +186,12 @@ bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
             // Canonicalization failed (malformed symbol table): the buffer contents
             // are undefined and bfd_find_nearest_line() would chase garbage pointers.
             // Treat it like any other unloadable object.
-            s_bfd_load_failed.insert(_info.dli_fbase);
+            bfd_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
 
         newBfd->offset = reinterpret_cast<intptr_t>(_info.dli_fbase);
-        it = s_bfds.emplace(_info.dli_fbase, std::move(*newBfd)).first;
+        it = bfds().emplace(_info.dli_fbase, std::move(*newBfd)).first;
     }
     return &it->second;
 }
@@ -214,7 +214,7 @@ std::string bfdResolver::get_argv0() {
 void bfdResolver::ensure_actual_executable(Dl_info& symbol_info) {
     // Mutates symbol_info.dli_fname to be filename to open and returns filename
     // to display
-    if (symbol_info.dli_fname == s_argv0) {
+    if (symbol_info.dli_fname == argv0()) {
         // dladdr returns argv[0] in dli_fname for symbols contained in
         // the main executable, which is not a valid path if the
         // executable was found by a search of the PATH environment
@@ -345,8 +345,8 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
         // Lock covers ALL BFD operations: initialization, loading, symbol/section
         // iteration, and bfd_find_nearest_line(). BFD library is not thread-safe —
         // concurrent calls on the same bfd* object corrupt internal state. This lock
-        // serializes all BFD access and also protects the s_name_cache /
-        // s_location_cache memoization maps. Scoped so pretty_time() below — which
+        // serializes all BFD access and also protects the name_cache() /
+        // location_cache() memoization maps. Scoped so pretty_time() below — which
         // needs no BFD state — runs after the lock is released instead of extending
         // the global serialization window every traced call shares.
         std::lock_guard<std::mutex> lock(s_bfd_mutex);
@@ -356,9 +356,9 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
         // A cached nullopt means "filtered / not loggable" and is honored as such.
         // The cached value is read in place: no optional<string> copy on a hit, and
         // on a miss the freshly resolved value moves straight into the map.
-        auto name_it = s_name_cache.find(callee_address);
-        if (name_it == s_name_cache.end()) {
-            name_it = s_name_cache.emplace(callee_address,
+        auto name_it = name_cache().find(callee_address);
+        if (name_it == name_cache().end()) {
+            name_it = name_cache().emplace(callee_address,
                                            resolve_function_name(callee_address)).first;
         }
         const std::optional<std::string>& maybe_func_name = name_it->second;
@@ -368,9 +368,9 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
         resolved.callee_function_name = *maybe_func_name;
 
         // Memoized caller-location resolution (same call site → same file:line).
-        auto loc_it = s_location_cache.find(caller_address);
-        if (loc_it == s_location_cache.end()) {
-            loc_it = s_location_cache.emplace(caller_address,
+        auto loc_it = location_cache().find(caller_address);
+        if (loc_it == location_cache().end()) {
+            loc_it = location_cache().emplace(caller_address,
                                               resolve_filename_and_line(caller_address)).first;
         }
         resolved.caller_filename = loc_it->second.first;
@@ -387,8 +387,8 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
 
 bool bfdResolver::is_cached_filtered(void* callee_address) {
     std::lock_guard<std::mutex> lock(s_bfd_mutex);
-    auto it = s_name_cache.find(callee_address);
-    return it != s_name_cache.end() && !it->second;
+    auto it = name_cache().find(callee_address);
+    return it != name_cache().end() && !it->second;
 }
 
 std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* caller_address) {

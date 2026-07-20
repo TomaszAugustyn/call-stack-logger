@@ -375,7 +375,7 @@ FILE* get_thread_fp() {
 } // namespace
 
 // Flushes per-thread stdio buffers and signals shutdown. Called via atexit() so it
-// runs BEFORE static destructors (like s_bfds). Idempotent via g.shutdown_started CAS.
+// runs BEFORE static destructors (like the bfds() map). Idempotent via g.shutdown_started CAS.
 //
 // Shutdown race handling. A worker thread may be mid-fprintf (or mid-pwrite) when
 // this runs. To bound the degraded mode to what the design promises — "EBADF at
@@ -534,7 +534,7 @@ void trace_begin() {
     open_this_thread_file(t_state);
 
     // Register shutdown via atexit so it runs before static destructors.
-    // Critical for Clang where static destructors (like s_bfds map) may be
+    // Critical for Clang where static destructors (like the bfds() map) may be
     // instrumented — shutdown must close trace file(s) before those destructors fire.
     std::atexit(trace_shutdown);
 
