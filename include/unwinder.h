@@ -11,6 +11,7 @@
 
 #include <cstdlib>
 #include <limits>
+#include <sys/types.h> // ssize_t — POSIX type, not guaranteed by <cstdlib> (glibc leaks it, musl does not)
 #include <unwind.h>
 
 namespace instrumentation {
