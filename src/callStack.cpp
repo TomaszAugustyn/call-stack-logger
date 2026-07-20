@@ -287,6 +287,18 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
         if (func == nullptr) {
             return std::nullopt;
         }
+#ifdef __clang__
+        // Re-apply the std-library filter to the BFD-derived name: the dladdr
+        // check above only sees dli_sname, which can be null (no dynamic symbol
+        // — e.g. internal-linkage instantiations reached under LOG_NOT_DEMANGLED)
+        // or a different, nearest-exported symbol than the precise symtab entry
+        // BFD finds here. Either way a std-library frame could slip past the
+        // first check and get logged. Cold path only: this runs once per
+        // address, after which the cached nullopt makes repeats a hash hit.
+        if (is_std_library_symbol(func)) {
+            return std::nullopt;
+        }
+#endif
         auto demangled = demangle_cxa(func);
         return demangled.empty() ? std::nullopt : std::make_optional(demangled);
     }
