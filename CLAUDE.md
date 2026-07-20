@@ -255,6 +255,15 @@ spliced immediately after `"[<timestamp>] "`, before the optional
 `addr:` column and the tree, which keeps the offset invariant under
 any combination of `LOG_ADDR` / `LOG_NOT_DEMANGLED`.
 
+**Single-writer assumption (documented limitation).** The cursor makes each
+per-thread file single-writer by design: two *processes* pointed at the same
+`CSLG_OUTPUT_FILE` with LOG_ELAPSED would each track a cursor from their own
+startup EOF, and the other process's appends shift the real offsets — pwrite
+would splice durations into foreign lines. Concurrent threads are fine
+(separate per-thread files), sequential runs are fine (cursor re-seeded per
+run). Documented in README's "Per-function timing" Cost section; the
+multi-process analog of the unsupported `fork()`.
+
 **Cursor integrity on write failure.** Each line goes out as one
 `fwrite` of the newline-terminated string, and the returned byte count
 is checked (the `'\n'` is the line-buffered flush point, so ENOSPC/EIO
