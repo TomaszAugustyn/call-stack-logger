@@ -145,6 +145,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         durationFormat.h
         format.h
         prettyTime.h
+        stdSymbolFilter.h
         traceFilePath.h
         types.h
         unwinder.h

@@ -15,9 +15,11 @@
 
 #include "prettyTime.h"
 #include <chrono>
+#include <ctime>
 #include <gtest/gtest.h>
 #include <regex>
 #include <string>
+#include <unistd.h>
 
 // pretty_time() returns a string matching "DD-MM-YYYY HH:MM:SS.mmm" format.
 TEST(PrettyTimeTest, MatchesExpectedFormat) {
@@ -72,6 +74,42 @@ TEST(PrettyTimeTest, MillisecondPortion) {
     for (char c : ms_str) {
         EXPECT_TRUE(std::isdigit(c)) << "Non-digit character in milliseconds: " << c;
     }
+}
+
+// pretty_time() caches its strftime prefix per thread and re-renders it only
+// when the second rolls over. This test crosses a real second boundary and
+// verifies the cache invalidates — a stale cache would keep serving the
+// previous second's "HH:MM:SS" prefix forever. Costs at most ~1 s of waiting.
+TEST(PrettyTimeTest, PrefixCacheRollsOverAcrossSeconds) {
+    // Populate the cache in the current second.
+    (void)utils::pretty_time();
+
+    // Wait for the wall clock to enter the next second (≤ ~1 s).
+    const std::time_t start = std::time(nullptr);
+    while (std::time(nullptr) == start) {
+        usleep(10'000);
+    }
+
+    // Sample pretty_time() bracketed by two identical time() reads, so the
+    // expected prefix is unambiguous even right at a second boundary.
+    std::time_t before = 0;
+    std::time_t after = -1;
+    std::string ts;
+    do {
+        before = std::time(nullptr);
+        ts = utils::pretty_time();
+        after = std::time(nullptr);
+    } while (before != after);
+
+    std::tm tm_buf{};
+    localtime_r(&before, &tm_buf);
+    char expected[64];
+    const std::size_t len
+            = strftime(expected, sizeof(expected), LOGGER_PRETTY_TIME_FORMAT, &tm_buf);
+    ASSERT_GT(len, 0u);
+    EXPECT_EQ(ts.substr(0, len), expected)
+            << "pretty_time() prefix did not roll over to the new second — "
+               "the per-thread strftime cache is serving a stale prefix.";
 }
 
 // to_ms() correctly converts a known time_point to milliseconds.

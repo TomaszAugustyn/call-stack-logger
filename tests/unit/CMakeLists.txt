@@ -13,6 +13,7 @@ add_executable(unit_tests
     test_duration_format.cpp
     test_format.cpp
     test_pretty_time.cpp
+    test_std_symbol_filter.cpp
     test_trace_file_path.cpp
 )
 

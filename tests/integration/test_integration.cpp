@@ -52,6 +52,12 @@
 #ifndef STRIPPED_CALLER_PROGRAM_PATH
     #error "STRIPPED_CALLER_PROGRAM_PATH must be defined by CMake"
 #endif
+#ifndef OVERFLOW_DEPTH_PROGRAM_PATH
+    #error "OVERFLOW_DEPTH_PROGRAM_PATH must be defined by CMake"
+#endif
+#ifndef EXCEPTION_TRACED_PROGRAM_PATH
+    #error "EXCEPTION_TRACED_PROGRAM_PATH must be defined by CMake"
+#endif
 #ifndef TRACED_PROGRAM_LOG_ELAPSED_PATH
     #error "TRACED_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
 #endif
@@ -720,6 +726,122 @@ TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {
     // symbol, no line info in the stripped .so — e.g. "<bfd_error>:???").
     EXPECT_NE(content.find("traced_callback"), std::string::npos)
             << "traced_callback entry missing from trace. Trace:\n" << content;
+}
+
+// ============================================================================
+// Deep-recursion overflow test — call depth beyond MAX_TRACE_DEPTH (2048).
+// Frames past the limit have no slot in the per-thread frame-resolution stack
+// and are tracked only by the overflow counter; the exit hook must drain that
+// counter before popping real slots, or the depth counter desynchronizes for
+// the rest of the thread. The driver recurses 3000 deep and then calls a
+// marker function, which must trace at the same depth as the first recursion
+// frame (both are direct children of main).
+// ============================================================================
+
+TEST(OverflowDepthTest, DepthBeyondMaxStaysConsistent) {
+    char tmp_path[] = "/tmp/cslg_overflow_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(tmp_path) + "\" \""
+                    + OVERFLOW_DEPTH_PROGRAM_PATH + "\" > /dev/null 2>&1";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "overflow_depth_program failed, exit=" << ret;
+
+    std::string content = read_file(tmp_path);
+    unlink(tmp_path);
+    std::vector<std::string> lines = split_lines(content);
+
+    // Every enter writes exactly one timestamped line, even past the overflow
+    // limit (deep lines are clamped by format()'s buffer and lose their tail,
+    // but the timestamp prefix always survives). Expected:
+    // main + 3000 recursion frames + post_overflow_marker = 3002.
+    std::regex ts_prefix(R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\])");
+    int entry_lines = 0;
+    for (const auto& line : lines) {
+        if (std::regex_search(line, ts_prefix)) ++entry_lines;
+    }
+    EXPECT_EQ(entry_lines, 3002)
+            << "Expected one trace line per enter (main + 3000 recursion + marker).";
+
+    // Depth resync proof: the marker (traced AFTER all 3000 exits, ~950 of
+    // which drained the overflow counter) must sit at the same depth as the
+    // first recursion frame — both are direct children of main.
+    int first_recursion_depth = -1;
+    int marker_depth = -1;
+    for (const auto& line : lines) {
+        if (first_recursion_depth < 0 && line.find("deep_recursion") != std::string::npos) {
+            first_recursion_depth = count_indentation_depth(line);
+        }
+        if (line.find("post_overflow_marker") != std::string::npos) {
+            marker_depth = count_indentation_depth(line);
+        }
+    }
+    ASSERT_GE(first_recursion_depth, 0) << "first deep_recursion line not found";
+    ASSERT_GE(marker_depth, 0) << "post_overflow_marker line not found";
+    EXPECT_EQ(marker_depth, first_recursion_depth)
+            << "post_overflow_marker traced at depth " << marker_depth
+            << " but the first deep_recursion frame was at depth "
+            << first_recursion_depth
+            << " — the overflow counter desynchronized the depth accounting.";
+}
+
+// ============================================================================
+// Exception-unwind pairing test (GCC only). GCC's -finstrument-functions
+// emits __cyg_profile_func_exit on the exceptional path too (as a cleanup),
+// so a throw through instrumented frames leaves the depth counter intact.
+// Clang skips those exit hooks (documented limitation — README
+// "Compiler-specific instrumentation"), so the test is compiled out there.
+// ============================================================================
+
+TEST(ExceptionUnwindTest, DepthConsistentAfterCatchOnGcc) {
+#ifndef CSLG_COMPILER_IS_GNU
+    GTEST_SKIP() << "Skipped: Clang does not emit exit hooks on the "
+                    "exception-unwind path (documented limitation).";
+#else
+    char tmp_path[] = "/tmp/cslg_exception_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(tmp_path) + "\" \""
+                    + EXCEPTION_TRACED_PROGRAM_PATH + "\" > /dev/null 2>&1";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "exception_traced_program failed, exit=" << ret;
+
+    std::string content = read_file(tmp_path);
+    unlink(tmp_path);
+    std::vector<std::string> lines = split_lines(content);
+
+    // The frames unwound by the throw were still ENTERED normally.
+    EXPECT_NE(content.find("exception_thrower"), std::string::npos)
+            << "exception_thrower entry missing. Trace:\n" << content;
+    EXPECT_NE(content.find("exception_mid"), std::string::npos)
+            << "exception_mid entry missing";
+
+    // Pairing proof: after the catch, the marker must trace at the same depth
+    // as exception_catcher (both are direct children of main). If the unwound
+    // frames' exits had been skipped, the stale slots would shift the marker
+    // two levels deeper.
+    int catcher_depth = -1;
+    int marker_depth = -1;
+    for (const auto& line : lines) {
+        if (line.find("exception_catcher") != std::string::npos) {
+            catcher_depth = count_indentation_depth(line);
+        }
+        if (line.find("post_catch_marker") != std::string::npos) {
+            marker_depth = count_indentation_depth(line);
+        }
+    }
+    ASSERT_GE(catcher_depth, 0) << "exception_catcher line not found";
+    ASSERT_GE(marker_depth, 0) << "post_catch_marker line not found";
+    EXPECT_EQ(marker_depth, catcher_depth)
+            << "post_catch_marker traced at depth " << marker_depth
+            << " but exception_catcher was at depth " << catcher_depth
+            << " — exit hooks on the unwind path did not fire (GCC pairing "
+               "guarantee regressed?).";
+#endif
 }
 
 // ============================================================================

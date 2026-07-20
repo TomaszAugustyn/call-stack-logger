@@ -64,6 +64,21 @@ target_compile_features(stripped_caller_program PRIVATE cxx_std_17)
 target_link_libraries(stripped_caller_program PRIVATE callstacklogger_instrumented stripped_caller)
 cslg_apply_sanitizers(stripped_caller_program)
 
+# Deep-recursion driver: recurses past MAX_TRACE_DEPTH (2048) so the overflow
+# counter in trace.cpp is exercised end-to-end (see OverflowDepthTest).
+add_executable(overflow_depth_program overflow_depth_program.cpp)
+target_compile_features(overflow_depth_program PRIVATE cxx_std_17)
+target_link_libraries(overflow_depth_program PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(overflow_depth_program)
+
+# Exception-unwind driver: throws through instrumented frames. Only GCC emits
+# exit hooks on the unwind path, so the matching test asserts under GCC only
+# (see ExceptionUnwindTest and the CSLG_COMPILER_IS_GNU definition below).
+add_executable(exception_traced_program exception_traced_program.cpp)
+target_compile_features(exception_traced_program PRIVATE cxx_std_17)
+target_link_libraries(exception_traced_program PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(exception_traced_program)
+
 # Multi-threaded traced test program. Exercises per-thread trace files by spawning
 # worker threads, each of which produces its own <base>_tid_<tid> file.
 find_package(Threads REQUIRED)
@@ -138,6 +153,8 @@ target_compile_definitions(integration_tests PRIVATE
     CALLSTACK_API_PROGRAM_PATH="$<TARGET_FILE:callstack_api_program>"
     CALLSTACK_API_PROGRAM_INSTRUMENTED_PATH="$<TARGET_FILE:callstack_api_program_instrumented>"
     STRIPPED_CALLER_PROGRAM_PATH="$<TARGET_FILE:stripped_caller_program>"
+    OVERFLOW_DEPTH_PROGRAM_PATH="$<TARGET_FILE:overflow_depth_program>"
+    EXCEPTION_TRACED_PROGRAM_PATH="$<TARGET_FILE:exception_traced_program>"
     TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
     TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH="$<TARGET_FILE:traced_test_program_log_not_demangled>"
     TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed>"
@@ -151,6 +168,11 @@ target_compile_definitions(integration_tests PRIVATE
 # to avoid false failures.
 if(LOG_ADDR)
     target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_ADDR)
+endif()
+# GCC emits __cyg_profile_func_exit on the exception-unwind path; Clang does not
+# (documented limitation). ExceptionUnwindTest asserts only when this is set.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_definitions(integration_tests PRIVATE CSLG_COMPILER_IS_GNU)
 endif()
 if(LOG_NOT_DEMANGLED)
     target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_NOT_DEMANGLED)

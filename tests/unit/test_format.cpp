@@ -125,6 +125,28 @@ TEST(FormatTest, LongFunctionNameHandled) {
     EXPECT_NE(result.find("[01-01-2025"), std::string::npos);
 }
 
+// A line that exceeds format()'s 2048-byte stack buffer must be clamped to the
+// buffer capacity — never overflow it, never produce garbage. With a 3000-char
+// name the tail snprintf truncates, and the clamp arithmetic
+// (`pos += remaining - 1`) must land the result at exactly buffer-size - 1
+// bytes with the fixed prefix intact.
+TEST(FormatTest, OversizedLineIsTruncatedSafely) {
+    std::string long_name(3000, 'X');
+    auto frame = make_frame(long_name);
+    std::string result = utils::format(frame, 1);
+
+    // Keep in sync with BUF_SIZE in include/format.h.
+    constexpr std::size_t BUF_SIZE = 2048;
+    EXPECT_EQ(result.size(), BUF_SIZE - 1)
+            << "Truncated line should fill the buffer to capacity - 1";
+    // Fixed prefix survives: "[<timestamp>] |_ " then name characters.
+    EXPECT_EQ(result.substr(0, 26), "[01-01-2025 12:00:00.000] ");
+    EXPECT_NE(result.find("|_ X"), std::string::npos);
+    // Everything after the tree prefix is name payload — the truncation point
+    // fell inside the 3000 X's, so the final byte must be one of them.
+    EXPECT_EQ(result.back(), 'X');
+}
+
 // Empty function name: valid edge case.
 TEST(FormatTest, EmptyFunctionName) {
     auto frame = make_frame("");

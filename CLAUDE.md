@@ -91,14 +91,16 @@ The project uses a **two-tier exclusion approach** depending on the compiler:
 paths using `${CMAKE_CXX_COMPILER} -xc++ -E -v -`, then passes them via
 `-finstrument-functions-exclude-file-list=<paths>`. The project's own instrumentation headers
 are also excluded: `callStack.h`, `unwinder.h`, `types.h`, `format.h`, `prettyTime.h`,
-`traceFilePath.h`, `durationFormat.h`.
+`stdSymbolFilter.h`, `traceFilePath.h`, `durationFormat.h`.
 With this approach, GCC never inserts instrumentation hooks into std library functions.
 
 **Clang (runtime exclusion):** Clang does not support `-finstrument-functions-exclude-file-list`.
 Instead, std library template instantiations compiled into the user's translation unit receive
 hooks and trigger `__cyg_profile_func_enter` at runtime. The function `is_std_library_symbol()`
-in `callStack.cpp` (compiled under `#ifdef __clang__`) checks the Itanium C++ ABI mangled name
-for known std library prefixes before expensive BFD resolution:
+in `include/stdSymbolFilter.h` (pure mangled-name parsing, compiled on both compilers so unit
+tests cover it everywhere, but consulted only under `#ifdef __clang__` in `callStack.cpp`)
+checks the Itanium C++ ABI mangled name for known std library prefixes before expensive BFD
+resolution:
 - `__cxa_*` — C++ ABI runtime functions
 - `_Z[N[cv]]St*` — `std::` functions and members
 - `_Z[N[cv]]S[absiod]*` — std substitutions (allocator, basic_string, string, etc.)
@@ -110,7 +112,10 @@ for known std library prefixes before expensive BFD resolution:
 Where `[cv]` = optional cv-qualifiers (K=const, V=volatile, r=restrict).
 
 This filter runs inside `resolve_function_name()` right after `dladdr()` and before BFD
-loading, so filtered functions avoid the expensive BFD symbol resolution entirely.
+loading, so filtered functions avoid the expensive BFD symbol resolution entirely. It is
+applied a second time to the symtab name returned by `bfd_find_nearest_line()` — `dli_sname`
+can be null (no dynamic symbol) or a different, nearest-exported symbol, so a std frame
+could otherwise slip past the first check (e.g. under `LOG_NOT_DEMANGLED`).
 
 ### The NO_INSTRUMENT Macro
 
@@ -404,6 +409,7 @@ call-stack-logger/
 |   |-- durationFormat.h        # utils::format_duration_12chars (LOG_ELAPSED helper)
 |   |-- format.h                # utils::format() - formats ResolvedFrame into string
 |   |-- prettyTime.h            # utils::pretty_time() + PRETTY_TIME_LENGTH constant
+|   |-- stdSymbolFilter.h       # is_std_library_symbol() — Clang runtime std filter
 |   |-- traceFilePath.h         # utils::resolve_base_trace_path + build_trace_filename
 |   |-- types.h                 # ResolvedFrame struct definition
 |   |-- unwinder.h              # FrameUnwinder template, Callback, unwind_nth_frame()
@@ -419,12 +425,15 @@ call-stack-logger/
 |   |   |-- test_duration_format.cpp # Tests for utils::format_duration_12chars()
 |   |   |-- test_format.cpp     # Tests for utils::format()
 |   |   |-- test_pretty_time.cpp # Tests for utils::pretty_time() and to_ms()
+|   |   |-- test_std_symbol_filter.cpp # Tests for is_std_library_symbol() mangled-name parsing
 |   |   |-- test_trace_file_path.cpp # Tests for resolve_base_trace_path + build_trace_filename
 |   |-- integration/
 |       |-- CMakeLists.txt      # Traced programs + integration test runner
 |       |-- traced_program.cpp  # Instrumented single-threaded program for testing
 |       |-- threaded_traced_program.cpp # Instrumented multi-threaded program (per-thread files)
 |       |-- log_elapsed_traced_program.cpp # Instrumented program with usleep() sentinels for LOG_ELAPSED tests
+|       |-- overflow_depth_program.cpp # Instrumented; recursion past MAX_TRACE_DEPTH (overflow counter)
+|       |-- exception_traced_program.cpp # Instrumented; throw/catch through instrumented frames (GCC pairing)
 |       |-- callstack_api_program.cpp # Non-instrumented; exercises get_call_stack() API
 |       |-- stripped_caller_lib.cpp # Shared-lib fixture, stripped of symtab/debug info post-build
 |       |-- stripped_caller_program.cpp # Instrumented; callback invoked from the stripped lib
@@ -508,11 +517,20 @@ file paths:
 
 Pure: no globals, no I/O, no syscalls — unit-tested in `test_trace_file_path.cpp`.
 
+### `include/stdSymbolFilter.h`
+`instrumentation::is_std_library_symbol(const char* mangled_name)` — checks an
+Itanium C++ ABI mangled name for known std library / C++ ABI runtime prefixes
+(see "Excluding Standard Library" above for the pattern table). Pure string
+parsing with no dependencies; compiled on both compilers so
+`test_std_symbol_filter.cpp` covers every pattern regardless of toolchain, but
+consulted only under `#ifdef __clang__` in `callStack.cpp` (GCC excludes std
+headers at compile time). Applied both to `dladdr()`'s `dli_sname` and to the
+BFD-derived symtab name in `resolve_function_name()` — the latter catches
+symbols with no (or a different, nearest-exported) dynamic symbol.
+
 ### `src/callStack.cpp`
 The core implementation. Key functions:
 - `demangle_cxa()` - Wraps `abi::__cxa_demangle` with RAII
-- `is_std_library_symbol()` - (Clang only, `#ifdef __clang__`) Checks Itanium C++ ABI mangled
-  names for std library prefixes; filters std:: functions before expensive BFD resolution
 - `bfdResolver::ensure_bfd_loaded()` - Opens BFD, reads symbol table, caches by base address
 - `bfdResolver::resolve_function_name()` - Resolves callee address to demangled function name
 - `bfdResolver::resolve_filename_and_line()` - Resolves caller address to source file and line
@@ -626,10 +644,18 @@ FetchContent (downloaded once, cached for offline use).
 ### Unit Tests (`tests/unit/`)
 
 Test pure/deterministic functions from the include headers:
-- `test_format.cpp` — tree indentation, address formatting, line numbers, buffer handling
+- `test_format.cpp` — tree indentation, address formatting, line numbers, buffer handling;
+  `OversizedLineIsTruncatedSafely` exercises the 2048-byte buffer clamp with a
+  3000-char function name (result exactly buffer-size − 1 bytes, prefix intact)
 - `test_pretty_time.cpp` — timestamp format, length, milliseconds, `to_ms()` conversion;
   `LengthMatchesConstant` enforces `pretty_time().size() == utils::PRETTY_TIME_LENGTH`
-  (LOG_ELAPSED depends on this for byte-offset derivation)
+  (LOG_ELAPSED depends on this for byte-offset derivation);
+  `PrefixCacheRollsOverAcrossSeconds` crosses a real second boundary (≤ ~1 s wait)
+  and proves the per-thread strftime prefix cache invalidates
+- `test_std_symbol_filter.cpp` — `is_std_library_symbol()` mangled-name parsing:
+  every documented pattern (`__cxa_*`, `St`, substitutions, cv-qualifiers, `_ZZ`
+  local entities, `__gnu_cxx` / `__cxxabiv1` / `__gnu_debug`) plus negatives that
+  must never be filtered (user symbols, class literally named `St`, `_Z4Stopv`)
 - `test_trace_file_path.cpp` — `utils::resolve_base_trace_path()` (env var handling with
   null/empty/absolute/relative/special-char paths) and `utils::build_trace_filename()`
   (main vs worker thread suffix, small and LONG_MAX TIDs)
@@ -647,7 +673,7 @@ Test pure/deterministic functions from the include headers:
   recursion via `RecursionProducesOneEntryPerLevel`), caller info present, timestamp
   format, run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
   exact trace line count (catches std library pollution regressions)
-- Built as seven non-variant targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
+- Built as nine non-variant targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
   `noninstrumented_test_program` (compiled WITHOUT — simulates
   `DISABLE_INSTRUMENTATION`), `threaded_traced_test_program` (spawns 4 worker
   threads via `std::thread`, exercises per-thread trace files),
@@ -658,11 +684,26 @@ Test pure/deterministic functions from the include headers:
   `INSTRUMENT_FLAGS` — proves the on-demand API and the per-call hooks coexist
   in one process; `CallStackApiTest.WorksFromInstrumentedProgram` checks both
   the printed stack and the trace file), `stripped_caller` (shared
-  library, `strip --strip-all`-ed post-build), and `stripped_caller_program`
+  library, `strip --strip-all`-ed post-build), `stripped_caller_program`
   (instrumented; its callback is invoked from a file-local function inside the
-  stripped library).
+  stripped library), `overflow_depth_program` (instrumented; recurses 3000
+  frames — past MAX_TRACE_DEPTH), and `exception_traced_program` (instrumented;
+  throws and catches through instrumented frames).
   The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs
   the non-instrumented version and verifies zero trace entries are produced.
+- `OverflowDepthTest.DepthBeyondMaxStaysConsistent` — runs `overflow_depth_program`
+  (recursion 3000 deep, ~950 frames past MAX_TRACE_DEPTH = 2048). Verifies every
+  enter still produced a timestamped line (3002 total: main + 3000 recursion +
+  marker) and that `post_overflow_marker()`, traced after all exits drained the
+  overflow counter, sits at the same depth as the first recursion frame — pins
+  the overflow counter's depth resynchronization end-to-end.
+- `ExceptionUnwindTest.DepthConsistentAfterCatchOnGcc` — runs
+  `exception_traced_program` (throw through two instrumented frames, catch one
+  level up, then a marker call). On GCC the exit hooks fire on the unwind path,
+  so the marker must trace at the same depth as the catcher — pins the
+  empirically-verified GCC enter/exit pairing guarantee. Skipped under Clang
+  (via the `CSLG_COMPILER_IS_GNU` compile definition), where unwound frames'
+  exit hooks are silently skipped (documented limitation).
 - `CallStackApiTest.GetCallStackResolvesAncestors` — runs `callstack_api_program`,
   captures stdout, verifies the on-demand stack contains the expected ancestor
   functions (`print_stack_from_leaf → callstack_mid → callstack_top → main`) in
@@ -838,8 +879,9 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
 
 - `instrumentation::` - All symbol resolution and call stack logic
 - `utils::` - Formatting and time utilities
-- Anonymous namespace in `callStack.cpp` for `demangle_cxa()` and `is_std_library_symbol()`
-  (Clang only)
+- Anonymous namespace in `callStack.cpp` for `demangle_cxa()` and `ScopedNoInstrument`;
+  `is_std_library_symbol()` lives in `include/stdSymbolFilter.h` (namespace
+  `instrumentation`, consulted only under Clang)
 
 ## Design Decisions & Caveats
 
