@@ -428,9 +428,15 @@ static void trace_shutdown() {
             // patch_fd intentionally not touched — see function comment.
         }
         g.open_files.clear();
-    }
 
-    g.shutdown_complete.store(true, std::memory_order_release);
+        // Set the flag while still holding the mutex: open_this_thread_file()
+        // checks shutdown_complete under the same lock before registering, so a
+        // store outside this scope would leave a window where a late-opening
+        // thread sees the flag unset and pushes into the just-cleared registry
+        // (its file would then never be flushed by shutdown). Inside the lock,
+        // "registry cleared" and "shutdown complete" become one atomic step.
+        g.shutdown_complete.store(true, std::memory_order_release);
+    }
 }
 
 // PerThreadTraceFile destructor: closes this thread's file when the thread exits.
