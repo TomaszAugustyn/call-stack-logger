@@ -537,6 +537,9 @@ docker compose run test
 # Run all tests with Clang
 docker compose run test-clang
 
+# Run all tests under the optimized build type (RelWithDebInfo, -O2 -g)
+docker compose run test-optimized
+
 # Generate code coverage report (output in coverage-report/index.html)
 docker compose run coverage
 
@@ -558,6 +561,7 @@ including `libc6-dbg` (debug symbols for libc, required for fast BFD symbol reso
 
 GitHub Actions runs on every push and pull request to `master`:
 - **GCC (build, test, coverage):** Builds, runs unit and integration tests, generates lcov HTML report (uploaded as an artifact).
+- **GCC RelWithDebInfo (optimized build, test):** Builds with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` (the build type recommended to integrators) and runs the full suite — pins caller resolution under optimizer inlining and sibling-call optimization.
 - **Clang (build, test):** Builds and runs unit and integration tests.
 - **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer. Fails on any memory error, UB, or non-suppressed leak.
 - **Sanitize (GCC, TSan):** Builds with `SANITIZE=thread` and runs the full test suite under ThreadSanitizer.

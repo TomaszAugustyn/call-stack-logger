@@ -474,6 +474,8 @@ call-stack-logger/
 |       |-- log_elapsed_traced_program.cpp # Instrumented program with usleep() sentinels for LOG_ELAPSED tests
 |       |-- overflow_depth_program.cpp # Instrumented; recursion past MAX_TRACE_DEPTH (overflow counter)
 |       |-- exception_traced_program.cpp # Instrumented; throw/catch through instrumented frames (GCC pairing)
+|       |-- crash_traced_program.cpp # Instrumented, LOG_ELAPSED; abort()s mid-chain (pending-placeholder crash diagnostics)
+|       |-- global_dtor_traced_program.cpp # Instrumented; global object dtor calls traced code during exit()
 |       |-- callstack_api_program.cpp # Non-instrumented; exercises get_call_stack() API
 |       |-- stripped_caller_lib.cpp # Shared-lib fixture, stripped of symtab/debug info post-build
 |       |-- stripped_caller_program.cpp # Instrumented; callback invoked from the stripped lib
@@ -724,7 +726,7 @@ Test pure/deterministic functions from the include headers:
   recursion via `RecursionProducesOneEntryPerLevel`), caller info present, timestamp
   format, run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
   exact trace line count (catches std library pollution regressions)
-- Built as nine non-variant targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
+- Built as ten non-variant targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
   `noninstrumented_test_program` (compiled WITHOUT — simulates
   `DISABLE_INSTRUMENTATION`), `threaded_traced_test_program` (spawns 4 worker
   threads via `std::thread`, exercises per-thread trace files),
@@ -738,8 +740,11 @@ Test pure/deterministic functions from the include headers:
   library, `strip --strip-all`-ed post-build), `stripped_caller_program`
   (instrumented; its callback is invoked from a file-local function inside the
   stripped library), `overflow_depth_program` (instrumented; recurses 3000
-  frames — past MAX_TRACE_DEPTH), and `exception_traced_program` (instrumented;
-  throws and catches through instrumented frames).
+  frames — past MAX_TRACE_DEPTH), `exception_traced_program` (instrumented;
+  throws and catches through instrumented frames), and
+  `global_dtor_traced_program` (instrumented; a global object's destructor
+  calls traced code during exit() — both its ctor window, pre-trace_begin, and
+  its dtor window, post-trace_shutdown, must be silent no-ops).
   The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs
   the non-instrumented version and verifies zero trace entries are produced.
 - `OverflowDepthTest.DepthBeyondMaxStaysConsistent` — runs `overflow_depth_program`
@@ -817,6 +822,22 @@ Test pure/deterministic functions from the include headers:
   `LogElapsedDefaultBuildTest.NoDurationFieldWithoutFlag` is a negative test
   on the default build (skipped when the build is configured with
   `-DLOG_ELAPSED=ON`, via `CSLG_DEFAULT_HAS_LOG_ELAPSED`).
+- `LogElapsedCrashTest` (2 tests) — drives `crash_traced_program_log_elapsed`
+  (built from `crash_traced_program.cpp` against the same
+  `callstacklogger_log_elapsed` variant library): calls a helper that completes
+  (usleep(1000) inside, so its patched duration must be ≥ 1 ms), then abort()s
+  at the bottom of a `crash_outer → crash_middle → crash_leaf` chain.
+  Asserts the program terminated abnormally, every frame active at the crash
+  (main + the chain) kept its `[  pending ]` placeholder, and the completed
+  helper's line carries a real patched duration — pins README's
+  "Crash diagnostics" feature end-to-end (line-buffered mode guarantees the
+  enter lines reach the kernel before the crash).
+- `GlobalDtorTest.InstrumentedGlobalDestructorAtExitIsSafe` — runs
+  `global_dtor_traced_program`, asserts exit 0, the destructor's
+  `GLOBAL_DTOR_RAN` stdout marker, and normal main()-time tracing. Pins the
+  exit-window behavior (hooks disabled both pre-trace_begin and
+  post-trace_shutdown); under the ASan/TSan CI jobs it also proves no
+  exit-time use-after-free hides in the shutdown sequence.
 - `LogElapsedMultiRunAppendTest.SecondRunPatchesCorrectlyAfterAppend` — runs the
   LOG_ELAPSED program twice into the same file, so the second run seeds its byte
   cursor from `lseek(SEEK_END)` on a non-empty appended file. Asserts two run
@@ -906,8 +927,12 @@ available locally via docker-compose.
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with four jobs:
+GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with five jobs:
 - **gcc**: builds with `BUILD_TESTS=ON` and `COVERAGE=ON`, runs tests via `ctest`, generates and uploads the lcov HTML coverage report.
+- **gcc-optimized**: builds with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` (the build type README
+  recommends to integrators), runs tests — pins caller resolution under optimizer inlining
+  and sibling-call optimization (the frame-6 chain shape). Locally available as the
+  `test-optimized` docker compose service.
 - **clang**: builds with `-DCMAKE_CXX_COMPILER=clang++`, runs tests.
 - **sanitize-asan**: builds with `SANITIZE=address+undefined`, runs tests under ASan + UBSan + LSan (libbfd suppression via `${{ github.workspace }}/tests/lsan-suppressions.txt`).
 - **sanitize-tsan**: builds with `SANITIZE=thread`, runs tests under TSan.

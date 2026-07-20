@@ -51,6 +51,31 @@ jobs:
         name: coverage-report
         path: coverage-report/
 
+  gcc-optimized:
+    name: GCC RelWithDebInfo (optimized build, test)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y binutils-dev libc6-dbg
+
+    # RelWithDebInfo (-O2 -g) is the build type the README recommends to
+    # integrators — and the one where optimizer inlining and sibling-call
+    # optimization once silently collapsed the frame-6 unwind chain and broke
+    # caller resolution on every trace line. This job pins the whole suite
+    # under optimization so that class of regression fails CI immediately.
+    - name: Configure CMake
+      run: cmake -B build -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run unit and integration tests
+      run: cd build && ctest --output-on-failure
+
   clang:
     name: Clang (build, test)
     runs-on: ubuntu-latest

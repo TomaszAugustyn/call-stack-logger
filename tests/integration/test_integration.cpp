@@ -58,6 +58,12 @@
 #ifndef EXCEPTION_TRACED_PROGRAM_PATH
     #error "EXCEPTION_TRACED_PROGRAM_PATH must be defined by CMake"
 #endif
+#ifndef GLOBAL_DTOR_PROGRAM_PATH
+    #error "GLOBAL_DTOR_PROGRAM_PATH must be defined by CMake"
+#endif
+#ifndef CRASH_PROGRAM_LOG_ELAPSED_PATH
+    #error "CRASH_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
+#endif
 #ifndef TRACED_PROGRAM_LOG_ELAPSED_PATH
     #error "TRACED_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
 #endif
@@ -1529,4 +1535,124 @@ TEST_F(LogElapsedCombinedFlagsTest, PwriteDidNotCorruptAddr) {
     }
     ASSERT_GT(total_entries, 0) << "no function entries in trace";
     EXPECT_EQ(valid_addrs, total_entries);
+}
+
+// ============================================================================
+// LOG_ELAPSED crash diagnostics — README's flagship "[  pending ]" behavior.
+//
+// crash_traced_program_log_elapsed calls crash_completed_work() (returns
+// normally), then descends crash_outer -> crash_middle -> crash_leaf and
+// abort()s at the leaf. Exit hooks never run for the frames active at the
+// crash, so their placeholders must survive on disk, while the completed
+// frame's line must carry a real patched duration — the exact mixed picture
+// a post-crash diagnosis relies on.
+// ============================================================================
+
+class LogElapsedCrashTest : public ::testing::Test {
+protected:
+    std::string trace_content;
+    std::vector<std::string> trace_lines;
+    std::string trace_file_path;
+    int run_status = -1;
+
+    void SetUp() override {
+        char tmp_path[] = "/tmp/cslg_elapsed_crash_XXXXXX";
+        int fd = mkstemp(tmp_path);
+        ASSERT_GE(fd, 0) << "mkstemp failed";
+        close(fd);
+        trace_file_path = tmp_path;
+
+        std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_file_path + "\" \""
+                        + CRASH_PROGRAM_LOG_ELAPSED_PATH + "\" > /dev/null 2>&1";
+        // Expected to terminate via SIGABRT (shell reports 128+6=134); asserted
+        // non-zero in the test body rather than exactly 134 so sanitizer
+        // runtimes that re-raise the abort differently don't cause false
+        // failures.
+        run_status = system(cmd.c_str());
+
+        trace_content = read_file(trace_file_path);
+        trace_lines = split_lines(trace_content);
+    }
+
+    void TearDown() override {
+        if (!trace_file_path.empty()) {
+            unlink(trace_file_path.c_str());
+        }
+    }
+};
+
+// Every frame still on the stack when abort() fired must keep its
+// "[  pending ]" placeholder — their exit hooks never ran. Line-buffered mode
+// guarantees the enter lines already reached the kernel before the crash.
+TEST_F(LogElapsedCrashTest, FramesActiveAtCrashKeepPendingPlaceholders) {
+    ASSERT_NE(run_status, 0)
+            << "crash program exited cleanly — abort() did not fire, nothing to test";
+
+    for (const char* fn : { " main ", "crash_outer", "crash_middle", "crash_leaf" }) {
+        std::string line = find_unique_line(trace_lines, fn);
+        ASSERT_FALSE(line.empty())
+                << fn << " line missing or not unique. Trace:\n" << trace_content;
+        EXPECT_NE(line.find("[  pending ]"), std::string::npos)
+                << fn << " should have kept its placeholder (its exit hook never ran):\n"
+                << line;
+    }
+}
+
+// A frame that completed BEFORE the crash must have its duration patched in:
+// the trace is a mix of patched and pending lines, and the pending tail is
+// what identifies the frames active at the crash site.
+TEST_F(LogElapsedCrashTest, FrameCompletedBeforeCrashIsPatched) {
+    ASSERT_NE(run_status, 0)
+            << "crash program exited cleanly — abort() did not fire, nothing to test";
+
+    std::string line = find_unique_line(trace_lines, "crash_completed_work");
+    ASSERT_FALSE(line.empty())
+            << "crash_completed_work line missing or not unique. Trace:\n" << trace_content;
+    EXPECT_EQ(line.find("[  pending ]"), std::string::npos)
+            << "completed frame kept its placeholder:\n" << line;
+    ASSERT_TRUE(std::regex_search(line, duration_field_regex()))
+            << "completed frame has no valid duration field:\n" << line;
+    // The function body usleep()s 1 ms, and usleep sleeps AT LEAST the
+    // requested time — the patched duration must reflect that.
+    EXPECT_GE(parse_duration_ns(line), 1'000'000LL)
+            << "patched duration below the 1 ms usleep lower bound:\n" << line;
+}
+
+// ============================================================================
+// Exit-window safety — instrumented global destructor at process exit.
+//
+// global_dtor_traced_program has a global object whose destructor calls an
+// instrumented function during exit() processing. Constructed before
+// trace_begin and destroyed after trace_shutdown (exit handlers are LIFO),
+// its hooks fire in both disabled windows and must be silent no-ops. The
+// assertions here pin "no crash, destructor completed, normal tracing
+// unaffected"; under the ASan/TSan jobs this also proves no exit-time
+// use-after-free hides in the shutdown sequence.
+// ============================================================================
+
+TEST(GlobalDtorTest, InstrumentedGlobalDestructorAtExitIsSafe) {
+    char dir_tmpl[] = "/tmp/cslg_global_dtor_XXXXXX";
+    char* d = mkdtemp(dir_tmpl);
+    ASSERT_NE(d, nullptr) << "mkdtemp failed";
+    const std::string dir = d;
+    const std::string trace_path = dir + "/trace.out";
+    const std::string stdout_path = dir + "/stdout.txt";
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_path + "\" \""
+                    + GLOBAL_DTOR_PROGRAM_PATH + "\" > \"" + stdout_path + "\" 2>&1";
+    int ret = system(cmd.c_str());
+    EXPECT_EQ(ret, 0) << "global_dtor_traced_program did not exit cleanly (status "
+                      << ret << ") — an instrumented global destructor broke the exit sequence";
+
+    const std::string out = read_file(stdout_path);
+    EXPECT_NE(out.find("GLOBAL_DTOR_RAN"), std::string::npos)
+            << "global destructor did not run to completion. Stdout:\n" << out;
+
+    const std::string trace = read_file(trace_path);
+    EXPECT_NE(trace.find("traced_marker_in_main"), std::string::npos)
+            << "normal tracing during main() is missing. Trace:\n" << trace;
+
+    unlink(trace_path.c_str());
+    unlink(stdout_path.c_str());
+    rmdir(dir.c_str());
 }

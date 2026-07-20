@@ -34,6 +34,20 @@ services:
         cd build-clang && ctest --output-on-failure
       "
 
+  # Build and run all tests with the optimized build type the README recommends
+  # to integrators (RelWithDebInfo, -O2 -g). Pins caller resolution under
+  # optimizer inlining / sibling-call optimization (the frame-6 chain shape).
+  test-optimized:
+    build: .
+    volumes:
+      - .:/workspace
+    command: >
+      bash -c "
+        cmake -B build-optimized -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo &&
+        cmake --build build-optimized -j$$(nproc) &&
+        cd build-optimized && ctest --output-on-failure
+      "
+
   # Build with tests + coverage, run tests, generate HTML coverage report
   coverage:
     build: .

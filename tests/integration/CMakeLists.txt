@@ -84,6 +84,16 @@ target_compile_features(exception_traced_program PRIVATE cxx_std_17)
 target_link_libraries(exception_traced_program PRIVATE callstacklogger_instrumented)
 cslg_apply_sanitizers(exception_traced_program)
 
+# Exit-window driver: a global object's instrumented destructor runs during
+# exit(). Its construction (pre-trace_begin) and destruction
+# (post-trace_shutdown) both hit disabled hooks and must be silent no-ops —
+# most valuable under the sanitizer jobs, which would catch any exit-time
+# use-after-free (see GlobalDtorTest).
+add_executable(global_dtor_traced_program global_dtor_traced_program.cpp)
+target_compile_features(global_dtor_traced_program PRIVATE cxx_std_17)
+target_link_libraries(global_dtor_traced_program PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(global_dtor_traced_program)
+
 # Multi-threaded traced test program. Exercises per-thread trace files by spawning
 # worker threads, each of which produces its own <base>_tid_<tid> file.
 find_package(Threads REQUIRED)
@@ -137,6 +147,17 @@ cslg_add_flag_variant(log_elapsed log_elapsed_traced_program.cpp LOG_ELAPSED)
 cslg_add_flag_variant(log_elapsed_threaded threaded_traced_program.cpp LOG_ELAPSED)
 target_link_libraries(traced_test_program_log_elapsed_threaded PRIVATE Threads::Threads)
 
+# Crash-diagnostics driver against the SAME log_elapsed variant library (no new
+# library build needed): aborts mid-chain, so LogElapsedCrashTest can assert
+# that the frames active at the crash keep their "[  pending ]" placeholders
+# while an already-completed frame's line carries a real patched duration —
+# pins README's "Crash diagnostics" feature end-to-end.
+add_executable(crash_traced_program_log_elapsed crash_traced_program.cpp)
+target_compile_features(crash_traced_program_log_elapsed PRIVATE cxx_std_17)
+target_compile_options(crash_traced_program_log_elapsed PRIVATE ${INSTRUMENT_FLAGS})
+target_link_libraries(crash_traced_program_log_elapsed PRIVATE callstacklogger_log_elapsed)
+cslg_apply_sanitizers(crash_traced_program_log_elapsed)
+
 # Combined-flags variant: all three gated macros defined simultaneously. Exercises
 # LOG_ELAPSED's byte-offset math under the line-layout changes introduced by
 # LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the placeholder
@@ -163,6 +184,8 @@ target_compile_definitions(integration_tests PRIVATE
     STRIPPED_CALLER_PROGRAM_PATH="$<TARGET_FILE:stripped_caller_program>"
     OVERFLOW_DEPTH_PROGRAM_PATH="$<TARGET_FILE:overflow_depth_program>"
     EXCEPTION_TRACED_PROGRAM_PATH="$<TARGET_FILE:exception_traced_program>"
+    GLOBAL_DTOR_PROGRAM_PATH="$<TARGET_FILE:global_dtor_traced_program>"
+    CRASH_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:crash_traced_program_log_elapsed>"
     TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
     TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH="$<TARGET_FILE:traced_test_program_log_not_demangled>"
     TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed>"
