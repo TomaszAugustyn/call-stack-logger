@@ -574,7 +574,10 @@ The core implementation. Key functions:
 - `demangle_cxa()` - Wraps `abi::__cxa_demangle` with RAII
 - `bfdResolver::ensure_bfd_loaded()` - Opens BFD, reads symbol table, caches by base address
 - `bfdResolver::resolve_function_name()` - Resolves callee address to demangled function name
-- `bfdResolver::resolve_filename_and_line()` - Resolves caller address to source file and line
+- `bfdResolver::resolve_filename_and_line()` - Resolves caller address to source file and line.
+  A successful `bfd_find_nearest_line()` with an EMPTY filename or line 0 (DWARF "no
+  source line" sentinel) degrades through the same fallbacks as a failed lookup
+  (`func:???` → `<unknown function>`) instead of rendering "(called from: :0)"
 - `bfdResolver::resolve()` - Orchestrates full resolution including stack unwinding
 - `bfdResolver::get_argv0()` - Reads `/proc/self/cmdline` for executable path
 - `bfdResolver::ensure_actual_executable()` - Handles PATH-found executables via `/proc/self/exe`

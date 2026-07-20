@@ -263,10 +263,18 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
     unsigned int line = 0;
     if (bfd_find_nearest_line(
                 currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
-        if (file != nullptr) {
-            return std::make_pair(std::string(file), std::make_optional(line));
+        // BFD "success" can still carry no usable location: `file` may be
+        // non-null but EMPTY with line 0 (DWARF's "no source line" sentinel) —
+        // observed with GCC 16 / binutils 2.46 for libc frames of optimized
+        // binaries, which used to render as "(called from: :0)". Treat an empty
+        // file like a null one and line 0 like an unknown line, so such frames
+        // degrade through the same fallbacks as an outright lookup failure
+        // (function name with ":???", then "<unknown function>").
+        if (file != nullptr && file[0] != '\0') {
+            return std::make_pair(std::string(file),
+                                  line != 0 ? std::make_optional(line) : std::nullopt);
         }
-        if (func != nullptr) {
+        if (func != nullptr && func[0] != '\0') {
             return std::make_pair(demangle_cxa(func), std::nullopt);
         }
         return std::make_pair(std::string("<unknown function>"), std::nullopt);
