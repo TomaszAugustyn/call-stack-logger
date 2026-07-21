@@ -855,23 +855,34 @@ TEST(ExceptionUnwindTest, DepthConsistentAfterCatchOnGcc) {
 // ============================================================================
 
 // Run the callstack API program, capture stdout, and verify the emitted stack
-// contains the expected ancestor functions.
+// contains the expected ancestor functions. Also pins the lazy-open behavior:
+// a non-instrumented program that only uses the on-demand API must NOT create
+// any trace file (trace files are opened lazily on the first traced call, and
+// this program never triggers a hook).
 TEST(CallStackApiTest, GetCallStackResolvesAncestors) {
-    char stdout_tmpl[] = "/tmp/cslg_cs_stdout_XXXXXX";
-    int fd = mkstemp(stdout_tmpl);
-    ASSERT_GE(fd, 0) << "mkstemp failed";
-    close(fd);
+    char dir_tmpl[] = "/tmp/cslg_cs_api_XXXXXX";
+    char* d = mkdtemp(dir_tmpl);
+    ASSERT_NE(d, nullptr) << "mkdtemp failed";
+    const std::string dir = d;
+    const std::string trace_path = dir + "/trace.out";
+    const std::string stdout_path = dir + "/stdout.txt";
 
-    std::string cmd = std::string("\"") + CALLSTACK_API_PROGRAM_PATH
-                    + "\" > \"" + stdout_tmpl + "\"";
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_path + "\" \""
+                    + CALLSTACK_API_PROGRAM_PATH + "\" > \"" + stdout_path + "\"";
     int ret = system(cmd.c_str());
     ASSERT_EQ(ret, 0) << "callstack_api_program failed, exit=" << ret;
 
-    std::ifstream ifs(stdout_tmpl);
-    std::string content((std::istreambuf_iterator<char>(ifs)),
-                         std::istreambuf_iterator<char>());
-    ifs.close();
-    unlink(stdout_tmpl);
+    std::string content = read_file(stdout_path);
+
+    // No hooks ever fired, so no trace file may exist — a regression here means
+    // the library went back to eagerly opening the main thread's file, spamming
+    // API-only consumers with stray trace.out files.
+    struct stat st;
+    EXPECT_NE(stat(trace_path.c_str(), &st), 0)
+            << "API-only (non-instrumented) program created a trace file — "
+               "the lazy main-thread open has regressed.";
+
+    remove_dir_tree(dir);
 
     // The program prints each frame as "FRAME: <name>". Verify the three
     // ancestor functions are present in order of appearance in the stack

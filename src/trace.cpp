@@ -210,8 +210,8 @@ pid_t current_tid() {
 }
 
 // Writes the "=== New trace run: <timestamp>, thread ID: <tid> ===" header framed
-// above and below by `=` lines of matching length. Called immediately after a file
-// is opened (main thread in trace_begin, worker threads on lazy open).
+// above and below by `=` lines of matching length. Called immediately after a
+// thread's file is lazily opened on its first traced call.
 NO_INSTRUMENT
 void write_run_separator_header(FILE* fp, pid_t tid) {
     std::string middle = "=== New trace run: " + utils::pretty_time()
@@ -221,7 +221,8 @@ void write_run_separator_header(FILE* fp, pid_t tid) {
     fprintf(fp, "\n%s\n%s\n%s\n", frame.c_str(), middle.c_str(), frame.c_str());
 }
 
-// Opens this thread's trace file (lazy for workers, eager for main via trace_begin).
+// Opens this thread's trace file (lazily, on the thread's first traced call —
+// main thread included; see the note in trace_begin()).
 // Idempotent: if open has already been attempted (success or failure), returns
 // immediately. On success, installs the FILE*, switches to line-buffered mode, writes
 // the run-separator header, and registers this PerThreadTraceFile* in the global
@@ -538,10 +539,14 @@ void trace_begin() {
     // Resolve the base path from the env var (pure helper in traceFilePath.h).
     g.base_path = utils::resolve_base_trace_path(std::getenv("CSLG_OUTPUT_FILE"));
 
-    // Eagerly open the main thread's file so the "=== New trace run ===" header
-    // lands before main() starts. Preserves today's behavior for single-threaded
-    // programs (main's file exists immediately after trace_begin returns).
-    open_this_thread_file(t_state);
+    // The main thread's file is deliberately NOT opened here: get_thread_fp()
+    // opens it lazily on the first traced call, exactly like worker threads.
+    // This constructor also runs in programs that link the plain library only
+    // for the on-demand get_call_stack() API (callStack.cpp references the
+    // re-entrancy guard functions above, which pulls this TU in from the static
+    // archive) — an eager open would create a stray trace file for programs
+    // that never trace anything. Instrumented programs are unaffected: their
+    // first hook fires no later than main()'s own enter.
 
     // Register shutdown via atexit. Handlers run in reverse registration order,
     // so registering this early (pre-main) means destructors of user statics

@@ -159,9 +159,17 @@ instrumentation (which would cause infinite recursion and stack overflow).
 - **Worker threads** write to `<base>_tid_<gettid>` where `<gettid>` is the Linux
   kernel thread ID from `syscall(SYS_gettid)`.
 
-The main thread's file is opened eagerly in `trace_begin()` (via
-`__attribute__((constructor))`, before `main()` runs). Worker threads lazily open their
-file on the first `__cyg_profile_func_enter` call for that thread.
+Every thread — main included — lazily opens its file on its first
+`__cyg_profile_func_enter` call. `trace_begin()` (an `__attribute__((constructor))`
+that runs before `main()`) only captures the main TID, resolves the base path,
+registers `trace_shutdown` via `atexit()`, and runs the LOG_ELAPSED drift guard;
+it deliberately opens no file. This matters because `trace_begin` also runs in
+programs that link the plain library just for `get_call_stack()` (callStack.cpp
+references the re-entrancy guard functions, pulling trace.o from the archive) —
+an eager open used to create a stray `trace.out` for such API-only consumers.
+Instrumented programs are unaffected: their first hook fires no later than
+`main()`'s own enter. Pinned by the no-trace-file assertion in
+`CallStackApiTest.GetCallStackResolvesAncestors`.
 
 All files are opened with `O_NOFOLLOW` (prevents symlink attacks), `O_CLOEXEC` (an
 exec'd child of the traced program must not inherit writable trace descriptors — this
@@ -594,8 +602,10 @@ The core implementation. Key functions:
 
 ### `src/trace.cpp`
 The instrumentation entry points:
-- `trace_begin()` - Constructor: opens main thread's trace file, writes run separator,
-  registers `trace_shutdown` via `atexit()`, warns on failure
+- `trace_begin()` - Constructor: captures the main TID, resolves the base path,
+  registers `trace_shutdown` via `atexit()`, runs the LOG_ELAPSED drift guard.
+  Opens NO file — every thread's file (main included) is opened lazily on its
+  first traced call, so API-only consumers never get a stray trace file
 - `trace_shutdown()` - atexit handler: flushes every registered thread's file, clears
   the registry, sets `shutdown_complete` (no `trace_end` destructor exists — it was
   removed as dead code; see the comment in trace.cpp)

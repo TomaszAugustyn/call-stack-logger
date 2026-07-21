@@ -214,6 +214,10 @@ keeps out-of-line get exact caller locations at every optimization level.
 | `callstacklogger::instrumented`    | `-finstrument-functions` (with GCC's exclude-file-list), `-g`, `-rdynamic`, library, `-ldl -lbfd`, include path. **Use this for per-call tracing (the common case).**                                                |
 | `callstacklogger::callstacklogger` | Library only: `-g`, `-rdynamic`, `-ldl -lbfd`, include path — no `-finstrument-functions`. Use this when you want just the on-demand [`get_call_stack()`](#on-demand-call-stack-capture) API without per-call hooks. |
 
+Trace files are opened lazily on each thread's first traced call, so a program
+that links the plain library only for `get_call_stack()` never creates a trace
+file as a side effect.
+
 ### Disabling tracing in a build ###
 
 To compile your project without any instrumentation hooks (e.g. for release builds):
