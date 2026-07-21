@@ -607,12 +607,12 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                     // timestamp. See include/durationFormat.h for the width invariant.
                     // format() may allocate (throw) — called with the prospective
                     // depth; the actual increment follows in the no-throw zone.
+                    // The '\n' is appended inside format()'s stack buffer, so the
+                    // ready-to-write line costs a single allocation.
                     std::string line = utils::format(*maybe_resolved,
                                                      t_state.current_stack_depth + 1,
-                                                     "[  pending ] ");
-                    // Terminate while still in the throwing zone — push_back may
-                    // reallocate.
-                    line.push_back('\n');
+                                                     "[  pending ] ",
+                                                     /*append_newline=*/true);
                     // ---- no-throw zone ----
                     t_state.current_stack_depth++;
                     logged = true;
@@ -636,11 +636,11 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 #else
                     // format() may allocate (throw) — called with the prospective
                     // depth; the actual increment follows in the no-throw zone.
+                    // The '\n' is appended inside format()'s stack buffer, so the
+                    // ready-to-write line costs a single allocation.
                     std::string line = utils::format(*maybe_resolved,
-                                                     t_state.current_stack_depth + 1);
-                    // Terminate while still in the throwing zone — push_back may
-                    // reallocate.
-                    line.push_back('\n');
+                                                     t_state.current_stack_depth + 1,
+                                                     "", /*append_newline=*/true);
                     // ---- no-throw zone ----
                     t_state.current_stack_depth++;
                     logged = true;

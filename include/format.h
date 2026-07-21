@@ -34,11 +34,16 @@ namespace utils {
 // byte — all existing call sites are unaffected. This header stays flag-agnostic:
 // the caller in trace.cpp decides what, if anything, to splice in.
 //
+// `append_newline` writes the terminating '\n' into the same stack buffer, so
+// the enter hook gets a ready-to-write line in ONE string allocation. A
+// separate push_back('\n') on the returned string would reallocate and copy
+// every line: the returned string is constructed with exact capacity.
+//
 // NO_INSTRUMENT: this function is part of the instrumentation pipeline (called from
 // __cyg_profile_func_enter) and must not be instrumented itself.
 NO_INSTRUMENT
 inline std::string format(const instrumentation::ResolvedFrame& frame, int current_stack_depth,
-                          const char* after_timestamp = "") {
+                          const char* after_timestamp = "", bool append_newline = false) {
 
     constexpr size_t BUF_SIZE = 2048;
     char buf[BUF_SIZE];
@@ -106,6 +111,13 @@ inline std::string format(const instrumentation::ResolvedFrame& frame, int curre
             // snprintf returns the count that WOULD be written; clamp to actual space.
             pos += (n < remaining) ? n : remaining - 1;
         }
+    }
+
+    if (append_newline) {
+        // Every branch above keeps pos <= BUF_SIZE - 1 (each write requires
+        // n < remaining, and the final clamp lands at remaining - 1), so this
+        // write stays in bounds. A truncated line still ends with the newline.
+        buf[pos++] = '\n';
     }
 
     return std::string(buf, static_cast<size_t>(pos));

@@ -178,6 +178,38 @@ TEST(FormatTest, AfterTimestampLandsAtExpectedOffset) {
                "offset math assumes.";
 }
 
+// append_newline=true terminates the line inside format()'s own buffer — the
+// enter hook relies on this producing a ready-to-write line in one allocation
+// (no separate push_back('\n') that would reallocate the exact-capacity string).
+TEST(FormatTest, AppendNewlineTerminatesLine) {
+    auto frame = make_frame("newline_probe");
+    std::string with_nl = utils::format(frame, 1, "", true);
+    std::string without_nl = utils::format(frame, 1);
+
+    ASSERT_FALSE(with_nl.empty());
+    EXPECT_EQ(with_nl.back(), '\n');
+    // Only the terminator differs — the payload is byte-identical.
+    EXPECT_EQ(with_nl.substr(0, with_nl.size() - 1), without_nl);
+    // Default stays newline-free (unit-test and legacy call sites unaffected).
+    EXPECT_EQ(without_nl.find('\n'), std::string::npos);
+}
+
+// The newline must also fit when the line was clamped to the buffer capacity:
+// the truncated payload occupies BUF_SIZE - 1 bytes, and the '\n' lands in the
+// last remaining byte — total exactly BUF_SIZE, never an overflow.
+TEST(FormatTest, AppendNewlineFitsAfterTruncation) {
+    std::string long_name(3000, 'X');
+    auto frame = make_frame(long_name);
+    std::string result = utils::format(frame, 1, "", true);
+
+    // Keep in sync with BUF_SIZE in include/format.h.
+    constexpr std::size_t BUF_SIZE = 2048;
+    EXPECT_EQ(result.size(), BUF_SIZE);
+    EXPECT_EQ(result.back(), '\n');
+    EXPECT_EQ(result[result.size() - 2], 'X')
+            << "Byte before the newline should be truncated name payload";
+}
+
 // Same guard combined with LOG_ADDR's address column: the address must land
 // AFTER the after_timestamp splice, not before. trace.cpp relies on this
 // ordering so the placeholder offset stays independent of LOG_ADDR.
