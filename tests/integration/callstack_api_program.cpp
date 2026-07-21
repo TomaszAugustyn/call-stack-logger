@@ -82,8 +82,18 @@ __attribute__((noinline)) void callstack_top() {
 // main chain above. Names only (no CALLER column) — the worker assertions need
 // just the chain order, and keeping the format distinct from "FRAME:" lines
 // leaves the main-thread caller-location assertions untouched.
-__attribute__((noinline)) std::string worker_stack_leaf(const char* prefix) {
-    auto stack = instrumentation::get_call_stack();
+//
+// Formatting lives in its own noinline function for the same reason printing
+// does for the main chain (see print_frames above): the leaf's captured frame
+// name resolves from the RETURN address after the get_call_stack() call, and
+// at -O2 an inlined std constructor as the next statement (the ostringstream
+// this used to build in place) makes DWARF attribute that resume point to the
+// std helper — worker_stack_leaf then resolves as std::basic_ios::basic_ios()
+// instead of itself. With a plain out-of-line call as the next statement, the
+// resume point attributes to this function.
+__attribute__((noinline)) std::string format_worker_frames(
+        const char* prefix,
+        const std::vector<std::optional<instrumentation::ResolvedFrame>>& stack) {
     std::ostringstream oss;
     for (const auto& maybe : stack) {
         if (maybe.has_value()) {
@@ -95,14 +105,23 @@ __attribute__((noinline)) std::string worker_stack_leaf(const char* prefix) {
     return oss.str();
 }
 
+__attribute__((noinline)) std::string worker_stack_leaf(const char* prefix) {
+    auto stack = instrumentation::get_call_stack();
+    return format_worker_frames(prefix, stack);
+}
+
 __attribute__((noinline)) std::string worker_stack_top(const char* prefix) {
     std::string result = worker_stack_leaf(prefix);
     return result;
 }
 
-int main() {
-    callstack_top();
-
+// The worker section lives in its own noinline function so that the statement
+// following callstack_top() in main() is a plain out-of-line call. Inlining
+// the std::string / std::thread construction directly into main() made main's
+// captured frame resolve as the inlined basic_string helper at -O2 (same
+// resume-point attribution issue as described on format_worker_frames), and
+// "FRAME: main" vanished from the output.
+__attribute__((noinline)) void run_worker_captures() {
     // Concurrent captures from two worker threads — both contend on
     // s_bfd_mutex inside the resolver while neither is the thread that ran
     // trace_begin(). Output is buffered per thread and printed after join.
@@ -113,5 +132,10 @@ int main() {
     t1.join();
     t2.join();
     std::cout << out1 << out2;
+}
+
+int main() {
+    callstack_top();
+    run_worker_captures();
     return 0;
 }
