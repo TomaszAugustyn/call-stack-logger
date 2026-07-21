@@ -955,36 +955,67 @@ TEST(CallStackApiTest, GetCallStackResolvesAncestors) {
                "hard-coded-unwind bug has regressed. Output:\n" << content;
 }
 
+// get_call_stack() must work from worker threads too — the two workers in the
+// API program capture their stacks CONCURRENTLY, contending on s_bfd_mutex
+// from threads that never ran trace_begin(). Each worker's chain must resolve
+// with the innermost frame first, independently of the other worker.
+TEST(CallStackApiTest, GetCallStackResolvesFromConcurrentWorkerThreads) {
+    char dir_tmpl[] = "/tmp/cslg_cs_worker_XXXXXX";
+    char* d = mkdtemp(dir_tmpl);
+    ASSERT_NE(d, nullptr) << "mkdtemp failed";
+    const std::string dir = d;
+    const std::string stdout_path = dir + "/stdout.txt";
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + dir + "/trace.out\" \""
+                    + CALLSTACK_API_PROGRAM_PATH + "\" > \"" + stdout_path + "\"";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "callstack_api_program failed, exit=" << ret;
+
+    std::string content = read_file(stdout_path);
+    remove_dir_tree(dir);
+
+    for (const std::string prefix : { "W1_", "W2_" }) {
+        const auto pos_leaf = content.find(prefix + "FRAME: worker_stack_leaf");
+        const auto pos_top = content.find(prefix + "FRAME: worker_stack_top");
+        EXPECT_NE(pos_leaf, std::string::npos)
+                << prefix << "worker did not resolve worker_stack_leaf. Output:\n" << content;
+        EXPECT_NE(pos_top, std::string::npos)
+                << prefix << "worker did not resolve worker_stack_top. Output:\n" << content;
+        if (pos_leaf != std::string::npos && pos_top != std::string::npos) {
+            EXPECT_LT(pos_leaf, pos_top)
+                    << prefix << "worker's stack is not innermost-first. Output:\n" << content;
+        }
+    }
+}
+
 // The on-demand API and the per-call hooks must coexist in one process: the
 // same program source compiled WITH -finstrument-functions calls
 // get_call_stack() (which takes s_bfd_mutex outside any hook) while the hooks
 // fire around it. Verifies both outputs: the printed stack (API worked) and
-// the trace file (hooks worked).
+// the trace file (hooks worked). Uses a temp DIRECTORY because the program's
+// worker threads produce their own <trace>_tid_<n> files that need cleanup.
 TEST(CallStackApiTest, WorksFromInstrumentedProgram) {
-    char trace_tmpl[] = "/tmp/cslg_cs_instr_trace_XXXXXX";
-    int tfd = mkstemp(trace_tmpl);
-    ASSERT_GE(tfd, 0) << "mkstemp failed";
-    close(tfd);
-    char stdout_tmpl[] = "/tmp/cslg_cs_instr_stdout_XXXXXX";
-    int sfd = mkstemp(stdout_tmpl);
-    ASSERT_GE(sfd, 0) << "mkstemp failed";
-    close(sfd);
+    char dir_tmpl[] = "/tmp/cslg_cs_instr_XXXXXX";
+    char* d = mkdtemp(dir_tmpl);
+    ASSERT_NE(d, nullptr) << "mkdtemp failed";
+    const std::string dir = d;
+    const std::string trace_path = dir + "/trace.out";
+    const std::string stdout_path = dir + "/stdout.txt";
 
     // timeout(1): a regression of the re-entrancy guard on the public API
     // deadlocks on s_bfd_mutex under Clang (hook firing inside the resolver via
     // user-TU COMDAT template instantiations) — fail fast with status 124<<8
     // instead of hanging the suite.
-    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(trace_tmpl) + "\" timeout 10 \""
-                    + CALLSTACK_API_PROGRAM_INSTRUMENTED_PATH + "\" > \"" + stdout_tmpl + "\"";
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_path + "\" timeout 10 \""
+                    + CALLSTACK_API_PROGRAM_INSTRUMENTED_PATH + "\" > \"" + stdout_path + "\"";
     int ret = system(cmd.c_str());
     ASSERT_EQ(ret, 0) << "callstack_api_program_instrumented failed, exit=" << ret
                       << " (raw status 124<<8 means killed by timeout — the public-API "
                          "re-entrancy guard deadlock has regressed)";
 
-    std::string out = read_file(stdout_tmpl);
-    std::string trace = read_file(trace_tmpl);
-    unlink(stdout_tmpl);
-    unlink(trace_tmpl);
+    std::string out = read_file(stdout_path);
+    std::string trace = read_file(trace_path);
+    remove_dir_tree(dir);
 
     // The on-demand API resolved the ancestor chain...
     EXPECT_NE(out.find("FRAME: print_stack_from_leaf"), std::string::npos)

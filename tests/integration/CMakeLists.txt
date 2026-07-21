@@ -24,11 +24,16 @@ target_compile_features(noninstrumented_test_program PRIVATE cxx_std_17)
 target_link_libraries(noninstrumented_test_program PRIVATE callstacklogger)
 cslg_apply_sanitizers(noninstrumented_test_program)
 
-# Exercises the public get_call_stack() API (on-demand stack capture).
+# Threads is needed by the api programs (concurrent worker-thread captures)
+# and by the threaded traced programs further down.
+find_package(Threads REQUIRED)
+
+# Exercises the public get_call_stack() API (on-demand stack capture), from
+# the main thread and from two concurrently-capturing worker threads.
 # Links plain callstacklogger — no per-call hooks needed.
 add_executable(callstack_api_program callstack_api_program.cpp)
 target_compile_features(callstack_api_program PRIVATE cxx_std_17)
-target_link_libraries(callstack_api_program PRIVATE callstacklogger)
+target_link_libraries(callstack_api_program PRIVATE callstacklogger Threads::Threads)
 # Keep every chain frame physically on the stack in optimized suite builds:
 # backtrace() cannot see frames removed by sibling-call optimization, and the
 # test asserts the exact ancestor chain. Complements the noinline attributes
@@ -42,7 +47,8 @@ cslg_apply_sanitizers(callstack_api_program)
 # takes s_bfd_mutex outside any hook while hooks fire around it).
 add_executable(callstack_api_program_instrumented callstack_api_program.cpp)
 target_compile_features(callstack_api_program_instrumented PRIVATE cxx_std_17)
-target_link_libraries(callstack_api_program_instrumented PRIVATE callstacklogger_instrumented)
+target_link_libraries(callstack_api_program_instrumented PRIVATE callstacklogger_instrumented
+    Threads::Threads)
 cslg_apply_sanitizers(callstack_api_program_instrumented)
 
 # Stripped-caller regression fixture: a shared library whose file-local function
@@ -96,7 +102,6 @@ cslg_apply_sanitizers(global_dtor_traced_program)
 
 # Multi-threaded traced test program. Exercises per-thread trace files by spawning
 # worker threads, each of which produces its own <base>_tid_<tid> file.
-find_package(Threads REQUIRED)
 add_executable(threaded_traced_test_program threaded_traced_program.cpp)
 target_compile_features(threaded_traced_test_program PRIVATE cxx_std_17)
 target_link_libraries(threaded_traced_test_program PRIVATE callstacklogger_instrumented Threads::Threads)
