@@ -39,7 +39,6 @@
 #include <dlfcn.h> // for dladdr
 #include <execinfo.h> // for backtrace
 #include <fstream>
-#include <cstring>
 #include <map>
 #include <memory>
 #include <stdexcept>

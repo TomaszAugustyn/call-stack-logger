@@ -97,7 +97,9 @@ public:
 
         std::unique_ptr<bfd, deleter_t*> abfd;
         std::unique_ptr<asymbol*[], SymbolDeleter> symbols;
-        intptr_t offset;
+        // Assigned by ensure_bfd_loaded() just before the map emplace; the
+        // zero-init keeps the member from ever being read indeterminate.
+        intptr_t offset = 0;
 
         NO_INSTRUMENT storedBfd(bfd* _abfd, deleter_t* _del) : abfd(_abfd, _del) {}
         // Explicit move operations and destructor with NO_INSTRUMENT keep the
