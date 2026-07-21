@@ -95,6 +95,15 @@ of that thread's trace, and with `LOG_ELAPSED` later exits can patch durations o
 wrong lines while the unwound frames' own lines keep `[  pending ]`. If the code you
 trace throws exceptions across instrumented frames, prefer GCC.
 
+**Known limitation — `longjmp` / `setjmp` (both compilers).** `longjmp` restores the
+stack without running any cleanups, so the exit hooks of the jumped-over instrumented
+frames never fire — on GCC too, since no unwinder is involved. The effect is the same
+as the Clang exception case above: tree indentation drifts one level deeper per
+skipped frame for the rest of that thread's trace, and with `LOG_ELAPSED` later exits
+patch durations onto the wrong lines. Avoid tracing code that `longjmp`s across
+instrumented frames (or keep such code in a translation unit compiled without
+`-finstrument-functions`).
+
 ## :jigsaw: Integrating into your own project ##
 
 Call Stack Logger ships a CMake target (`callstacklogger::instrumented`) that carries

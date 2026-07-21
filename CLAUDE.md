@@ -875,6 +875,10 @@ make
 ctest --output-on-failure
 ```
 
+With `-DDISABLE_INSTRUMENTATION=ON` the integration suite is skipped at configure
+time (it asserts on trace output the disabled hooks can never produce); unit tests
+still build and run.
+
 ### Code Coverage
 
 Requires `lcov` 2.0+ (Ubuntu 24.04, Fedora 40+). Older lcov versions use different flags.
@@ -1059,7 +1063,9 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    exception-heavy code. A code-level self-heal (recording the callee address
    per slot and popping stale entries on mismatch) was considered and rejected
    for now: it cannot disambiguate recursive frames (same callee address at
-   several depths).
+   several depths). `longjmp`/`setjmp` causes the same drift on BOTH compilers —
+   `longjmp` runs no cleanups, so jumped-over frames' exit hooks never fire
+   (documented in README next to the Clang exception limitation).
 10. **Signal handlers must not be instrumented (known limitation):** the hooks
    allocate, lock `s_bfd_mutex`, and use stdio — none async-signal-safe. A signal
    interrupting a thread mid-`malloc` whose handler runs instrumented functions

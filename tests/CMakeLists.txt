@@ -24,4 +24,14 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 add_subdirectory(unit)
-add_subdirectory(integration)
+
+# Integration tests execute instrumented programs and assert on their trace
+# output; with DISABLE_INSTRUMENTATION=ON the hooks are compiled out, so the
+# whole suite would fail by design. Unit tests (pure header functions,
+# unaffected by the flag) still build and run.
+if(DISABLE_INSTRUMENTATION)
+    message(STATUS "DISABLE_INSTRUMENTATION=ON — skipping integration tests "
+            "(they assert on trace output the disabled hooks can never produce)")
+else()
+    add_subdirectory(integration)
+endif()
