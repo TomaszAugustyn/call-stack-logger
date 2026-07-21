@@ -18,13 +18,25 @@
     #define NO_INLINE __attribute__((noinline))
 #endif
 
+// NO_INSTRUMENT on everything in this header is defense-in-depth: nothing here
+// may ever run instrumented (a hook firing mid-unwind would be re-entrant
+// resolver code). Today that already holds indirectly — GCC excludes this
+// header via the exclude-file-list, and the only instantiation lives in
+// callStack.cpp, which is compiled without -finstrument-functions — but the
+// attribute makes the property local instead of resting on those build-system
+// invariants (e.g. a Clang user TU including this header directly would
+// otherwise emit instrumented COMDAT copies the linker could pick).
+#ifndef NO_INSTRUMENT
+    #define NO_INSTRUMENT __attribute__((no_instrument_function))
+#endif
+
 namespace instrumentation {
 
 struct Callback {
     void* caller;
-    Callback(void* addr) : caller(addr) {}
+    NO_INSTRUMENT Callback(void* addr) : caller(addr) {}
 
-    void operator()(void* addr) { caller = addr; }
+    NO_INSTRUMENT void operator()(void* addr) { caller = addr; }
 };
 
 template <typename F>
@@ -36,7 +48,7 @@ public:
     // RelWithDebInfo build of the library) the optimizer otherwise inlines it into
     // its caller, shortening the chain — the unwind then overshoots the real
     // caller and every trace line gets wrong "called from" info.
-    NO_INLINE void unwind_nth_frame(F& f, size_t frame_number) {
+    NO_INSTRUMENT NO_INLINE void unwind_nth_frame(F& f, size_t frame_number) {
         m_depth = frame_number;
         m_index = -1;
         m_pF = &f;
@@ -56,11 +68,11 @@ private:
     ssize_t m_index;
     F* m_pF;
 
-    static _Unwind_Reason_Code nth_frame_trampoline(_Unwind_Context* ctx, void* self) {
+    NO_INSTRUMENT static _Unwind_Reason_Code nth_frame_trampoline(_Unwind_Context* ctx, void* self) {
         return (static_cast<FrameUnwinder*>(self))->nth_frame_backtrace(ctx);
     }
 
-    _Unwind_Reason_Code nth_frame_backtrace(_Unwind_Context* ctx) {
+    NO_INSTRUMENT _Unwind_Reason_Code nth_frame_backtrace(_Unwind_Context* ctx) {
         if (m_index < (ssize_t)m_depth - 1) {
             m_index += 1;
             return _URC_NO_REASON;
@@ -68,7 +80,7 @@ private:
         return backtrace(ctx);
     }
 
-    _Unwind_Reason_Code backtrace(_Unwind_Context* ctx) {
+    NO_INSTRUMENT _Unwind_Reason_Code backtrace(_Unwind_Context* ctx) {
         if (m_index >= 0 && static_cast<size_t>(m_index) >= m_depth)
             return _URC_END_OF_STACK;
 
@@ -99,7 +111,7 @@ private:
 // NO_INLINE: frame 2 of the fixed chain behind the frame-6 constant — see the
 // note on FrameUnwinder::unwind_nth_frame above.
 template <typename F>
-NO_INLINE void unwind_nth_frame(F& f, size_t frame_number) {
+NO_INSTRUMENT NO_INLINE void unwind_nth_frame(F& f, size_t frame_number) {
     FrameUnwinder<F> unwinder;
     unwinder.unwind_nth_frame(f, frame_number);
 }
