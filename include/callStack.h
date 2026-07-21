@@ -16,14 +16,32 @@
 // PACKAGE_VERSION are defined — without this guard, consumers of the public
 // get_call_stack() API could not include this header on those distros.
 // Mirrors the same workaround in src/callStack.cpp.
+//
+// Only macros WE defined are #undef'd right after the include: leaving empty
+// definitions behind would clash with consumer TUs that define their own
+// PACKAGE afterwards (e.g. an autotools-generated config.h with
+// `#define PACKAGE "myapp"` — a macro redefinition), while a consumer's
+// pre-existing definition is passed through untouched.
 #ifndef PACKAGE
     #define PACKAGE
+    #define CSLG_UNDEF_PACKAGE
 #endif
 #ifndef PACKAGE_VERSION
     #define PACKAGE_VERSION
+    #define CSLG_UNDEF_PACKAGE_VERSION
 #endif
 
 #include <bfd.h>
+
+#ifdef CSLG_UNDEF_PACKAGE
+    #undef PACKAGE
+    #undef CSLG_UNDEF_PACKAGE
+#endif
+#ifdef CSLG_UNDEF_PACKAGE_VERSION
+    #undef PACKAGE_VERSION
+    #undef CSLG_UNDEF_PACKAGE_VERSION
+#endif
+
 #include <dlfcn.h>
 #include <map>
 #include <memory>

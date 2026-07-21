@@ -13,14 +13,28 @@
 #include "unwinder.h"
 
 // Workaround for deliberately incompatible bfd.h header files on some systems.
+// Same define/undef pattern as include/callStack.h (see the comment there);
+// kept self-sufficient here so this TU doesn't depend on header include order.
 #ifndef PACKAGE
     #define PACKAGE
+    #define CSLG_UNDEF_PACKAGE
 #endif
 #ifndef PACKAGE_VERSION
     #define PACKAGE_VERSION
+    #define CSLG_UNDEF_PACKAGE_VERSION
 #endif
 
 #include <bfd.h>
+
+#ifdef CSLG_UNDEF_PACKAGE
+    #undef PACKAGE
+    #undef CSLG_UNDEF_PACKAGE
+#endif
+#ifdef CSLG_UNDEF_PACKAGE_VERSION
+    #undef PACKAGE_VERSION
+    #undef CSLG_UNDEF_PACKAGE_VERSION
+#endif
+
 #include <cxxabi.h> // for __cxa_demangle
 #include <dlfcn.h> // for dladdr
 #include <execinfo.h> // for backtrace
