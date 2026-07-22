@@ -9,7 +9,7 @@ function removes it. As the result call stack tree is produced at the runtime
 giving knowledge of the actual program's flow of execution.
 ## :seedling: Outcome ##
 
-![Call Stack logger capture](misc/call-stack-logger-capture.gif)
+![Call Stack logger capture](misc/call-stack-logger-capture-new.gif)
 ## :book: Article ##
 
 Here is the article on dev.to describing the details of the project, its aim and motivation

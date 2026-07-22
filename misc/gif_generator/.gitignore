@@ -1,0 +1,5 @@
+# Machine-generated files: capture_inputs.sh recreates inputs/, render.py
+# recreates out/. Neither belongs in version control.
+inputs/
+out/
+__pycache__/
