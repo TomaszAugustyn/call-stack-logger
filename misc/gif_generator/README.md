@@ -43,22 +43,38 @@ mv out/call-stack-logger-capture-new.gif ../call-stack-logger-capture.gif
   fc-cache -f ~/.local/share/fonts/ubuntu-mono
   ```
 - Noto Sans (UI labels; present by default on Fedora)
+- A Nerd Font for the Starship prompt glyphs (Fedora logo, git branch,
+  clock) — the renderer uses **FiraMono Nerd Font**
+  (https://www.nerdfonts.com/, install under `~/.local/share/fonts/`)
 
 ## Storyline (edit `build_frames()` in render.py to change it)
 
-1. `main.cpp` opens **without** the fibonacci function; it is typed in live,
-   then the view scrolls down (3 lines per frame, like a mouse wheel) and the
-   `fibonacci(6);` call is typed with its comment in `main()`. The typed
-   result is byte-identical to the real `src/main.cpp`, so the `main.cpp:NN`
-   line numbers in the trace stay truthful.
-2. Terminal: `cmake .. && make run` — captured output cascades.
-3. `trace.out` tab: the default call tree.
-4. Terminal: `cmake -DLOG_ELAPSED=ON ..` is typed; before Enter, a purple
-   frame glow-pulses three times around `-DLOG_ELAPSED=ON` (fade in, hold,
-   fade out).
-5. `trace.out` tab: same tree with the duration column; ~2 s after the view
-   appears, a purple rectangle (`RECT_COLOR` / `RECT_BORDER` in render.py)
-   glow-pulses three times around the column, then the GIF loops.
+The look is VS Code with a slightly darkened Dark+ palette (`BG*` constants)
+and a Starship terminal prompt replicated from the author's `starship.toml`
+(`SEG_*` constants — Pastel Powerline palette: purple os/user segment,
+dark-blue path, peach git branch with a modified-flag, arrow cascade, time
+segment with a rounded cap; clock parsed from the trace files; `❯` prompt
+character). A spacer line sits between the prompt bar and the `❯` input line
+so the glow frame never overlaps the bar. The terminal shows at most
+`TERM_MAX_ROWS` (11) rows so the bottom edge keeps breathing room.
+
+1. `main.cpp` opens **without** class A and **without** fibonacci. Class A
+   and the `A::foo()` call in `B::foo()` are typed in live, quickly; the view
+   then scrolls down until the whole `main()` body is visible and the
+   `A::foo()` call is typed there too.
+2. Terminal: `cmake .. && make run` — real output of the fibonacci-less
+   intermediate build cascades.
+3. `trace.out` tab: the intermediate build's call tree (short view, ~3.5 s).
+4. Back in the editor, fibonacci is typed in, the view scrolls down (3 lines
+   per frame, like a mouse wheel) and `fibonacci(6);` is typed with its
+   comment in `main()`. The result is byte-identical to the real
+   `src/main.cpp`, so `main.cpp:NN` line numbers in the final trace stay
+   truthful.
+5. Terminal: `cmake -DLOG_ELAPSED=ON .. && make run` is typed; before Enter,
+   a purple frame glow-pulses three times around `-DLOG_ELAPSED=ON`.
+6. `trace.out` tab: the full tree with the duration column; ~2 s after the
+   view appears, a purple rectangle (`RECT_COLOR` / `RECT_BORDER`) glow-pulses
+   three times around the column, then the GIF loops.
 
 ## Inputs (`inputs/`, produced by `capture_inputs.sh`)
 
@@ -66,10 +82,15 @@ mv out/call-stack-logger-capture-new.gif ../call-stack-logger-capture.gif
 |------|---------|
 | `act1-cmake.txt`   | `cmake ..` configure output (default) |
 | `act1-makerun.txt` | full-rebuild `make run` output incl. demo stdout |
-| `act2-trace.txt`   | trace.out of the default build (one clean run) |
+| `act2-trace.txt`   | trace.out of the INTERMEDIATE build (no fibonacci) |
 | `act3-cmake.txt`   | `cmake -DLOG_ELAPSED=ON ..` configure output |
-| `act3-makerun.txt` | LOG_ELAPSED rebuild + run output |
-| `act4-trace.txt`   | trace.out with patched duration fields |
+| `act3-makerun.txt` | LOG_ELAPSED rebuild + run output (full file) |
+| `act4-trace.txt`   | trace.out with patched duration fields (full file) |
+
+act1/act2 are captured from an intermediate `src/main.cpp` with the
+fibonacci function and its call removed — in the story, the first build
+happens before fibonacci exists. `capture_inputs.sh` swaps the file in
+temporarily and restores it afterwards (also on interrupt).
 
 ## Things that need updating when the code changes
 
@@ -110,9 +131,9 @@ default integrated-terminal ANSI palette (see CSS in render.py).
 
 ## Output format facts
 
-1200x912 (same as the original), ~220 frames / ~29 s, infinite loop (NETSCAPE
-extension), per-frame delays in centiseconds. Size (~7 MB) comes from
-`-fuzz 4% -layers OptimizePlus`; plain palette reduction (`-colors`) does NOT
+1200x912 (same as the original), ~290 frames / ~32 s, infinite loop (NETSCAPE
+extension), per-frame delays in centiseconds. Size (~6 MB) comes from
+`-fuzz 6% -layers OptimizePlus`; plain palette reduction (`-colors`) does NOT
 help — the cost is antialiased-text diff area, not color count. GitHub renders
 README GIFs up to ~10 MB.
 
