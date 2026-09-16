@@ -520,6 +520,14 @@ Defines `instrumentation::ResolvedFrame` struct with fields:
 - `timestamp` (string), `callee_address` (optional void*), `callee_function_name` (string),
   `caller_filename` (string), `caller_line_number` (optional unsigned int)
 
+Its special members (default/copy/move constructors, assignments, destructor) are
+declared explicitly as `= default` with `NO_INSTRUMENT`. An implicitly-defined
+special member is emitted in whichever TU first needs it; for an instrumented
+program that calls `get_call_stack()` that is the user's TU, where the hooks are
+on and GCC's header-path exclude list cannot help (the member has no declaring
+header). Without the explicit declarations every frame the user's code destroyed
+produced a `ResolvedFrame::~ResolvedFrame()` noise line on both compilers.
+
 ### `include/callStack.h`
 Declares the `bfdResolver` struct with:
 - `storedBfd` inner struct wrapping a `bfd*` with unique_ptr and symbol table

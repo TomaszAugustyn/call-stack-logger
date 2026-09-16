@@ -1096,6 +1096,17 @@ TEST(CallStackApiTest, WorksFromInstrumentedProgram) {
             << "Trace file missing callstack_top — hooks did not run. Trace:\n" << trace;
     EXPECT_NE(trace.find("callstack_mid"), std::string::npos)
             << "Trace file missing callstack_mid — hooks did not run";
+
+    // The library's own value type must not leak into the trace. ResolvedFrame's
+    // special members are emitted in the user's (instrumented) TU, so without their
+    // explicit NO_INSTRUMENT declarations in types.h every frame the program
+    // destroyed produced a "ResolvedFrame::~ResolvedFrame()" line on both compilers.
+    EXPECT_EQ(trace.find("ResolvedFrame::~ResolvedFrame"), std::string::npos)
+            << "ResolvedFrame destructor was instrumented in the user's TU. Trace:\n" << trace;
+    EXPECT_EQ(trace.find("ResolvedFrame::ResolvedFrame"), std::string::npos)
+            << "ResolvedFrame constructor was instrumented in the user's TU. Trace:\n" << trace;
+    EXPECT_EQ(trace.find("ResolvedFrame::operator="), std::string::npos)
+            << "ResolvedFrame assignment was instrumented in the user's TU. Trace:\n" << trace;
 }
 
 // ============================================================================
