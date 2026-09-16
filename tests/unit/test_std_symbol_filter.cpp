@@ -52,6 +52,19 @@ TEST(StdSymbolFilterTest, VolatileQualifiedStdMemberFiltered) {
     EXPECT_TRUE(is_std_library_symbol("_ZNVSt6atomicIiE5storeEi"));
 }
 
+TEST(StdSymbolFilterTest, RefQualifiedStdMembersFiltered) {
+    // Itanium ref-qualifiers R (&) and O (&&) follow the cv-qualifiers after 'N'.
+    // std::optional<unsigned>::operator*() const & — leaked into Clang traces before
+    // the filter learned to skip the ref-qualifier.
+    EXPECT_TRUE(is_std_library_symbol("_ZNKRSt8optionalIjEdeEv"));
+    // std::optional<unsigned>::operator*() && — no cv-qualifier, just 'O'.
+    EXPECT_TRUE(is_std_library_symbol("_ZNOSt8optionalIjEdeEv"));
+    // std::optional<unsigned>::operator*() & — no cv-qualifier, just 'R'.
+    EXPECT_TRUE(is_std_library_symbol("_ZNRSt8optionalIjEdeEv"));
+    // std::optional<unsigned>::value() const && — cv-qualifier plus 'O'.
+    EXPECT_TRUE(is_std_library_symbol("_ZNKOSt8optionalIjE5valueEv"));
+}
+
 TEST(StdSymbolFilterTest, LocalEntityInsideStdFunctionFiltered) {
     // _ZZ prefix: local entity (e.g. a _Guard class) inside a std:: function.
     EXPECT_TRUE(is_std_library_symbol("_ZZNSt6vectorIiSaIiEE17_M_realloc_insertEvE6_Guard"));
@@ -99,6 +112,13 @@ TEST(StdSymbolFilterTest, UserFreeFunctionNotFiltered) {
 
 TEST(StdSymbolFilterTest, UserNamespaceAndClassNotFiltered) {
     EXPECT_FALSE(is_std_library_symbol("_ZN4user3fooEv"));
+}
+
+TEST(StdSymbolFilterTest, RefQualifiedUserMemberNotFiltered) {
+    // user::foo() const & / user::foo() && — skipping the ref-qualifier must not
+    // make a length-prefixed user component look like a std:: prefix.
+    EXPECT_FALSE(is_std_library_symbol("_ZNKR4user3fooEv"));
+    EXPECT_FALSE(is_std_library_symbol("_ZNO4user3fooEv"));
 }
 
 TEST(StdSymbolFilterTest, UserNameStartingWithCapitalSNotFiltered) {

@@ -140,14 +140,16 @@ tests cover it everywhere, but consulted only under `#ifdef __clang__` in `callS
 checks the Itanium C++ ABI mangled name for known std library prefixes before expensive BFD
 resolution:
 - `__cxa_*` — C++ ABI runtime functions
-- `_Z[N[cv]]St*` — `std::` functions and members
-- `_Z[N[cv]]S[absiod]*` — std substitutions (allocator, basic_string, string, etc.)
-- `_Z[N[cv]]9__gnu_cxx*` — GNU C++ extensions (`__normal_iterator`, etc.)
-- `_Z[N[cv]]10__cxxabiv1*` — C++ ABI internals
-- `_Z[N[cv]]11__gnu_debug*` — GNU debug-mode containers
+- `_Z[N[cv][ref]]St*` — `std::` functions and members
+- `_Z[N[cv][ref]]S[absiod]*` — std substitutions (allocator, basic_string, string, etc.)
+- `_Z[N[cv][ref]]9__gnu_cxx*` — GNU C++ extensions (`__normal_iterator`, etc.)
+- `_Z[N[cv][ref]]10__cxxabiv1*` — C++ ABI internals
+- `_Z[N[cv][ref]]11__gnu_debug*` — GNU debug-mode containers
 - `_ZZ` prefix — local entities inside std library functions (e.g., `_Guard` classes)
 
-Where `[cv]` = optional cv-qualifiers (K=const, V=volatile, r=restrict).
+Where `[cv]` = optional cv-qualifiers (K=const, V=volatile, r=restrict) and `[ref]` =
+optional ref-qualifier (R=`&`, O=`&&`) — e.g. `std::optional<T>::operator*() const &`
+mangles as `_ZNKRSt8optional...`, so the ref-qualifier must be skipped too.
 
 This filter runs inside `resolve_function_name()` right after `dladdr()` and before BFD
 loading, so filtered functions avoid the expensive BFD symbol resolution entirely. It is

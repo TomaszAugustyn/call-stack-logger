@@ -34,13 +34,16 @@ namespace instrumentation {
  *
  * Matched patterns:
  *   __cxa_*              — C++ ABI runtime (atexit, guard_acquire, etc.)
- *   _Z[N[cv]]St*         — std:: functions and members (St = std:: in Itanium ABI)
- *   _Z[N[cv]]S[absiod]*  — std:: substitutions (allocator, basic_string, string, etc.)
- *   _Z[N[cv]]9__gnu_cxx*     — GNU C++ extensions (__normal_iterator, etc.)
- *   _Z[N[cv]]10__cxxabiv1*   — C++ ABI internals
- *   _Z[N[cv]]11__gnu_debug*  — GNU debug-mode containers (_GLIBCXX_DEBUG)
+ *   _Z[N[cv][ref]]St*         — std:: functions and members (St = std:: in Itanium ABI)
+ *   _Z[N[cv][ref]]S[absiod]*  — std:: substitutions (allocator, basic_string, string, etc.)
+ *   _Z[N[cv][ref]]9__gnu_cxx*     — GNU C++ extensions (__normal_iterator, etc.)
+ *   _Z[N[cv][ref]]10__cxxabiv1*   — C++ ABI internals
+ *   _Z[N[cv][ref]]11__gnu_debug*  — GNU debug-mode containers (_GLIBCXX_DEBUG)
  *
- * Where [cv] = optional cv-qualifiers: K (const), V (volatile), r (restrict).
+ * Where [cv] = optional cv-qualifiers: K (const), V (volatile), r (restrict), and
+ * [ref] = optional ref-qualifier: R (&), O (&&). Both precede the first name component
+ * of a nested name (<nested-name> ::= N [<CV-qualifiers>] [<ref-qualifier>] ...), so
+ * e.g. std::optional<T>::operator*() const & mangles as _ZNKRSt8optional...
  *
  * Pure string parsing with no dependencies — lives in a header (compiled on both
  * compilers, USED only under Clang in callStack.cpp) so unit tests can exercise
@@ -64,11 +67,16 @@ inline bool is_std_library_symbol(const char* mangled_name) {
     if (*p == 'Z') {
         p++;
     }
-    // Handle nested names: _ZN[cv-qualifiers]...
-    // 'N' starts a nested name; K=const, V=volatile, r=restrict are cv-qualifiers.
+    // Handle nested names: _ZN[cv-qualifiers][ref-qualifier]...
+    // 'N' starts a nested name; K=const, V=volatile, r=restrict are cv-qualifiers,
+    // followed by an optional ref-qualifier R (&) or O (&&) for ref-qualified members
+    // such as std::optional<T>::operator*() const & (_ZNKRSt8optional...).
     if (*p == 'N') {
         p++;
         while (*p == 'K' || *p == 'V' || *p == 'r') {
+            p++;
+        }
+        if (*p == 'R' || *p == 'O') {
             p++;
         }
     }
