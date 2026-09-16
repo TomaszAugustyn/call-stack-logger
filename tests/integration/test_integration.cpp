@@ -52,6 +52,9 @@
 #ifndef STRIPPED_CALLER_PROGRAM_PATH
     #error "STRIPPED_CALLER_PROGRAM_PATH must be defined by CMake"
 #endif
+#ifndef DLOPEN_CTOR_PROGRAM_PATH
+    #error "DLOPEN_CTOR_PROGRAM_PATH must be defined by CMake"
+#endif
 #ifndef OVERFLOW_DEPTH_PROGRAM_PATH
     #error "OVERFLOW_DEPTH_PROGRAM_PATH must be defined by CMake"
 #endif
@@ -1698,4 +1701,33 @@ TEST(GlobalDtorTest, InstrumentedGlobalDestructorAtExitIsSafe) {
     unlink(trace_path.c_str());
     unlink(stdout_path.c_str());
     rmdir(dir.c_str());
+}
+
+// ============================================================================
+// dlopen() of an instrumented plugin while another thread traces. The plugin's
+// static initializer fires the enter hook on the dlopen() thread, with glibc's
+// loader lock held, and the hook takes s_bfd_mutex. The resolver used to call
+// dladdr() — which takes the loader lock — with s_bfd_mutex held, so the two
+// threads deadlocked whenever the tracing thread was on its cold path. The
+// driver keeps one thread on the cold path (thousands of never-seen callees)
+// while another dlopen()s the plugin in a loop; it runs under `timeout`, so a
+// regression shows up as exit code 124 instead of hanging the suite.
+// ============================================================================
+
+TEST(DlopenConstructorTest, InstrumentedPluginConstructorDoesNotDeadlock) {
+    char dir_tmpl[] = "/tmp/cslg_dlopen_ctor_XXXXXX";
+    char* d = mkdtemp(dir_tmpl);
+    ASSERT_NE(d, nullptr) << "mkdtemp failed";
+    const std::string dir = d;
+
+    std::string cmd = "DEBUGINFOD_URLS= CSLG_OUTPUT_FILE=\"" + dir + "/trace.out\" timeout 30 \""
+                    + DLOPEN_CTOR_PROGRAM_PATH + "\" > \"" + dir + "/stdout.txt\" 2>&1";
+    const int status = system(cmd.c_str());
+    const std::string out = read_file(dir + "/stdout.txt");
+    remove_dir_tree(dir);
+
+    EXPECT_EQ(status, 0) << "dlopen_ctor_traced_program did not finish (raw status " << status
+                         << "; 124<<8 means killed by timeout — the dladdr/dlopen lock-order "
+                            "deadlock has regressed). Output:\n" << out;
+    EXPECT_NE(out.find("DLOPEN_CTOR_DONE"), std::string::npos) << "Output:\n" << out;
 }

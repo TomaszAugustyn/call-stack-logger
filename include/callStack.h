@@ -133,12 +133,19 @@ private:
     static asection* find_containing_section(storedBfd& currBfd, void* address,
                                              intptr_t& offset_out);
 
+    /// Names the callee from `dl_info`, the dladdr() result for callee_address
+    /// (nullptr when dladdr() failed). Must be called with s_bfd_mutex held; the
+    /// dladdr() call itself is made by resolve_no_unwind() OUTSIDE the mutex —
+    /// see the lock-order note there.
     NO_INSTRUMENT
-    static std::optional<std::string> resolve_function_name(void* callee_address);
+    static std::optional<std::string> resolve_function_name(void* callee_address,
+                                                            const Dl_info* dl_info);
 
+    /// Same contract as resolve_function_name(): `dl_info` is the caller's
+    /// dladdr() result, obtained outside s_bfd_mutex.
     NO_INSTRUMENT
     static std::pair<std::string, std::optional<unsigned int>> resolve_filename_and_line(
-            void* caller_address);
+            void* caller_address, const Dl_info* dl_info);
 
     NO_INSTRUMENT
     static void check_bfd_initialized();
@@ -239,7 +246,9 @@ private:
 
     inline static bool s_bfd_initialized = false;
     // Protects bfds(), s_bfd_initialized, the memoization caches, and BFD
-    // library calls which are not thread-safe.
+    // library calls which are not thread-safe. Lock-order rule: nothing that
+    // takes glibc's loader lock — dladdr() above all — may run while this
+    // mutex is held; see resolve_no_unwind() in callStack.cpp for why.
     inline static std::mutex s_bfd_mutex;
 };
 

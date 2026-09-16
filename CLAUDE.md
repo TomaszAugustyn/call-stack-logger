@@ -50,7 +50,15 @@ Results are **memoized per address**: `resolve_no_unwind()` consults two hash ma
 (callee address → demangled name, call-site address → file:line, both in
 `callStack.h`) before running the stages above, so the full dladdr + BFD + demangle
 pipeline executes only on first sight of each address — every repeat call is a hash
-lookup under the same mutex. A cached `nullopt` name records "filtered / not
+lookup under the same mutex. On a miss, `dladdr()` runs with `s_bfd_mutex` RELEASED and
+only the BFD work plus the cache insertion re-take it. This is a lock-order rule, not a
+micro-optimization: glibc's `_dl_addr` takes the loader lock (`dl_load_lock`), and
+`dlopen()` holds that lock while it runs the loaded object's constructors — the static
+initializer of an instrumented plugin fires the enter hook on the `dlopen()` thread, and
+that hook takes `s_bfd_mutex`. Calling `dladdr()` with `s_bfd_mutex` held deadlocked
+exactly that way (thread A: mutex → loader lock; thread B: loader lock → mutex), pinned
+by `DlopenConstructorTest`. Nothing that takes the loader lock may run under
+`s_bfd_mutex`. A cached `nullopt` name records "filtered / not
 loggable", which also turns Clang's runtime std-library filter into a hash hit on
 repeat calls — permanently-filtered callees (internal-linkage `static` functions
 on both compilers, std-library instantiations on Clang) cost one hash lookup and
@@ -471,6 +479,8 @@ call-stack-logger/
 |       |-- callstack_api_program.cpp # Non-instrumented; exercises get_call_stack() API
 |       |-- stripped_caller_lib.cpp # Shared-lib fixture, stripped of symtab/debug info post-build
 |       |-- stripped_caller_program.cpp # Instrumented; callback invoked from the stripped lib
+|       |-- dlopen_ctor_plugin.cpp    # Instrumented shared lib with a static initializer, dlopen()ed at runtime
+|       |-- dlopen_ctor_traced_program.cpp # Instrumented; dlopen()s the plugin while another thread traces cold addresses
 |       |-- test_integration.cpp # All integration tests (single/multi-threaded + API)
 |-- misc/
 |   |-- call-stack-logger-capture.gif  # Demo capture for README
@@ -763,6 +773,13 @@ Test pure/deterministic functions from the include headers:
   `CSLG_OUTPUT_FILE` at a symlink; `O_NOFOLLOW` must refuse it (ELOOP), the
   program still exits 0 with the documented warning, and the symlink's target
   stays empty (pins the security behavior).
+- `DlopenConstructorTest.InstrumentedPluginConstructorDoesNotDeadlock` — runs
+  `dlopen_ctor_traced_program` under `timeout 30`: one thread resolves ~2400 never-seen
+  callees (distinct template instantiations, so each call is a cache miss) while another
+  `dlopen()`s/`dlclose()`s `dlopen_ctor_plugin` in a loop. The plugin's instrumented
+  static initializer fires the enter hook with glibc's loader lock held; with `dladdr()`
+  under `s_bfd_mutex` the two threads deadlocked on every run (exit 124). Pins the
+  lock-order rule in `resolve_no_unwind()`.
 - `StrippedCallerTest.CallerInStrippedLibraryDoesNotHang` — regression test for
   the `resolve_filename_and_line()` infinite loop: the instrumented callback's
   caller address lies in a file-local function of the stripped
@@ -986,8 +1003,10 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    `FILE*` lives in an RAII `PerThreadTraceFile` member whose destructor runs on
    thread exit. **Zero mutex on the hot write path** — each thread writes to its own
    FILE*. `open_files_mutex` is taken only during open (once per thread) and during
-   shutdown (to fflush the registry). `s_bfd_mutex` is still held for the entire
-   `resolve()` call because BFD is not thread-safe — but file I/O is fully parallel.
+   shutdown (to fflush the registry). `s_bfd_mutex` serializes all BFD work and the
+   memoization caches (BFD is not thread-safe); `dladdr()` runs outside it (lock-order
+   rule, see the memoization paragraph in the resolution pipeline) and file I/O is
+   fully parallel.
    **Shutdown does NOT close other threads' descriptors** — it only fflushes — to
    avoid UAF on the stdio FILE struct and fd-number-reuse for patch_fd (see the
    Trace File Lifecycle section above). Per-thread destructors close on thread exit.

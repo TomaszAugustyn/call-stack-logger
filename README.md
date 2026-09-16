@@ -408,7 +408,9 @@ Each file starts with a header that includes the owning thread's ID:
 Per-thread state (`thread_local` call stack, re-entrancy guard) and per-thread `FILE*`
 mean the hot write path has **zero cross-thread synchronization** — each thread writes
 to its own file descriptor. BFD symbol resolution is still serialized by a mutex (BFD is
-not thread-safe), but file I/O is fully parallel.
+not thread-safe), but file I/O is fully parallel, and dynamic-linker lookups (`dladdr`)
+run outside that mutex — so a plugin whose constructors are instrumented can be
+`dlopen()`ed while other threads are tracing without deadlocking on the loader lock.
 
 **Shutdown race (documented trade-off):** at program exit, the main thread flushes
 each worker's trace file but deliberately does NOT close other threads' file

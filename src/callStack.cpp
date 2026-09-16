@@ -195,12 +195,14 @@ asection* bfdResolver::find_containing_section(storedBfd& currBfd, void* address
     return nullptr;
 }
 
-std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
-    Dl_info info;
-    // dladdr returns 0 on failure; on failure the Dl_info contents are undefined.
-    if (dladdr(address, &info) == 0 || info.dli_fbase == nullptr) {
+std::optional<std::string> bfdResolver::resolve_function_name(void* address, const Dl_info* dl_info) {
+    // A null dl_info means dladdr() failed for this address (its Dl_info
+    // contents are undefined then, so resolve_no_unwind() passes nothing on).
+    if (dl_info == nullptr) {
         return "<address to object not found>";
     }
+    // Private copy: ensure_bfd_loaded() may redirect dli_fname to /proc/self/exe.
+    Dl_info info = *dl_info;
 #ifndef LOG_NOT_DEMANGLED
     if (info.dli_sname == nullptr) {
         return std::nullopt;
@@ -256,13 +258,15 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address) {
     return demangle_cxa(info.dli_sname != nullptr ? info.dli_sname : "") + " <bfd_error>";
 }
 
-std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filename_and_line(void* address) {
-    // Get path and offset of shared object that contains caller address.
-    Dl_info info;
-    // dladdr returns 0 on failure; on failure the Dl_info contents are undefined.
-    if (dladdr(address, &info) == 0 || info.dli_fbase == nullptr) {
+std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filename_and_line(
+        void* address, const Dl_info* dl_info) {
+    // A null dl_info means dladdr() failed for the caller address (see
+    // resolve_function_name()).
+    if (dl_info == nullptr) {
         return std::make_pair("<caller address to object not found>", std::nullopt);
     }
+    // Private copy: ensure_bfd_loaded() may redirect dli_fname to /proc/self/exe.
+    Dl_info info = *dl_info;
 
     storedBfd* currBfd = ensure_bfd_loaded(info);
     if (currBfd == nullptr) {
@@ -312,6 +316,8 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
 std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
         void* callee_address, void* caller_address) {
     ResolvedFrame resolved;
+    bool have_name = false;
+    bool have_location = false;
     {
         // Lock covers ALL BFD operations: initialization, loading, symbol/section
         // iteration, and bfd_find_nearest_line(). BFD library is not thread-safe —
@@ -320,32 +326,85 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
         // location_cache() memoization maps. Scoped so pretty_time() below — which
         // needs no BFD state — runs after the lock is released instead of extending
         // the global serialization window every traced call shares.
+        //
+        // Warm path: both memoized lookups hit (see the cache comments in
+        // callStack.h) and no BFD work happens at all. The cached values are read
+        // in place. A cached nullopt name means "filtered / not loggable" and is
+        // honored as such.
         std::lock_guard<std::mutex> lock(s_bfd_mutex);
         check_bfd_initialized();
-
-        // Memoized callee-name resolution — see the cache comments in callStack.h.
-        // A cached nullopt means "filtered / not loggable" and is honored as such.
-        // The cached value is read in place: no optional<string> copy on a hit, and
-        // on a miss the freshly resolved value moves straight into the map.
         auto name_it = name_cache().find(callee_address);
-        if (name_it == name_cache().end()) {
-            name_it = name_cache().emplace(callee_address,
-                                           resolve_function_name(callee_address)).first;
+        if (name_it != name_cache().end()) {
+            if (!name_it->second) {
+                return std::nullopt;
+            }
+            resolved.callee_function_name = *name_it->second;
+            have_name = true;
         }
-        const std::optional<std::string>& maybe_func_name = name_it->second;
-        if (!maybe_func_name) {
-            return std::nullopt;
-        }
-        resolved.callee_function_name = *maybe_func_name;
-
-        // Memoized caller-location resolution (same call site → same file:line).
         auto loc_it = location_cache().find(caller_address);
-        if (loc_it == location_cache().end()) {
-            loc_it = location_cache().emplace(caller_address,
-                                              resolve_filename_and_line(caller_address)).first;
+        if (loc_it != location_cache().end()) {
+            resolved.caller_filename = loc_it->second.first;
+            resolved.caller_line_number = loc_it->second.second;
+            have_location = true;
         }
-        resolved.caller_filename = loc_it->second.first;
-        resolved.caller_line_number = loc_it->second.second;
+    }
+
+    if (!have_name || !have_location) {
+        // Cold path: first sight of the callee and/or the call site.
+        //
+        // dladdr() runs OUTSIDE s_bfd_mutex, deliberately. glibc's _dl_addr takes
+        // the loader lock (dl_load_lock), and dlopen() holds that same lock while it
+        // runs the loaded object's constructors. The static initializer of an
+        // instrumented plugin fires the enter hook on the dlopen() thread with the
+        // loader lock held, and that hook takes s_bfd_mutex. A resolver that called
+        // dladdr() with s_bfd_mutex held could therefore deadlock against it:
+        //   thread A: s_bfd_mutex held  -> dladdr() waits for dl_load_lock
+        //   thread B: dl_load_lock held -> enter hook waits for s_bfd_mutex
+        // (reproduced with a plugin dlopen()ed while another thread traced not-yet-
+        // cached addresses; pinned by DlopenConstructorTest). dladdr() is thread-safe
+        // on its own; only BFD and the caches need the mutex. On failure the Dl_info
+        // contents are undefined, so a failed lookup is passed on as a null pointer.
+        Dl_info callee_info {};
+        Dl_info caller_info {};
+        const Dl_info* callee_dl = nullptr;
+        const Dl_info* caller_dl = nullptr;
+        if (!have_name && dladdr(callee_address, &callee_info) != 0
+            && callee_info.dli_fbase != nullptr) {
+            callee_dl = &callee_info;
+        }
+        if (!have_location && dladdr(caller_address, &caller_info) != 0
+            && caller_info.dli_fbase != nullptr) {
+            caller_dl = &caller_info;
+        }
+
+        std::lock_guard<std::mutex> lock(s_bfd_mutex);
+        // Another thread may have resolved the same address while the mutex was
+        // released; find-or-emplace keeps exactly one entry per address either way,
+        // and on a miss the freshly resolved value moves straight into the map.
+        if (!have_name) {
+            auto name_it = name_cache().find(callee_address);
+            if (name_it == name_cache().end()) {
+                name_it = name_cache()
+                                  .emplace(callee_address,
+                                           resolve_function_name(callee_address, callee_dl))
+                                  .first;
+            }
+            if (!name_it->second) {
+                return std::nullopt;
+            }
+            resolved.callee_function_name = *name_it->second;
+        }
+        if (!have_location) {
+            auto loc_it = location_cache().find(caller_address);
+            if (loc_it == location_cache().end()) {
+                loc_it = location_cache()
+                                 .emplace(caller_address,
+                                          resolve_filename_and_line(caller_address, caller_dl))
+                                 .first;
+            }
+            resolved.caller_filename = loc_it->second.first;
+            resolved.caller_line_number = loc_it->second.second;
+        }
     }
 
 #ifdef LOG_ADDR
