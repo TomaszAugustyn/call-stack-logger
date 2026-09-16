@@ -4,9 +4,19 @@
 # in static storage that are not released until program exit. LSan reports
 # these as "direct leaks" on Clang (GCC's libasan is more lenient). They
 # are not leaks in cslg's code — we keep the BFD handles open intentionally
-# (s_bfds map) because every trace event reuses them.
+# (the bfds() object cache) because every trace event reuses them.
+#
+# Patterns are matched as substrings of every frame's function name (and
+# module name) in the leak's stack trace, so they are anchored with '^' to
+# libbfd's own symbol prefixes. An unanchored 'bfd_' would also match cslg's
+# own frames — bfdResolver::ensure_bfd_loaded, check_bfd_initialized,
+# bfd_load_failed — and silently hide a genuine cslg leak allocated there.
+# 'leak:libbfd' is a module match and only matters where libbfd is a shared
+# library (Ubuntu); Fedora links the static libbfd.a, where the function
+# prefixes below are what actually fire.
 #
 # Usage:
 #   LSAN_OPTIONS=suppressions=$PWD/tests/lsan-suppressions.txt ./your_test
 leak:libbfd
-leak:bfd_
+leak:^bfd_*
+leak:^_bfd_*

@@ -1026,7 +1026,12 @@ cmake -B build-tsan -DBUILD_TESTS=ON -DSANITIZE=thread
 LSan reports from inside `libbfd` (GNU binutils keeps static symbol-table / object-file
 caches live to program exit — not a leak in cslg's code) are silenced via
 `tests/lsan-suppressions.txt`. Pass it with
-`LSAN_OPTIONS=suppressions=.../tests/lsan-suppressions.txt`. Our own allocations are
+`LSAN_OPTIONS=suppressions=.../tests/lsan-suppressions.txt`. The patterns are anchored
+(`leak:^bfd_*`, `leak:^_bfd_*`) because LSan matches them as substrings of every frame
+name — an unanchored `bfd_` also matched cslg's own `bfdResolver::ensure_bfd_loaded` /
+`check_bfd_initialized` / `bfd_load_failed` frames and would hide a genuine cslg leak.
+`leak:libbfd` is a module match that only fires where libbfd is a shared library
+(static `libbfd.a` on Fedora makes it a no-op). Our own allocations are
 still caught. The Clang builds need `libclang-rt-18-dev` (added to the Dockerfile) —
 GCC ships its sanitizer runtimes with `g++`.
 

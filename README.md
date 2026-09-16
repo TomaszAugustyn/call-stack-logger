@@ -570,6 +570,9 @@ as toolchain versions drift.
 The `tests/lsan-suppressions.txt` suppression file silences LeakSanitizer reports
 coming from inside `libbfd` (GNU binutils keeps its symbol-table / object-file caches
 live for the program lifetime — this isn't a leak in cslg's code, it's BFD's design).
+The patterns are anchored to libbfd's own symbol prefixes (`^bfd_*`, `^_bfd_*`) —
+LSan matches suppressions as substrings of frame names, so an unanchored `bfd_`
+would also cover cslg's `bfdResolver::ensure_bfd_loaded` and hide a real leak.
 Cslg-owned allocations are still caught by LSan.
 
 MSan is intentionally unsupported — it requires an MSan-instrumented libstdc++/libc,
