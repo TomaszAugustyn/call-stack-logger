@@ -13,7 +13,7 @@ file locations, line numbers, and visual nesting depth.
 **Article:** https://dev.to/taugustyn/call-stack-logger-function-instrumentation-as-a-way-to-trace-programs-flow-of-execution-419a
 **License:** Dual-licensed under GNU AGPLv3 (default) and commercial/closed-source (contact author)
 **Language Standard:** C++17
-**Target Platform:** Linux (relies on `/proc/self/cmdline`, `/proc/self/exe`, `dladdr`, BFD library)
+**Target Platform:** Linux (relies on `/proc/self/cmdline`, `/proc/self/exe`, `/proc/self/maps`, `dladdr`, BFD library)
 
 ## Architecture & How It Works
 
@@ -42,6 +42,21 @@ Address resolution happens in multiple stages (implemented in `src/callStack.cpp
    table. Uses `bfd_find_nearest_line()` to map an address offset within a section to a source
    filename, function name, and line number. BFD objects are cached in a static
    `std::map<void*, storedBfd>` so each object file is loaded only once.
+   The file to open comes from `object_file_path()`: `/proc/self/exe` for the main
+   executable (`dli_fname` is argv[0] there, which is no valid path for a PATH-found
+   binary), otherwise the absolute path of the mapping containing `dli_fbase` read
+   from `/proc/self/maps` (one parse per new object, under the mutex), falling back
+   to `dli_fname` verbatim. The maps lookup is load-bearing: `dli_fname` is the exact
+   string the object was loaded by — for `dlopen("./plugin.so")` a relative path —
+   and the open happens lazily at first sight of an address, possibly after the
+   program `chdir()`ed, where that string names an unrelated file (symbol names and
+   lines from the wrong object) or nothing (`<could not open object file>`). The
+   kernel records the absolute path at mmap time, so maps is immune to chdir.
+   `/proc/self/map_files/<range>` would be the cleaner source but opening it needs
+   `CAP_SYS_ADMIN` / checkpoint-restore rights (EPERM for a normal user). A
+   since-deleted object's mapping carries a ` (deleted)` suffix; the open fails and
+   the object is negative-cached rather than silently reading a replacement file.
+   Pinned by `DlopenPluginTest.RelativeDlopenPathResolvesAfterChdir`.
 
 3. **`abi::__cxa_demangle()`** (from `<cxxabi.h>`) - Converts GCC-mangled C++ symbol names
    (e.g., `_ZN1A3fooEv`) into human-readable form (e.g., `A::foo()`).
@@ -481,6 +496,8 @@ call-stack-logger/
 |       |-- stripped_caller_program.cpp # Instrumented; callback invoked from the stripped lib
 |       |-- dlopen_ctor_plugin.cpp    # Instrumented shared lib with a static initializer, dlopen()ed at runtime
 |       |-- dlopen_ctor_traced_program.cpp # Instrumented; dlopen()s the plugin while another thread traces cold addresses
+|       |-- dlopen_plugin.cpp       # Instrumented shared lib, dlopen()ed by a relative path
+|       |-- dlopen_traced_program.cpp # Instrumented; dlopen("./plugin") then chdir before first call
 |       |-- test_integration.cpp # All integration tests (single/multi-threaded + API)
 |-- misc/
 |   |-- call-stack-logger-capture.gif  # Demo capture for README
@@ -501,7 +518,7 @@ Declares the `bfdResolver` struct with:
 - `storedBfd` inner struct wrapping a `bfd*` with unique_ptr and symbol table
 - Static methods: `ensure_bfd_loaded()`, `resolve()`, `resolve_function_name()`,
   `resolve_filename_and_line()`, `check_bfd_initialized()`, `get_argv0()`,
-  `ensure_actual_executable()`
+  `object_file_path()`, `mapped_object_path()`
 - Static state behind lazily-initialized function-local-static accessors —
   `bfds()` (object-file cache), `bfd_load_failed()` (negative cache), `name_cache()` /
   `location_cache()` (memoization), `argv0()` — so an instrumented static constructor
@@ -588,7 +605,10 @@ The core implementation. Key functions:
 - `bfdResolver::resolve_no_unwind()` - Memoized callee-name + caller-location resolution
   on two addresses taken verbatim (shared by the hooks and `get_call_stack()`)
 - `bfdResolver::get_argv0()` - Reads `/proc/self/cmdline` for executable path
-- `bfdResolver::ensure_actual_executable()` - Handles PATH-found executables via `/proc/self/exe`
+- `bfdResolver::object_file_path()` - Picks the file `bfd_openr` opens: `/proc/self/exe` for
+  the main executable (PATH-found argv[0] is no path), else the mapping's absolute path from
+  `mapped_object_path()` (`/proc/self/maps`, immune to a relative `dlopen` path + later
+  `chdir`), else `dli_fname`
 - `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames)
 
 ### `src/trace.cpp`
@@ -743,6 +763,9 @@ Test pure/deterministic functions from the include headers:
   stripped library), `overflow_depth_program` (instrumented; recurses 3000
   frames — past MAX_TRACE_DEPTH), `exception_traced_program` (instrumented;
   throws and catches through instrumented frames), and
+  `dlopen_plugin` (instrumented shared library, not linked — dlopen()ed by
+  `dlopen_traced_program` via a RELATIVE path, which then chdir()s to `/`
+  before the first traced call into it),
   `global_dtor_traced_program` (instrumented; a global object's destructor
   calls traced code during exit() — both its ctor window, pre-trace_begin, and
   its dtor window, post-trace_shutdown, must be silent no-ops).
@@ -780,6 +803,13 @@ Test pure/deterministic functions from the include headers:
   static initializer fires the enter hook with glibc's loader lock held; with `dladdr()`
   under `s_bfd_mutex` the two threads deadlocked on every run (exit 124). Pins the
   lock-order rule in `resolve_no_unwind()`.
+- `DlopenPluginTest.RelativeDlopenPathResolvesAfterChdir` — runs
+  `dlopen_traced_program`: the instrumented plugin is dlopen()ed as
+  `./libdlopen_plugin.so` and first entered after `chdir("/")`, so `dli_fname`
+  no longer names the file. Asserts no `<could not open ...>` fallback, both
+  plugin functions traced by name, and the helper's caller attributed to
+  `dlopen_plugin.cpp` — pins the `/proc/self/maps` path lookup in
+  `object_file_path()`.
 - `StrippedCallerTest.CallerInStrippedLibraryDoesNotHang` — regression test for
   the `resolve_filename_and_line()` infinite loop: the instrumented callback's
   caller address lies in a file-local function of the stripped
@@ -975,8 +1005,8 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
 
 ## Design Decisions & Caveats
 
-1. **Linux-only:** Relies on `/proc/self/cmdline`, `/proc/self/exe`, `dladdr`, BFD,
-   `backtrace`, `localtime_r`, `O_NOFOLLOW`. Supports both GCC and Clang compilers.
+1. **Linux-only:** Relies on `/proc/self/cmdline`, `/proc/self/exe`, `/proc/self/maps`,
+   `dladdr`, BFD, `backtrace`, `localtime_r`, `O_NOFOLLOW`. Supports both GCC and Clang compilers.
    **Std library exclusion uses a two-tier approach:**
    - GCC: compile-time via `-finstrument-functions-exclude-file-list` (auto-discovered paths)
    - Clang: runtime via `is_std_library_symbol()` mangled name filter in `resolve_function_name()`

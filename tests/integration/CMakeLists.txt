@@ -94,6 +94,29 @@ target_compile_definitions(dlopen_ctor_traced_program PRIVATE
 target_link_libraries(dlopen_ctor_traced_program PRIVATE callstacklogger_instrumented Threads::Threads)
 add_dependencies(dlopen_ctor_traced_program dlopen_ctor_plugin)
 cslg_apply_sanitizers(dlopen_ctor_traced_program)
+# dlopen()/chdir() regression fixture: an INSTRUMENTED plugin shared library
+# (INSTRUMENT_FLAGS, plus -g for line info — it links no cslg target, so it
+# inherits neither) whose hooks bind at load time to the host executable's
+# exported __cyg_profile_func_* symbols (-rdynamic). The driver dlopen()s it
+# by a RELATIVE path and chdir()s away before the first traced call into it,
+# so the resolver must locate the object file via /proc/self/maps — dladdr's
+# relative dli_fname no longer names it (see DlopenPluginTest). Like
+# stripped_caller, deliberately NOT sanitized: a plain passthrough .so with
+# no allocations or synchronization, kept free of the shared-runtime
+# portability trap.
+add_library(dlopen_plugin SHARED dlopen_plugin.cpp)
+target_compile_features(dlopen_plugin PRIVATE cxx_std_17)
+target_compile_options(dlopen_plugin PRIVATE ${INSTRUMENT_FLAGS} -g)
+
+add_executable(dlopen_traced_program dlopen_traced_program.cpp)
+target_compile_features(dlopen_traced_program PRIVATE cxx_std_17)
+target_compile_definitions(dlopen_traced_program PRIVATE
+    DLOPEN_PLUGIN_DIR="$<TARGET_FILE_DIR:dlopen_plugin>"
+    DLOPEN_PLUGIN_FILE="$<TARGET_FILE_NAME:dlopen_plugin>")
+target_link_libraries(dlopen_traced_program PRIVATE callstacklogger_instrumented)
+# Loaded at runtime only, so no link dependency — make sure it is built anyway.
+add_dependencies(dlopen_traced_program dlopen_plugin)
+cslg_apply_sanitizers(dlopen_traced_program)
 
 # Deep-recursion driver: recurses past MAX_TRACE_DEPTH (2048) so the overflow
 # counter in trace.cpp is exercised end-to-end (see OverflowDepthTest).
@@ -208,6 +231,7 @@ target_compile_definitions(integration_tests PRIVATE
     CALLSTACK_API_PROGRAM_INSTRUMENTED_PATH="$<TARGET_FILE:callstack_api_program_instrumented>"
     STRIPPED_CALLER_PROGRAM_PATH="$<TARGET_FILE:stripped_caller_program>"
     DLOPEN_CTOR_PROGRAM_PATH="$<TARGET_FILE:dlopen_ctor_traced_program>"
+    DLOPEN_TRACED_PROGRAM_PATH="$<TARGET_FILE:dlopen_traced_program>"
     OVERFLOW_DEPTH_PROGRAM_PATH="$<TARGET_FILE:overflow_depth_program>"
     EXCEPTION_TRACED_PROGRAM_PATH="$<TARGET_FILE:exception_traced_program>"
     GLOBAL_DTOR_PROGRAM_PATH="$<TARGET_FILE:global_dtor_traced_program>"

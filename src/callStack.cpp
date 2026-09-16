@@ -34,6 +34,7 @@
     #undef CSLG_UNDEF_PACKAGE_VERSION
 #endif
 
+#include <cstdlib> // for strtoull
 #include <cxxabi.h> // for __cxa_demangle
 #include <dlfcn.h> // for dladdr
 #include <execinfo.h> // for backtrace
@@ -107,17 +108,18 @@ bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
         if (bfd_load_failed().count(_info.dli_fbase) != 0) {
             return nullptr;
         }
-        ensure_actual_executable(_info);
-        // dladdr() can succeed (dli_fbase set) yet leave dli_fname null — e.g.
-        // for objects the dynamic linker knows no path for. bfd_openr must not
-        // receive a null filename; negative-cache like any other unloadable object.
-        if (_info.dli_fname == nullptr) {
+        // An empty path means no usable file name exists for this object (no
+        // mapping found and dladdr() left dli_fname null — e.g. objects the
+        // dynamic linker knows no path for). bfd_openr must not receive that;
+        // negative-cache like any other unloadable object.
+        const std::string path = object_file_path(_info);
+        if (path.empty()) {
             bfd_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
         // Stack local (moved into the map on success) — no reason to heap-allocate
         // a temporary that is unconditionally consumed or discarded in this scope.
-        storedBfd newBfd(bfd_openr(_info.dli_fname, nullptr), &bfd_close);
+        storedBfd newBfd(bfd_openr(path.c_str(), nullptr), &bfd_close);
         if (!newBfd.abfd) {
             bfd_load_failed().insert(_info.dli_fbase);
             return nullptr;
@@ -161,10 +163,48 @@ std::string bfdResolver::get_argv0() {
     return argv0;
 }
 
-void bfdResolver::ensure_actual_executable(Dl_info& symbol_info) {
-    // Mutates symbol_info.dli_fname to be filename to open and returns filename
-    // to display. The null check is load-bearing: comparing a null const char*
-    // against std::string is undefined behavior.
+std::optional<std::string> bfdResolver::mapped_object_path(void* base) {
+    // Each /proc/self/maps line reads "start-end perms offset dev inode [path]".
+    // The path column is absent for anonymous mappings, is a bracketed
+    // pseudo-name for [vdso] / [stack] and friends, and may contain spaces.
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    const unsigned long long target = reinterpret_cast<uintptr_t>(base);
+    while (std::getline(maps, line)) {
+        char* cursor = nullptr;
+        const unsigned long long start = std::strtoull(line.c_str(), &cursor, 16);
+        if (cursor == line.c_str() || *cursor != '-') {
+            continue;
+        }
+        const char* range_end = cursor + 1;
+        const unsigned long long end = std::strtoull(range_end, &cursor, 16);
+        if (cursor == range_end || target < start || target >= end) {
+            continue;
+        }
+        // Skip the four fixed columns (perms, offset, dev, inode) to reach the path.
+        size_t pos = static_cast<size_t>(cursor - line.c_str());
+        for (int column = 0; column < 4; ++column) {
+            pos = line.find_first_not_of(' ', pos);
+            if (pos == std::string::npos) {
+                return std::nullopt;
+            }
+            pos = line.find(' ', pos);
+            if (pos == std::string::npos) {
+                return std::nullopt;
+            }
+        }
+        pos = line.find_first_not_of(' ', pos);
+        if (pos == std::string::npos || line[pos] != '/') {
+            return std::nullopt;
+        }
+        return line.substr(pos);
+    }
+    return std::nullopt;
+}
+
+std::string bfdResolver::object_file_path(const Dl_info& symbol_info) {
+    // The null check is load-bearing: comparing a null const char* against
+    // std::string is undefined behavior.
     if (symbol_info.dli_fname != nullptr && symbol_info.dli_fname == argv0()) {
         // dladdr returns argv[0] in dli_fname for symbols contained in
         // the main executable, which is not a valid path if the
@@ -172,8 +212,23 @@ void bfdResolver::ensure_actual_executable(Dl_info& symbol_info) {
         // variable; In that case, we actually open /proc/self/exe, which
         // is always the actual executable (even if it was deleted/replaced!)
         // but display the path that /proc/self/exe links to.
-        symbol_info.dli_fname = "/proc/self/exe";
+        return "/proc/self/exe";
     }
+    // For every other object dli_fname is the string the dynamic linker loaded
+    // it by, verbatim — for dlopen("./plugin.so") that is the relative string.
+    // This runs at FIRST SIGHT of an address inside the object, which can be
+    // long after the dlopen and after the program chdir()ed: the relative path
+    // then names an unrelated file (symbol names and lines come from the wrong
+    // object) or nothing ("<could not open object file>" for every frame).
+    // The kernel records the absolute path of each file-backed mapping at mmap
+    // time, so the mapping containing dli_fbase is the reliable source. A
+    // mapping of a since-deleted file carries a " (deleted)" suffix; opening
+    // that fails and the object is negative-cached — honest, unlike silently
+    // reading whatever file now sits at the old path.
+    if (std::optional<std::string> mapped = mapped_object_path(symbol_info.dli_fbase)) {
+        return *mapped;
+    }
+    return symbol_info.dli_fname != nullptr ? std::string(symbol_info.dli_fname) : std::string();
 }
 
 asection* bfdResolver::find_containing_section(storedBfd& currBfd, void* address,

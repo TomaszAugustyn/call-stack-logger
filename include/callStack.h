@@ -153,8 +153,17 @@ private:
     NO_INSTRUMENT
     static std::string get_argv0();
 
+    /// Absolute path of the file mapped at `base`, taken from /proc/self/maps
+    /// (the kernel records it at mmap time, so it stays valid after chdir()).
+    /// nullopt when no file-backed mapping contains `base`.
     NO_INSTRUMENT
-    static void ensure_actual_executable(Dl_info& symbol_info);
+    static std::optional<std::string> mapped_object_path(void* base);
+
+    /// Path to hand to bfd_openr for the object described by `symbol_info`:
+    /// /proc/self/exe for the main executable, else the mapped file's absolute
+    /// path, else dli_fname verbatim. Empty when nothing usable exists.
+    NO_INSTRUMENT
+    static std::string object_file_path(const Dl_info& symbol_info);
 
     // Static-state accessors. Function-local statics rather than namespace-scope
     // inline statics, deliberately: containers and std::string require DYNAMIC

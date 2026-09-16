@@ -738,6 +738,50 @@ TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {
 }
 
 // ============================================================================
+// dlopen()/chdir() regression test — the plugin is loaded by a RELATIVE path
+// and first entered after the host chdir()ed to "/". dladdr() reports that
+// relative string as dli_fname; the resolver used to hand it to bfd_openr()
+// at first sight of a plugin address, i.e. from the new working directory —
+// opening nothing (every plugin frame became "<could not open object file>")
+// or, with a same-named file there, an unrelated object whose symbol names
+// and lines were then reported. The object file must instead be found via
+// its mapping's absolute path in /proc/self/maps.
+// ============================================================================
+
+TEST(DlopenPluginTest, RelativeDlopenPathResolvesAfterChdir) {
+    char tmp_path[] = "/tmp/cslg_dlopen_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    std::string cmd = "DEBUGINFOD_URLS= CSLG_OUTPUT_FILE=\"" + std::string(tmp_path) + "\" \""
+                    + DLOPEN_TRACED_PROGRAM_PATH + "\" > /dev/null 2>&1";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "dlopen_traced_program failed, exit=" << ret;
+
+    std::string content = read_file(tmp_path);
+    unlink(tmp_path);
+
+    EXPECT_EQ(content.find("<could not open"), std::string::npos)
+            << "plugin object file not found after chdir. Trace:\n" << content;
+    EXPECT_NE(content.find("dlopen_plugin_entry"), std::string::npos)
+            << "dlopen_plugin_entry missing from trace. Trace:\n" << content;
+
+    // The helper's name AND its caller location must both come from the real
+    // plugin's symbol table / DWARF, not from whatever "./<file>" names now.
+    bool helper_found = false;
+    for (const std::string& line : split_lines(content)) {
+        if (line.find("dlopen_plugin_helper") == std::string::npos) {
+            continue;
+        }
+        helper_found = true;
+        EXPECT_NE(line.find("dlopen_plugin.cpp:"), std::string::npos)
+                << "helper's caller not attributed to the plugin source: " << line;
+    }
+    EXPECT_TRUE(helper_found) << "dlopen_plugin_helper missing from trace. Trace:\n" << content;
+}
+
+// ============================================================================
 // Deep-recursion overflow test — call depth beyond MAX_TRACE_DEPTH (2048).
 // Frames past the limit have no slot in the per-thread frame-resolution stack
 // and are tracked only by the overflow counter; the exit hook must drain that

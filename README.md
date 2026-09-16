@@ -248,6 +248,18 @@ and link `callstacklogger::callstacklogger` (or nothing) on the others. Because
 `-finstrument-functions` is on the `instrumented` target's INTERFACE, it only reaches
 the consumers you choose.
 
+### Plugins loaded with `dlopen()` ###
+
+Shared libraries loaded at runtime can be traced too: compile them with
+`-finstrument-functions` (the `callstacklogger::instrumented` compile flags) and do
+NOT link the library into them — their hooks bind at load time to the host
+executable's exported `__cyg_profile_func_*` symbols. The object file behind each
+address is located through `/proc/self/maps`, so a plugin loaded by a relative
+path (`dlopen("./plugin.so")`) resolves correctly even if the program `chdir()`s
+before the first traced call into it. A plugin whose file was deleted or replaced
+on disk after loading reports `<could not open object file>` instead of symbols
+from the wrong file.
+
 ## :gear: Configuration ##
 
 ### CMake Options ###
