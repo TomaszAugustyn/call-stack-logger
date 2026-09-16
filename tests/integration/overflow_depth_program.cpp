@@ -10,13 +10,12 @@
 /*
  * Deep-recursion driver — compiled WITH -finstrument-functions.
  *
- * Recurses 3000 frames deep, well past MAX_TRACE_DEPTH (2048) in src/trace.cpp,
- * so the last ~950 frames exceed the per-thread frame-resolution stack and are
- * tracked only by the overflow counter. Every frame still gets a trace line
- * (indentation keeps growing; format() clamps the line to its buffer), and on
- * the way back the exit hook must consume all overflow frames before popping
- * the real slots — post_overflow_marker() then proves the depth counter
- * resynchronized: it must appear at the same depth as the first
+ * Recurses 3000 frames deep, well past the per-thread frame stack's initial
+ * capacity (INITIAL_FRAME_CAPACITY = 2048 in src/trace.cpp), so the stack has
+ * to grow on demand for the last ~950 frames. Every frame still gets a trace
+ * line (indentation keeps growing; format() clamps the line to its buffer) and
+ * its own record, and post_overflow_marker() proves the depth accounting
+ * survived the growth: it must appear at the same depth as the first
  * deep_recursion frame (both are direct children of main).
  *
  * At -O0 (the default build) each frame is small (~100 bytes), so 3000 frames

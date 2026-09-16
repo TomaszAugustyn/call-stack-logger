@@ -31,12 +31,36 @@
 // clang-format off
 #ifndef DISABLE_INSTRUMENTATION
 
-// Maximum tracked call depth for the frame resolution stack. Each entry is 1 byte (bool);
-// with LOG_ELAPSED, two parallel per-frame arrays (time_point + off_t, 16 bytes) join it,
-// so the per-thread cost is MAX_TRACE_DEPTH bytes without LOG_ELAPSED and ~17x that
-// (~34 KB at 2048) with it. If call depth exceeds this limit, an overflow counter
-// prevents stack desynchronization. The value can be increased if needed.
-static constexpr int MAX_TRACE_DEPTH = 2048;
+// Initial capacity (in frames) of the per-thread frame stack. NOT a depth limit: the
+// stack is a std::vector that doubles whenever it fills up, so depth accounting stays
+// exact at any call depth and the hot path is allocation-free once the current
+// capacity covers the program's deepest call chain. Each FrameRecord is 1 byte
+// without LOG_ELAPSED and 24 bytes with it (flag + time_point + off_t, padded), so
+// the first reservation costs a tracing thread 2 KB / 48 KB of heap. Growth can only
+// fail under OOM — see frame_overflow_count for how that fallback keeps enter/exit
+// pairing exact.
+static constexpr std::size_t INITIAL_FRAME_CAPACITY = 2048;
+
+// One record per instrumented frame currently on a thread's stack, pushed by every
+// enter hook and popped by every exit hook. The type is private to this TU on
+// purpose: every std::vector<FrameRecord> member the hooks call is therefore
+// instantiated here (compiled without instrumentation) — under Clang no user TU can
+// supply an instrumented COMDAT copy that would fire a hook from inside the hooks.
+struct FrameRecord {
+    // True when the enter hook wrote a trace line for this frame (file open AND
+    // resolution succeeded). Only logged frames adjust current_stack_depth on
+    // enter/exit and (with LOG_ELAPSED) get a duration patch on exit.
+    bool logged;
+#ifdef LOG_ELAPSED
+    // Enter timestamp, used to compute the elapsed duration on exit.
+    std::chrono::steady_clock::time_point enter_time;
+    // Byte offset (into this thread's trace file) of the "[  pending ]"
+    // placeholder for this frame; -1 when the cursor was untrustworthy at enter
+    // time (then the exit hook skips its pwrite). On exit we pwrite the formatted
+    // duration at this offset. off_t keeps its signedness explicit at the use site.
+    off_t placeholder_offset;
+#endif
+};
 
 // Per-thread RAII wrapper around the thread's FILE*. On thread exit, the destructor
 // closes the file and removes this instance from the global registry. Coordinates
@@ -84,24 +108,21 @@ struct PerThreadTraceFile {
 struct PerThreadState {
     bool in_instrumentation = false;
     int current_stack_depth = -1;
-    bool frame_resolved_stack[MAX_TRACE_DEPTH] = {};
-    int frame_resolved_top = -1;
+    // The frame stack: one FrameRecord per instrumented frame currently on this
+    // thread's call stack. Grown (reserve) only inside the enter hook's exception
+    // barrier; see INITIAL_FRAME_CAPACITY for sizing.
+    std::vector<FrameRecord> frames;
+    // Number of frames the enter hook could NOT push because growing `frames`
+    // threw bad_alloc. Such overflow frames are never logged (no line, no depth
+    // change), so the exit hook only counts them down. Once non-zero, every
+    // nested enter is counted here too — even if memory is available again — so
+    // overflow frames always sit strictly above every pushed record and the exit
+    // hook's "drain the counter, then pop" order pairs enters and exits exactly.
     int frame_overflow_count = 0;
     // Cached gettid() result (0 means not yet resolved). Avoids a syscall per trace call.
     pid_t cached_tid = 0;
 
 #ifdef LOG_ELAPSED
-    // Per-frame enter timestamp, used to compute elapsed duration on exit.
-    // Indexed by the same counter as frame_resolved_stack[] — one slot per
-    // instrumented-and-resolved frame currently on the stack.
-    std::chrono::steady_clock::time_point frame_enter_time[MAX_TRACE_DEPTH] = {};
-
-    // Byte offset (into this thread's trace file) of the "[  pending ]"
-    // placeholder for each frame. On exit we pwrite the formatted duration at
-    // this offset. Using an int64_t-compatible type so off_t's signedness is
-    // explicit at the use site.
-    off_t frame_placeholder_offset[MAX_TRACE_DEPTH] = {};
-
     // Running byte position for this thread's trace file. Seeded from the file's
     // end position when the file is opened (handles multi-run append where
     // earlier runs already wrote content + separator headers). Advanced by
@@ -576,23 +597,41 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
     // destructors of std library types may be instrumented, so in_instrumentation must
     // remain true until all destructors have run.
     t_state.in_instrumentation = true;
-    {
-        // True when this frame produced a trace line: the file is open AND resolution
-        // succeeded. Only logged frames adjust current_stack_depth on enter/exit and
-        // (with LOG_ELAPSED) get a duration patch on exit.
+    if (t_state.frame_overflow_count > 0) {
+        // An enclosing frame overflowed (its record could not be pushed — see
+        // frame_overflow_count), so this nested frame overflows too: no line, no
+        // depth change, just a count for the exit hook to drain. This keeps every
+        // overflow frame strictly above every pushed record.
+        t_state.frame_overflow_count++;
+    } else {
+        // See FrameRecord::logged. Stays false unless a trace line was written.
         bool logged = false;
+        // True once `frames` is guaranteed to have room for this frame's record.
+        bool have_slot = false;
 #ifdef LOG_ELAPSED
         off_t line_start = 0;
 #endif
         // Exception barrier: a tracing hook must never inject an exception into the
         // traced program. Everything that can realistically throw (bad_alloc from
-        // the std::string work in get_thread_fp's lazy open, resolve(), and
-        // utils::format()) runs inside this try. State mutations (depth increment,
-        // `logged`, cursor bookkeeping) happen only AFTER the last throwing
-        // operation, so an exception leaves the bookkeeping untouched: the frame
-        // simply goes untraced and the unconditional push below keeps enter/exit
-        // pairing intact. The catch body must not allocate.
+        // growing the frame stack, from the std::string work in get_thread_fp's
+        // lazy open, resolve(), and utils::format()) runs inside this try. State
+        // mutations (depth increment, `logged`, cursor bookkeeping) happen only
+        // AFTER the last throwing operation, so an exception leaves the bookkeeping
+        // untouched: the frame simply goes untraced and the push below keeps
+        // enter/exit pairing intact. The catch body must not allocate.
         try {
+            // Make room for this frame's record FIRST, so the push after the barrier
+            // cannot allocate (and so cannot throw). Doubling keeps growth amortized:
+            // after warm-up the hot path never allocates. If this reserve throws, the
+            // frame becomes an overflow frame (have_slot stays false) and nothing is
+            // logged for it — the only way to keep depth accounting exact when there
+            // is no record to remember the frame by.
+            if (t_state.frames.size() == t_state.frames.capacity()) {
+                t_state.frames.reserve(t_state.frames.empty() ? INITIAL_FRAME_CAPACITY
+                                                              : t_state.frames.capacity() * 2);
+            }
+            have_slot = true;
+
             FILE* fp = get_thread_fp();
             if (fp != nullptr) {
                 auto maybe_resolved = instrumentation::resolve(callee, caller);
@@ -652,30 +691,38 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             // untraced; `logged` stayed false and no state was half-updated.
         }
 
-        // Push a frame record for EVERY call — even when nothing was logged (trace not
-        // ready, open failed, resolution filtered the frame, or shutdown completed).
-        // Pairing with __cyg_profile_func_exit must depend only on call structure: the
-        // exit hook pops unconditionally, so gating this push on fp availability would
-        // desynchronize the stack whenever availability changes between a frame's
-        // enter and its exit. Concretely, enters that skipped pushing after shutdown
-        // (or before trace_ready, on a thread spawned by an instrumented static
-        // constructor) shifted every subsequent pop onto an ancestor's slot — and,
-        // with LOG_ELAPSED, patched the wrong line's duration field.
-        if (t_state.frame_resolved_top < MAX_TRACE_DEPTH - 1) {
-            t_state.frame_resolved_stack[++t_state.frame_resolved_top] = logged;
+        if (!have_slot) {
+            // Growing the frame stack failed: no record can remember this frame, so
+            // it is tracked by count only (see frame_overflow_count). Nothing was
+            // logged for it, so depth accounting stays exact.
+            t_state.frame_overflow_count++;
+        } else {
+            // Push a frame record for EVERY call — even when nothing was logged (trace
+            // not ready, open failed, resolution filtered the frame, or shutdown
+            // completed). Pairing with __cyg_profile_func_exit must depend only on call
+            // structure: the exit hook pops unconditionally, so gating this push on fp
+            // availability would desynchronize the stack whenever availability changes
+            // between a frame's enter and its exit. Concretely, enters that skipped
+            // pushing after shutdown (or before trace_ready, on a thread spawned by an
+            // instrumented static constructor) shifted every subsequent pop onto an
+            // ancestor's slot — and, with LOG_ELAPSED, patched the wrong line's
+            // duration field.
+            FrameRecord record{};
+            record.logged = logged;
 #ifdef LOG_ELAPSED
+            record.placeholder_offset = -1;
             if (logged) {
                 // Placeholder sits at "[<timestamp>] " offset = 1 + PRETTY_TIME_LENGTH + 2.
                 // Only when the cursor is still trustworthy (this line's write
                 // included — a failure in it invalidated the cursor above); with
-                // an untrusted cursor, record the -1 sentinel so the exit handler
+                // an untrusted cursor, keep the -1 sentinel so the exit handler
                 // skips the pwrite and the placeholder stays "[  pending ]".
                 static constexpr std::size_t PLACEHOLDER_OFFSET_IN_LINE =
                         utils::PRETTY_TIME_LENGTH + 3;
-                t_state.frame_placeholder_offset[t_state.frame_resolved_top] =
-                        t_state.cursor_valid
-                        ? line_start + static_cast<off_t>(PLACEHOLDER_OFFSET_IN_LINE)
-                        : static_cast<off_t>(-1);
+                if (t_state.cursor_valid) {
+                    record.placeholder_offset =
+                            line_start + static_cast<off_t>(PLACEHOLDER_OFFSET_IN_LINE);
+                }
                 // Read the clock as the hook's LAST step for this frame, mirrored
                 // by the exit hook reading it FIRST (before its own format +
                 // pwrite work): the frame's reported span covers the function
@@ -684,17 +731,12 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                 // tens of microseconds cold). Hook overhead of calls nested
                 // INSIDE the function still lands in the parent's span —
                 // unavoidable without per-frame overhead accounting.
-                t_state.frame_enter_time[t_state.frame_resolved_top] =
-                        std::chrono::steady_clock::now();
+                record.enter_time = std::chrono::steady_clock::now();
             }
 #endif
-        } else {
-            // Stack full — track overflow to keep the exit handler in sync. Overflow
-            // frames get no per-frame slot: recording one would overwrite the topmost
-            // pushed frame's slot and corrupt its patch. With LOG_ELAPSED their
-            // "[  pending ]" placeholder therefore stays un-patched even on clean
-            // exit (accepted MAX_TRACE_DEPTH artifact; indentation stays correct).
-            t_state.frame_overflow_count++;
+            // Capacity was reserved inside the barrier and FrameRecord is trivially
+            // copyable, so this push cannot reallocate or throw.
+            t_state.frames.push_back(record);
         }
     }
     t_state.in_instrumentation = false;
@@ -723,29 +765,24 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
     // stopped pushing once shutdown_complete was set, while exits kept popping
     // against the still-open raw FILE*, shifting pops onto ancestors' slots).
     if (t_state.frame_overflow_count > 0) {
-        // This exit corresponds to a frame that overflowed the stack.
-        // Assume it was logged (the common case at extreme depth) and
-        // decrement depth to keep indentation consistent. Clamp at -1 (empty)
-        // so threads whose overflow frames never logged anything (e.g. the
-        // file never opened) cannot drift the depth negative.
+        // This exit belongs to an overflow frame (see frame_overflow_count). It was
+        // never logged, so it never touched current_stack_depth: just count it down.
+        // Overflow frames always sit above every pushed record, so draining the
+        // counter before popping keeps the pairing exact.
         t_state.frame_overflow_count--;
-        if (t_state.current_stack_depth > -1) {
-            t_state.current_stack_depth--;
-        }
-    } else if (t_state.frame_resolved_top >= 0) {
-        // Save the index BEFORE decrement so LOG_ELAPSED can index into the
-        // per-frame time/offset arrays at the same slot the enter handler
-        // wrote to.
-        const int idx = t_state.frame_resolved_top;
-        const bool was_logged = t_state.frame_resolved_stack[idx];
-        t_state.frame_resolved_top--;
-        if (was_logged) {
+    } else if (!t_state.frames.empty()) {
+        // Copy the record out BEFORE popping so LOG_ELAPSED patches the very line
+        // the enter handler wrote for this frame. pop_back() never shrinks the
+        // vector's capacity, so the hot path stays allocation-free.
+        const FrameRecord record = t_state.frames.back();
+        t_state.frames.pop_back();
+        if (record.logged) {
             t_state.current_stack_depth--;
 #ifdef LOG_ELAPSED
             // Compute elapsed and patch the matching line's placeholder.
             const auto exit_time = std::chrono::steady_clock::now();
             const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    exit_time - t_state.frame_enter_time[idx]).count();
+                    exit_time - record.enter_time).count();
             // steady_clock is monotonic so elapsed shouldn't go negative,
             // but clamp defensively so the uint64_t cast stays safe across
             // any future clock-source quirks.
@@ -754,7 +791,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
             char buf[utils::DURATION_FIELD_WIDTH + 1];
             utils::format_duration_12chars(ns, buf);
             const int pfd = t_state.trace_file.patch_fd.load(std::memory_order_relaxed);
-            if (pfd >= 0 && t_state.frame_placeholder_offset[idx] >= 0) {
+            if (pfd >= 0 && record.placeholder_offset >= 0) {
                 // pwrite is atomic for our 12 bytes (well under PIPE_BUF) and
                 // honors the explicit offset because patch_fd was opened WITHOUT
                 // O_APPEND. Return value intentionally unchecked: the only
@@ -762,8 +799,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
                 // recovery possible) or a disk-I/O hardware error — in either
                 // case the placeholder stays visible in the trace, which is
                 // the documented degraded-but-readable mode.
-                (void)pwrite(pfd, buf, utils::DURATION_FIELD_WIDTH,
-                             t_state.frame_placeholder_offset[idx]);
+                (void)pwrite(pfd, buf, utils::DURATION_FIELD_WIDTH, record.placeholder_offset);
             }
 #endif
         }

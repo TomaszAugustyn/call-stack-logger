@@ -202,9 +202,10 @@ The framing `=` lines are sized to match the middle line's length.
 
 **State organization** (`trace.cpp`):
 - `PerThreadState` struct: bundles all thread-local state — `in_instrumentation` guard
-  (declared first so it's destroyed last), `current_stack_depth`, `frame_resolved_stack`,
-  `frame_overflow_count`, `cached_tid`, and a `PerThreadTraceFile` RAII wrapper around
-  the thread's FILE*. One `thread_local` instance: `t_state`.
+  (declared first so it's destroyed last), `current_stack_depth`, the `frames` stack
+  (`std::vector<FrameRecord>`), `frame_overflow_count`, `cached_tid`, and a
+  `PerThreadTraceFile` RAII wrapper around the thread's FILE*. One `thread_local`
+  instance: `t_state`.
 - `TraceGlobals` struct: bundles process-wide state — `main_tid`, `base_path`,
   `open_files_mutex`, `open_files` registry (vector of `PerThreadTraceFile*`),
   and three atomic flags (`trace_ready`, `shutdown_started`, `shutdown_complete`).
@@ -353,15 +354,15 @@ near the tail identifies exactly which frames were active at the crash
 site — useful debugging signal that's hard to get otherwise. See README's
 "Per-function timing" section for an example.
 
-**Per-frame state.** Two thread_local arrays parallel to
-`frame_resolved_stack[]`:
-`std::chrono::steady_clock::time_point frame_enter_time[MAX_TRACE_DEPTH]`
-and `off_t frame_placeholder_offset[MAX_TRACE_DEPTH]`. Indexed by
-`frame_resolved_top` so enter/exit operate on the matching slot. The
-exit handler computes `now() - enter_time[idx]`, formats into a 12-byte
-buffer, and `pwrite(patch_fd, buf, 12, frame_placeholder_offset[idx])`.
+**Per-frame state.** With LOG_ELAPSED, `FrameRecord` (the element type of
+the per-thread `frames` stack) carries two extra fields next to the `logged`
+flag: `std::chrono::steady_clock::time_point enter_time` and
+`off_t placeholder_offset`. The record is pushed by the enter hook and copied
+out by the exit hook's pop, so enter/exit always operate on the matching frame.
+The exit handler computes `now() - record.enter_time`, formats into a 12-byte
+buffer, and `pwrite(patch_fd, buf, 12, record.placeholder_offset)`.
 
-**What the span measures.** `frame_enter_time` is filled as the enter
+**What the span measures.** `FrameRecord::enter_time` is filled as the enter
 hook's LAST step for the frame (after resolve, format, and the line
 write) and the exit hook reads the clock FIRST (before its own format +
 pwrite). A frame's reported duration therefore excludes the tracer's own
@@ -372,14 +373,11 @@ calls nested inside the function still lands in the parent's span;
 parent ≥ child always holds because a child's whole span (hooks
 included) sits inside the parent's body.
 
-**Overflow frames** (call depth > MAX_TRACE_DEPTH = 2048) still get an
-enter line written with the `[  pending ]` placeholder so tree indentation
-remains visually correct, but they do not get a slot in the per-frame
-arrays — writing one would overwrite the topmost pushed frame's slot and
-corrupt its patch. The `frame_resolved_top` bounds check in the enter
-handler enforces this. Their placeholders therefore remain `[  pending ]` even
-on clean exit. This is an accepted artifact of MAX_TRACE_DEPTH; such
-deep stacks already lose resolve-state tracking.
+**No depth limit.** The `frames` stack grows on demand (see "Indentation /
+Nesting Depth" below), so every frame at any depth has its own record and
+gets its duration patched on a clean exit. The only frames without a record
+are OOM overflow frames (growing the stack threw `bad_alloc`); those write no
+line at all, so no unpatched placeholder is ever left behind by design.
 
 **Drift guards.** Both the `PrettyTimeTest.LengthMatchesConstant` unit
 test and an always-on runtime check in `trace_begin()` verify that
@@ -409,7 +407,7 @@ visible shutdown artifact remains the torn-final-line case for `fprintf`.
 A `thread_local` `current_stack_depth` counter in `trace.cpp`:
 - Increments on each successfully resolved function entry
 - Decrements on function exit (only if the entry was resolved)
-- A fixed-size `frame_resolved_stack[2048]` array (also `thread_local`) tracks per-frame
+- A per-thread `std::vector<FrameRecord>` stack (`frames`) tracks per-frame
   whether the entry was logged (file open AND resolution succeeded): every
   `__cyg_profile_func_enter` pushes and every `__cyg_profile_func_exit` pops
   **unconditionally** — pairing depends only on call structure, never on whether the
@@ -417,8 +415,14 @@ A `thread_local` `current_stack_depth` counter in `trace.cpp`:
   trace-ready and shutdown boundaries (a frame entered before shutdown and exited
   after it still pops its own slot, so LOG_ELAPSED patches the right line). Depth is
   only adjusted for logged frames.
-- An overflow counter handles the edge case when call depth exceeds `MAX_TRACE_DEPTH` (2048),
-  preventing stack desynchronization. Indentation remains correct at any depth.
+- The stack grows on demand (initial capacity `INITIAL_FRAME_CAPACITY` = 2048, doubled
+  inside the enter hook's exception barrier), so there is no depth limit and every frame
+  keeps its own record. Only if growing the stack throws `bad_alloc` does a frame become
+  an "overflow frame": it is counted (`frame_overflow_count`), never logged and never
+  touches the depth, so depth accounting stays exact even then. The previous fixed-size
+  array assumed every frame past its limit had been logged; a filtered (unlogged) frame
+  beyond depth 2048 then drove the depth permanently negative and flattened the rest of
+  the thread's tree — pinned by `FilteredOverflowTest`.
 
 The `utils::format()` function in `format.h` uses this depth to produce tree-style indentation
 with `|  ` and `|_ ` prefixes.
@@ -494,7 +498,9 @@ call-stack-logger/
 |       |-- traced_program.cpp  # Instrumented single-threaded program for testing
 |       |-- threaded_traced_program.cpp # Instrumented multi-threaded program (per-thread files)
 |       |-- log_elapsed_traced_program.cpp # Instrumented program with usleep() sentinels for LOG_ELAPSED tests
-|       |-- overflow_depth_program.cpp # Instrumented; recursion past MAX_TRACE_DEPTH (overflow counter)
+|       |-- overflow_depth_program.cpp # Instrumented; recursion past the frame stack's initial capacity
+|       |-- filtered_overflow_lib.cpp  # Instrumented shared lib, stripped post-build; its file-local helper is never logged
+|       |-- filtered_overflow_program.cpp # Instrumented; same recursion with an unlogged frame at every level
 |       |-- exception_traced_program.cpp # Instrumented; throw/catch through instrumented frames (GCC pairing)
 |       |-- crash_traced_program.cpp # Instrumented, LOG_ELAPSED; abort()s mid-chain (pending-placeholder crash diagnostics)
 |       |-- global_dtor_traced_program.cpp # Instrumented; global object dtor calls traced code during exit()
@@ -761,7 +767,7 @@ Test pure/deterministic functions from the include headers:
   recursion via `RecursionProducesOneEntryPerLevel`), caller info present, timestamp
   format, run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
   exact trace line count (catches std library pollution regressions)
-- Built as ten non-variant targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
+- Built as eleven non-variant targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
   `noninstrumented_test_program` (compiled WITHOUT — simulates
   `DISABLE_INSTRUMENTATION`), `threaded_traced_test_program` (spawns 4 worker
   threads via `std::thread`, exercises per-thread trace files),
@@ -775,7 +781,10 @@ Test pure/deterministic functions from the include headers:
   library, `strip --strip-all`-ed post-build), `stripped_caller_program`
   (instrumented; its callback is invoked from a file-local function inside the
   stripped library), `overflow_depth_program` (instrumented; recurses 3000
-  frames — past MAX_TRACE_DEPTH), `exception_traced_program` (instrumented;
+  frames — past the frame stack's initial capacity), `filtered_overflow_program`
+  (instrumented; the same recursion calling, at every level, into the stripped
+  instrumented `filtered_overflow_lib` whose file-local helper is unnameable and hence
+  never logged), `exception_traced_program` (instrumented;
   throws and catches through instrumented frames), and
   `dlopen_plugin` (instrumented shared library, not linked — dlopen()ed by
   `dlopen_traced_program` via a RELATIVE path, which then chdir()s to `/`
@@ -786,11 +795,19 @@ Test pure/deterministic functions from the include headers:
   The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs
   the non-instrumented version and verifies zero trace entries are produced.
 - `OverflowDepthTest.DepthBeyondMaxStaysConsistent` — runs `overflow_depth_program`
-  (recursion 3000 deep, ~950 frames past MAX_TRACE_DEPTH = 2048). Verifies every
-  enter still produced a timestamped line (3002 total: main + 3000 recursion +
-  marker) and that `post_overflow_marker()`, traced after all exits drained the
-  overflow counter, sits at the same depth as the first recursion frame — pins
-  the overflow counter's depth resynchronization end-to-end.
+  (recursion 3000 deep, ~950 frames past the frame stack's initial capacity of 2048).
+  Verifies every enter still produced a timestamped line (3002 total: main + 3000
+  recursion + marker) and that `post_overflow_marker()`, traced after all exits, sits
+  at the same depth as the first recursion frame — pins on-demand growth end-to-end.
+- `FilteredOverflowTest.UnloggedFramesBeyondInitialCapacityKeepDepthExact` — runs
+  `filtered_overflow_program` (same recursion, plus a call at every level into
+  `filtered_overflow_lib`, an instrumented shared library stripped after the build whose
+  file-local helper has no symbol left for `dladdr()` or BFD — its enter hook fires but
+  writes no line). Asserts exactly one line per logged enter (6003) and that the markers
+  traced afterwards sit at their true depths
+  (`marker_a`/`marker_b` level with the first recursion frame, `marker_b_child` one
+  deeper) — the regression that a fixed-size stack with a logged-or-not guess for deep
+  frames cannot pass.
 - `ExceptionUnwindTest.DepthConsistentAfterCatchOnGcc` — runs
   `exception_traced_program` (throw through two instrumented frames, catch one
   level up, then a marker call). On GCC the exit hooks fire on the unwind path,
@@ -861,7 +878,7 @@ Test pure/deterministic functions from the include headers:
   sentinel inside `elapsed_inner`). Verifies: every entry line carries a 12-byte
   duration field, no `[  pending ]` placeholders remain after clean exit, parent
   durations ≥ child durations along the nested chain (proves per-frame indexing
-  of `frame_enter_time` / `frame_placeholder_offset` is correct under LIFO frame
+  of `FrameRecord::enter_time` / `placeholder_offset` is correct under LIFO frame
   stacking), `elapsed_inner` reports ≥10 ms (the usleep), and every line parses
   cleanly against a strict `[ts] [dur] … (called from: file:line)` regex (proves
   pwrite never spills past its 12-byte window).

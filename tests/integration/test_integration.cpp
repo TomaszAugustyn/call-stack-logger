@@ -58,6 +58,9 @@
 #ifndef OVERFLOW_DEPTH_PROGRAM_PATH
     #error "OVERFLOW_DEPTH_PROGRAM_PATH must be defined by CMake"
 #endif
+#ifndef FILTERED_OVERFLOW_PROGRAM_PATH
+    #error "FILTERED_OVERFLOW_PROGRAM_PATH must be defined by CMake"
+#endif
 #ifndef EXCEPTION_TRACED_PROGRAM_PATH
     #error "EXCEPTION_TRACED_PROGRAM_PATH must be defined by CMake"
 #endif
@@ -800,13 +803,11 @@ TEST(DlopenPluginTest, RelativeDlopenPathResolvesAfterChdir) {
 }
 
 // ============================================================================
-// Deep-recursion overflow test — call depth beyond MAX_TRACE_DEPTH (2048).
-// Frames past the limit have no slot in the per-thread frame-resolution stack
-// and are tracked only by the overflow counter; the exit hook must drain that
-// counter before popping real slots, or the depth counter desynchronizes for
-// the rest of the thread. The driver recurses 3000 deep and then calls a
-// marker function, which must trace at the same depth as the first recursion
-// frame (both are direct children of main).
+// Deep-recursion test — call depth beyond the per-thread frame stack's initial
+// capacity (INITIAL_FRAME_CAPACITY = 2048 in trace.cpp). The stack must grow
+// on demand so every frame keeps its own record; the driver recurses 3000 deep
+// and then calls a marker function, which must trace at the same depth as the
+// first recursion frame (both are direct children of main).
 // ============================================================================
 
 TEST(OverflowDepthTest, DepthBeyondMaxStaysConsistent) {
@@ -836,9 +837,9 @@ TEST(OverflowDepthTest, DepthBeyondMaxStaysConsistent) {
     EXPECT_EQ(entry_lines, 3002)
             << "Expected one trace line per enter (main + 3000 recursion + marker).";
 
-    // Depth resync proof: the marker (traced AFTER all 3000 exits, ~950 of
-    // which drained the overflow counter) must sit at the same depth as the
-    // first recursion frame — both are direct children of main.
+    // Depth proof: the marker (traced AFTER all 3000 exits, ~950 of which popped
+    // records that only exist because the frame stack grew) must sit at the
+    // same depth as the first recursion frame — both are direct children of main.
     int first_recursion_depth = -1;
     int marker_depth = -1;
     for (const auto& line : lines) {
@@ -855,7 +856,83 @@ TEST(OverflowDepthTest, DepthBeyondMaxStaysConsistent) {
             << "post_overflow_marker traced at depth " << marker_depth
             << " but the first deep_recursion frame was at depth "
             << first_recursion_depth
-            << " — the overflow counter desynchronized the depth accounting.";
+            << " — deep recursion desynchronized the depth accounting.";
+}
+
+// ============================================================================
+// Deep recursion with an UNLOGGED frame at every level. Each level calls into a
+// stripped, instrumented shared library whose file-local helper has no symbol
+// left for dladdr() or BFD, so its enter hook fires but the resolver drops the
+// frame and no line is written. Beyond the frame stack's initial capacity, a
+// third of the frames are therefore "entered but not logged" — the regression
+// this pins: a fixed-capacity stack that assumed every deep frame
+// was logged decremented the depth once per filtered frame, pushed it
+// thousands of levels negative, and rendered every later line on the thread
+// at depth 0. With per-frame records at any depth, the markers must trace at
+// their true depths: marker_a and marker_b level with the first recursion
+// frame, marker_b_child one level deeper.
+// ============================================================================
+
+TEST(FilteredOverflowTest, UnloggedFramesBeyondInitialCapacityKeepDepthExact) {
+    char tmp_path[] = "/tmp/cslg_filtered_overflow_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(tmp_path) + "\" \""
+                    + FILTERED_OVERFLOW_PROGRAM_PATH + "\" > /dev/null 2>&1";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "filtered_overflow_program failed, exit=" << ret;
+
+    std::string content = read_file(tmp_path);
+    unlink(tmp_path);
+    std::vector<std::string> lines = split_lines(content);
+
+    // Premise check: the helper really is unlogged. Every OTHER enter writes
+    // exactly one timestamped line: main + 3000 recursion frames + 2999 calls
+    // into the library (logged by their dynamic symbol; the recursion's base
+    // level returns before calling it) + three markers = 6003.
+    EXPECT_EQ(content.find("hidden_helper"), std::string::npos)
+            << "hidden_helper was logged — the test premise (an unlogged frame at "
+               "every recursion level) no longer holds.";
+    std::regex ts_prefix(R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\])");
+    int entry_lines = 0;
+    for (const auto& line : lines) {
+        if (std::regex_search(line, ts_prefix)) ++entry_lines;
+    }
+    EXPECT_EQ(entry_lines, 6003)
+            << "Expected one trace line per logged enter (main + 3000 recursion + 2999 "
+               "library calls + 3 markers).";
+
+    int first_recursion_depth = -1;
+    int marker_a_depth = -1;
+    int marker_b_depth = -1;
+    int marker_b_child_depth = -1;
+    for (const auto& line : lines) {
+        if (first_recursion_depth < 0 && line.find("deep_recursion") != std::string::npos) {
+            first_recursion_depth = count_indentation_depth(line);
+        } else if (line.find("marker_a") != std::string::npos) {
+            marker_a_depth = count_indentation_depth(line);
+        } else if (line.find("marker_b_child") != std::string::npos) {
+            marker_b_child_depth = count_indentation_depth(line);
+        } else if (line.find("marker_b") != std::string::npos) {
+            marker_b_depth = count_indentation_depth(line);
+        }
+    }
+    ASSERT_GE(first_recursion_depth, 0) << "first deep_recursion line not found";
+    ASSERT_GE(marker_a_depth, 0) << "marker_a line not found";
+    ASSERT_GE(marker_b_depth, 0) << "marker_b line not found";
+    ASSERT_GE(marker_b_child_depth, 0) << "marker_b_child line not found";
+    EXPECT_EQ(marker_a_depth, first_recursion_depth)
+            << "marker_a traced at depth " << marker_a_depth
+            << " but the first deep_recursion frame was at depth " << first_recursion_depth
+            << " — unlogged deep frames drifted the depth accounting.";
+    EXPECT_EQ(marker_b_depth, first_recursion_depth)
+            << "marker_b traced at depth " << marker_b_depth
+            << " but the first deep_recursion frame was at depth " << first_recursion_depth;
+    EXPECT_EQ(marker_b_child_depth, first_recursion_depth + 1)
+            << "marker_b_child traced at depth " << marker_b_child_depth
+            << " but should be one level below marker_b (depth " << marker_b_depth << ")";
 }
 
 // ============================================================================

@@ -118,12 +118,32 @@ target_link_libraries(dlopen_traced_program PRIVATE callstacklogger_instrumented
 add_dependencies(dlopen_traced_program dlopen_plugin)
 cslg_apply_sanitizers(dlopen_traced_program)
 
-# Deep-recursion driver: recurses past MAX_TRACE_DEPTH (2048) so the overflow
-# counter in trace.cpp is exercised end-to-end (see OverflowDepthTest).
+# Deep-recursion driver: recurses past the frame stack's initial capacity
+# (INITIAL_FRAME_CAPACITY = 2048 in trace.cpp) so on-demand growth is exercised
+# end-to-end (see OverflowDepthTest).
 add_executable(overflow_depth_program overflow_depth_program.cpp)
 target_compile_features(overflow_depth_program PRIVATE cxx_std_17)
 target_link_libraries(overflow_depth_program PRIVATE callstacklogger_instrumented)
 cslg_apply_sanitizers(overflow_depth_program)
+
+# Same recursion, but with an unlogged frame at every level: an instrumented
+# shared library, stripped after the build like stripped_caller, whose
+# file-local helper has no symbol left for dladdr() or BFD to name — its enter
+# hook fires but the resolver drops the frame. Frames beyond the initial
+# capacity are then a mix of logged and unlogged, and the depth accounting must
+# stay exact regardless (see FilteredOverflowTest). Not sanitized, for the same
+# reasons as stripped_caller.
+add_library(filtered_overflow_lib SHARED filtered_overflow_lib.cpp)
+target_compile_features(filtered_overflow_lib PRIVATE cxx_std_17)
+target_compile_options(filtered_overflow_lib PRIVATE ${INSTRUMENT_FLAGS})
+add_custom_command(TARGET filtered_overflow_lib POST_BUILD
+    COMMAND strip --strip-all $<TARGET_FILE:filtered_overflow_lib>
+    COMMENT "Stripping symtab and debug info from filtered_overflow_lib")
+
+add_executable(filtered_overflow_program filtered_overflow_program.cpp)
+target_compile_features(filtered_overflow_program PRIVATE cxx_std_17)
+target_link_libraries(filtered_overflow_program PRIVATE callstacklogger_instrumented filtered_overflow_lib)
+cslg_apply_sanitizers(filtered_overflow_program)
 
 # Exception-unwind driver: throws through instrumented frames. Only GCC emits
 # exit hooks on the unwind path, so the matching test asserts under GCC only
@@ -231,6 +251,7 @@ target_compile_definitions(integration_tests PRIVATE
     DLOPEN_CTOR_PROGRAM_PATH="$<TARGET_FILE:dlopen_ctor_traced_program>"
     DLOPEN_TRACED_PROGRAM_PATH="$<TARGET_FILE:dlopen_traced_program>"
     OVERFLOW_DEPTH_PROGRAM_PATH="$<TARGET_FILE:overflow_depth_program>"
+    FILTERED_OVERFLOW_PROGRAM_PATH="$<TARGET_FILE:filtered_overflow_program>"
     EXCEPTION_TRACED_PROGRAM_PATH="$<TARGET_FILE:exception_traced_program>"
     GLOBAL_DTOR_PROGRAM_PATH="$<TARGET_FILE:global_dtor_traced_program>"
     CRASH_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:crash_traced_program_log_elapsed>"
