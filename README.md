@@ -444,6 +444,25 @@ compilers emit the call to the hook as non-throwing, so an unwind that started i
 a hook (glibc implements cancellation as a forced unwind) would terminate the process.
 Asynchronous cancellation (`PTHREAD_CANCEL_ASYNCHRONOUS`) is not supported.
 
+**What is not traced at process start and exit.** Tracing is active from the
+tracer's own constructor (which runs before `main()`) until the main thread's
+per-thread state is torn down at the start of `exit()`. Outside that window
+the hooks are silent no-ops:
+
+- Global constructors that run before the tracer's constructor are not traced.
+- After `main()` returns, the only traced code on the main thread is the body
+  of `thread_local` destructors that run before the tracer's own (glibc runs
+  them in reverse order of first use, and the tracer's state is used from the
+  very first hook, so any `thread_local` object first touched during `main()`
+  qualifies).
+- `atexit` handlers — including ones registered during `main()` — destructors
+  of function-local statics, and destructors of global objects are never
+  traced. They may still call instrumented code safely; it just produces no
+  lines.
+
+Worker threads are simpler: a thread's tracing stops when its own
+`thread_local` state is destroyed at thread exit.
+
 **Signal handlers are not safe to trace.** The instrumentation hooks allocate
 memory, take a mutex, and use stdio — none of which is async-signal-safe. If a
 signal interrupts a thread mid-`malloc` (or mid-resolution) and the handler runs

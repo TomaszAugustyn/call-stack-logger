@@ -127,14 +127,23 @@ struct PerThreadTraceFile {
     PerThreadTraceFile& operator=(const PerThreadTraceFile&) = delete;
 };
 
-// All per-thread state bundled in one struct for readability.
+// Per-thread re-entrancy guard: true while this thread is inside the tracer (the
+// hooks' own pipeline, the public API entry points, or the exit-time windows where
+// tracing is permanently off). The hooks return immediately while it is set.
 //
-// IMPORTANT member order: the re-entrancy guard `in_instrumentation` is declared FIRST
-// so it is destroyed LAST (members are destroyed in reverse declaration order). That
-// keeps the guard alive during destruction of `trace_file`, whose destructor may be
-// instrumented by Clang.
+// Deliberately NOT a member of PerThreadState below. A plain `bool` thread_local has
+// no destructor, so it is never "destroyed": its storage stays valid and readable
+// for the whole life of the thread. That matters at process exit — on the main
+// thread the C++ runtime destroys thread_local objects (t_state included) at the
+// START of exit(), before atexit handlers run. trace_shutdown() and every hook
+// fired from a static destructor or atexit handler afterwards still consult the
+// guard; reading a member of the already-destroyed t_state there would be
+// use-after-lifetime, formally undefined behavior. A standalone trivially-destructible
+// guard has no lifetime end to worry about and no member-order dependency.
+static thread_local bool t_in_instrumentation = false;
+
+// All per-thread state bundled in one struct for readability.
 struct PerThreadState {
-    bool in_instrumentation = false;
     int current_stack_depth = -1;
     // The frame stack: one FrameRecord per instrumented frame currently on this
     // thread's call stack. Grown (reserve) only inside the enter hook's exception
@@ -190,14 +199,14 @@ namespace instrumentation {
 
 NO_INSTRUMENT
 bool enter_no_instrument_scope() {
-    const bool prev = t_state.in_instrumentation;
-    t_state.in_instrumentation = true;
+    const bool prev = t_in_instrumentation;
+    t_in_instrumentation = true;
     return prev;
 }
 
 NO_INSTRUMENT
 void exit_no_instrument_scope(bool prev) {
-    t_state.in_instrumentation = prev;
+    t_in_instrumentation = prev;
 }
 
 } // namespace instrumentation
@@ -462,7 +471,7 @@ FILE* get_thread_fp() {
 // open_this_thread_file and ~PerThreadTraceFile do, and both hold the mutex).
 NO_INSTRUMENT
 static void trace_shutdown() {
-    t_state.in_instrumentation = true;  // Permanently disable on main — never cleared
+    t_in_instrumentation = true;  // Permanently disable on main — never cleared
 
     TraceGlobals& g = g_trace();
 
@@ -511,7 +520,9 @@ NO_INSTRUMENT
 PerThreadTraceFile::~PerThreadTraceFile() {
     // Set the re-entrancy guard permanently — the thread is about to die, and any
     // instrumented callee inside fclose/erase (possible with Clang) must be a no-op.
-    t_state.in_instrumentation = true;
+    // The guard lives outside t_state (see its definition), so it stays valid after
+    // this destructor returns — on the main thread that is the rest of exit().
+    t_in_instrumentation = true;
     // close() below is a cancellation point and this destructor runs before glibc
     // marks the exiting thread as such — see ScopedCancelDisable.
     ScopedCancelDisable no_cancel;
@@ -556,7 +567,7 @@ PerThreadTraceFile::~PerThreadTraceFile() {
 __attribute__ ((constructor))
 NO_INSTRUMENT
 void trace_begin() {
-    t_state.in_instrumentation = true;
+    t_in_instrumentation = true;
 
 #ifdef LOG_ELAPSED
     // Belt-and-suspenders: the LOG_ELAPSED byte-offset derivation assumes
@@ -612,7 +623,7 @@ void trace_begin() {
     std::atexit(trace_shutdown);
 
     g.trace_ready.store(true, std::memory_order_release);
-    t_state.in_instrumentation = false;
+    t_in_instrumentation = false;
 }
 
 // Note: there used to be a trace_end() __attribute__((destructor)) here as a
@@ -630,7 +641,7 @@ void trace_begin() {
 // instruction. No stack walk happens anywhere in the hook.
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
-    if (t_state.in_instrumentation) { return; }
+    if (t_in_instrumentation) { return; }
     // Block cancellation for the whole hook — see ScopedCancelDisable for why this
     // is required. The same fact (no unwind entry at the hook's call site) is why
     // the exception barrier below must never let anything escape.
@@ -640,7 +651,7 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
     // view), but the cold path (a cache miss inside resolve) still runs std
     // container/string code, and with Clang the destructors of std library types
     // may be instrumented — the guard must stay set until every one of them has run.
-    t_state.in_instrumentation = true;
+    t_in_instrumentation = true;
     if (t_state.frame_overflow_count > 0) {
         // An enclosing frame overflowed (its record could not be pushed — see
         // frame_overflow_count), so this nested frame overflows too: no line, no
@@ -796,7 +807,7 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             t_state.frames.push_back(record);
         }
     }
-    t_state.in_instrumentation = false;
+    t_in_instrumentation = false;
 }
 
 extern "C" NO_INSTRUMENT
@@ -806,7 +817,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
     // call passes them; silence -Wextra's unused-parameter warning.
     (void)callee;
     (void)caller;
-    if (t_state.in_instrumentation) { return; }
+    if (t_in_instrumentation) { return; }
 #ifdef LOG_ELAPSED
     // Set the re-entrancy guard because below we call std::chrono::steady_clock::now()
     // and pwrite() — calls that are safe in trace.cpp (compiled without instrumentation)
@@ -814,7 +825,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
     // also a cancellation point, so cancellation is blocked (see ScopedCancelDisable). Without
     // LOG_ELAPSED the exit handler is mutex-free and I/O-free, so we keep the
     // zero-overhead guarantee by skipping these stores entirely.
-    t_state.in_instrumentation = true;
+    t_in_instrumentation = true;
     ScopedCancelDisable no_cancel;
 #endif
     // Pop a frame record for EVERY call — the exact mirror of the unconditional push
@@ -864,7 +875,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
         }
     }
 #ifdef LOG_ELAPSED
-    t_state.in_instrumentation = false;
+    t_in_instrumentation = false;
 #endif
 }
 

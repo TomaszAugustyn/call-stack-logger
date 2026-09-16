@@ -209,11 +209,21 @@ Each file's header identifies the owning thread:
 The framing `=` lines are sized to match the middle line's length.
 
 **State organization** (`trace.cpp`):
-- `PerThreadState` struct: bundles all thread-local state — `in_instrumentation` guard
-  (declared first so it's destroyed last), `current_stack_depth`, the `frames` stack
-  (`std::vector<FrameRecord>`), `frame_overflow_count`, `cached_tid`, and a
-  `PerThreadTraceFile` RAII wrapper around the thread's FILE*. One `thread_local`
-  instance: `t_state`.
+- `t_in_instrumentation`: the per-thread re-entrancy guard, a standalone
+  `static thread_local bool` deliberately kept OUT of `PerThreadState`. A trivially
+  destructible thread_local is never destroyed, so its storage stays valid for the
+  thread's whole life. That matters at process exit: on the main thread the C++
+  runtime destroys thread_local objects (`t_state` included) at the START of
+  `exit()`, before atexit handlers — yet `trace_shutdown()` and every hook fired
+  from a static destructor or atexit handler afterwards still read and write the
+  guard. As a `t_state` member that was a use-after-lifetime (formally undefined
+  behavior, harmless in practice) and forced a fragile "declare first so it is
+  destroyed last" member-order rule; as its own trivial thread_local it has no
+  lifetime end and no ordering dependency.
+- `PerThreadState` struct: bundles the remaining thread-local state —
+  `current_stack_depth`, the `frames` stack (`std::vector<FrameRecord>`),
+  `frame_overflow_count`, `cached_tid`, and a `PerThreadTraceFile` RAII wrapper around
+  the thread's FILE*. One `thread_local` instance: `t_state`.
 - `TraceGlobals` struct: bundles process-wide state — `main_tid`, `base_path`,
   `open_files_mutex`, `open_files` registry (vector of `PerThreadTraceFile*`),
   and three atomic flags (`trace_ready`, `shutdown_started`, `shutdown_complete`).
@@ -262,6 +272,18 @@ for why that was changed.)
 - Per-thread `~PerThreadTraceFile` closes both fds on **thread exit**. That
   runs only on the owning thread, so no cross-thread race exists there. Threads
   still alive at process exit have their fds closed by the kernel.
+- **Exit-time window on the main thread (precise).** `~PerThreadTraceFile` also
+  sets `t_in_instrumentation` permanently. On the main thread it runs from glibc's
+  `__call_tls_dtors` at the very START of `exit()` — before any atexit handler,
+  `trace_shutdown` included. So after `main()` returns, the only traced code is
+  the body of thread_local destructors ordered before the tracer's own (i.e.
+  thread_local objects first touched AFTER `t_state`, which glibc runs first —
+  LIFO). Everything later is silent: atexit handlers (even ones registered during
+  `main()`, which run before `trace_shutdown`), destructors of function-local
+  statics, and destructors of globals. Symmetrically, global constructors that run
+  before `trace_begin` are not traced either. Evidence: an atexit handler
+  registered in `main()` and a function-local static's destructor both left no
+  trace line, while a `thread_local` object's destructor did.
 - The cost is one fd pair per trace-producing thread held open until process
   exit — trivial for a debug tool.
 
@@ -567,7 +589,7 @@ Declares the `bfdResolver` struct with:
 - Free functions: `get_call_stack()`, `resolve()`
 
 **Public-API re-entrancy guard (load-bearing):** both free functions hold the
-per-thread `in_instrumentation` guard for their whole duration (RAII
+per-thread `t_in_instrumentation` guard for their whole duration (RAII
 `ScopedNoInstrument` in `callStack.cpp`, backed by
 `enter_no_instrument_scope()` / `exit_no_instrument_scope()` exported from
 `trace.cpp`; no-op definitions exist for `DISABLE_INSTRUMENTATION` builds).
@@ -1165,7 +1187,7 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    allocate, lock `s_bfd_mutex`, and use stdio — none async-signal-safe. A signal
    interrupting a thread mid-`malloc` whose handler runs instrumented functions
    re-enters the allocator on the same thread and can deadlock. (The
-   `in_instrumentation` guard incidentally covers signals landing *inside* the
+   `t_in_instrumentation` guard incidentally covers signals landing *inside* the
    resolve pipeline, but not the interrupted-allocator case.) Signal handlers
    should live in a TU compiled without `-finstrument-functions` or carry
    `NO_INSTRUMENT`. Documented in README's Thread Safety section.

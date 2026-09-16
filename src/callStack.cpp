@@ -45,7 +45,7 @@
 #include <unistd.h>
 
 namespace instrumentation {
-// Defined in trace.cpp: save-set / restore the per-thread in_instrumentation
+// Defined in trace.cpp: save-set / restore the per-thread t_in_instrumentation
 // re-entrancy guard. Used by the public API entry points below via
 // ScopedNoInstrument — see that struct's comment for why this is load-bearing.
 NO_INSTRUMENT bool enter_no_instrument_scope();

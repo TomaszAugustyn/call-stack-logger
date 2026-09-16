@@ -26,9 +26,9 @@ namespace instrumentation {
  * instantiations (e.g., std::sort<>, std::vector<>::push_back) compiled into the user's
  * translation unit receive instrumentation hooks and trigger __cyg_profile_func_enter.
  *
- * The re-entrancy guard (in_instrumentation) in trace.cpp only prevents recursive
+ * The re-entrancy guard (t_in_instrumentation) in trace.cpp only prevents recursive
  * instrumentation from within the resolve/format pipeline. It does NOT prevent std library
- * functions called from user code (where in_instrumentation is false) from being traced.
+ * functions called from user code (where t_in_instrumentation is false) from being traced.
  * This filter catches those calls by checking the Itanium C++ ABI mangled name for known
  * std library prefixes before the expensive BFD symbol resolution.
  *
