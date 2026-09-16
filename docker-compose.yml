@@ -35,8 +35,8 @@ services:
       "
 
   # Build and run all tests with the optimized build type the README recommends
-  # to integrators (RelWithDebInfo, -O2 -g). Pins caller resolution under
-  # optimizer inlining / sibling-call optimization (the frame-6 chain shape).
+  # to integrators (RelWithDebInfo, -O2 -g). Pins caller resolution and the
+  # documented inlining semantics under optimization.
   test-optimized:
     build: .
     volumes:

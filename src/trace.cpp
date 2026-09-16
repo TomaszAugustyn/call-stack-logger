@@ -355,11 +355,6 @@ void open_this_thread_file(PerThreadState& self) {
 
 // Returns the FILE* for the current thread, opening it on first use. Returns nullptr
 // if trace is not ready, shutdown has completed, or the open failed earlier.
-//
-// Note on the frame-depth-6 constant in callStack.cpp: this helper CANNOT affect it,
-// regardless of inlining — it returns before instrumentation::resolve() is invoked,
-// so it is never on the stack while the unwinder walks the resolve pipeline. The
-// `inline` keyword here is an ordinary code-size hint, not a correctness requirement.
 NO_INSTRUMENT inline
 FILE* get_thread_fp() {
     TraceGlobals& g = g_trace();
@@ -569,11 +564,11 @@ void trace_begin() {
 // to eliminate the dead code and the theoretical UAF. Line-buffered output plus
 // the kernel's close-on-exit guarantees cover the cases that trace_end did not.
 
-// NO_INLINE: frame 5 of the fixed chain behind the frame-6 constant in
-// callStack.cpp. The call to this hook is emitted by codegen (never inlined in
-// a normal build), but under LTO the definition becomes visible to user TUs —
-// noinline keeps the chain shape stable there too.
-extern "C" NO_INSTRUMENT NO_INLINE
+// `caller` is the instrumented function's own return address (both compilers
+// pass __builtin_return_address(0)), i.e. it already points into the real
+// caller — instrumentation::resolve() only steps it back into the call
+// instruction. No stack walk happens anywhere in the hook.
+extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
     if (t_state.in_instrumentation) { return; }
     // Set the guard BEFORE any work and clear it AFTER all local variables (especially

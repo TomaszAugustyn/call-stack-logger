@@ -10,7 +10,6 @@
 #include "callStack.h"
 #include "prettyTime.h"
 #include "stdSymbolFilter.h"
-#include "unwinder.h"
 
 // Workaround for deliberately incompatible bfd.h header files on some systems.
 // Same define/undef pattern as include/callStack.h (see the comment there);
@@ -357,51 +356,23 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
     return std::make_optional(std::move(resolved));
 }
 
-bool bfdResolver::is_cached_filtered(void* callee_address) {
-    std::lock_guard<std::mutex> lock(s_bfd_mutex);
-    auto it = name_cache().find(callee_address);
-    return it != name_cache().end() && !it->second;
-}
-
 std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* caller_address) {
-    // Fast path for callees whose cached resolution is "filtered / not loggable"
-    // (every internal-linkage function on both compilers, every std-library
-    // instantiation on Clang). Without it, each call to such a function still
-    // paid the full _Unwind_Backtrace walk below — per call, forever — only for
-    // resolve_no_unwind() to return nullopt from the name cache. The helper
-    // RETURNS before unwind_nth_frame() runs, so like get_thread_fp() it is
-    // never on the stack during the unwind and cannot shift the frame-6
-    // constant. First sight of an address still takes the slow path (the cache
-    // entry does not exist yet), which populates the cache.
-    if (is_cached_filtered(callee_address)) {
-        return std::nullopt;
-    }
-    // The caller_address passed by __cyg_profile_func_enter is the call site INSIDE the
-    // instrumentation pipeline (resolve → __cyg_profile_func_enter → ...) — not the actual
-    // user-code caller. Walk up the fixed depth of the pipeline to find the real one.
+    // The hook's `caller` argument is NOT the address of the call into
+    // __cyg_profile_func_enter: both GCC and Clang emit the hook call as
+    // `__cyg_profile_func_enter(fn, __builtin_return_address(0))` inside the
+    // instrumented function, so it is that function's own return address — the
+    // instruction right after the call site in the real caller. Step one byte
+    // back so the address lies inside the call instruction itself; otherwise a
+    // call that ends a source line would be attributed to the next line (the
+    // same adjustment get_call_stack() applies to backtrace()'s return
+    // addresses). No stack walk is needed to reach the caller.
     //
-    // If this code is not changed, walking 6 frames up from FrameUnwinder::unwind_nth_frame
-    // lands at the user-code caller of the instrumented function. The chain looks like:
-    //   1: FrameUnwinder::unwind_nth_frame
-    //   2: instrumentation::unwind_nth_frame
-    //   3: bfdResolver::resolve
-    //   4: instrumentation::resolve
-    //   5: __cyg_profile_func_enter
-    //   6: A::foo()  — the function being instrumented (callee)
-    //   7: caller of A::foo() — captured here (one beyond the 6 increments)
-    //
-    // If this call flow ever changes the constant must be recalculated. Only functions
-    // still on the stack when _Unwind_Backtrace runs count: helpers that
-    // __cyg_profile_func_enter calls BEFORE resolve() (e.g. get_thread_fp()) have
-    // already returned by then and can never shift the frame numbers, inlined or not.
-    //
-    // Every function in frames 1-5 carries NO_INLINE (see callStack.h): without it,
-    // -O2 inlines both unwind_nth_frame layers into this function (observed with
-    // GCC 16 at CMAKE_BUILD_TYPE=RelWithDebInfo), the chain loses two frames, the
-    // walk overshoots the real caller by two, and every line gets junk caller info.
-    Callback callback(caller_address);
-    unwind_nth_frame(callback, 6);
-    return resolve_no_unwind(callee_address, callback.caller);
+    // When the optimizer inlines an instrumented function into its caller, the
+    // hooks still fire but __builtin_return_address(0) then belongs to the
+    // enclosing physical frame, so the reported call site is that frame's — one
+    // level up. Documented in README's RelWithDebInfo tip.
+    return resolve_no_unwind(
+            callee_address, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(caller_address) - 1));
 }
 
 std::vector<std::optional<ResolvedFrame>> get_call_stack() {
@@ -430,14 +401,13 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
     //     for function-name resolution.
     //   - The call site INTO frame i's function lives in frame i+1's body, just
     //     before the resume point at stack[i+1]. Subtract 1 byte to point inside
-    //     the call instruction (matching what the unwinder's ip_before_instruction
-    //     adjustment does for the instrumentation flow).
+    //     the call instruction (the same step-back bfdResolver::resolve applies
+    //     to the return address the enter hook receives).
     //   - For the outermost frame there is no parent, so caller falls back to
     //     stack[i] itself; resolve will report the function's own location.
     //
-    // Use bfdResolver::resolve_no_unwind here — we have the actual addresses, no
-    // need to ask the unwinder to compute them (which would land at one fixed
-    // location regardless of i, producing the wrong caller info for every frame).
+    // Use bfdResolver::resolve_no_unwind here: the step-back is already applied
+    // above, so resolve() would move the address one byte too far.
     const size_t n = static_cast<size_t>(num);
     for (size_t i = 1; i < n; ++i) {
         void* caller = stack[i];
@@ -452,9 +422,7 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
 std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address) {
     // Public API entry point — same guard as get_call_stack(). When the enter
     // hook is the caller the guard is already set and this saves/restores it
-    // unchanged. Frame-depth note: the guard's constructor returns before
-    // bfdResolver::resolve() runs, so it is never on the stack during the
-    // unwind and cannot shift the frame-6 constant.
+    // unchanged.
     ScopedNoInstrument guard;
     return bfdResolver::resolve(callee_address, caller_address);
 }

@@ -148,7 +148,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         stdSymbolFilter.h
         traceFilePath.h
         types.h
-        unwinder.h
     )
 
     # Absolute paths, deliberately: GCC matches exclude-file-list entries as

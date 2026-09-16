@@ -908,9 +908,10 @@ TEST(CallStackApiTest, GetCallStackResolvesAncestors) {
         EXPECT_LT(pos_top, pos_main) << "Expected top to appear before main";
     }
 
-    // Verify per-frame caller info is correct (regression guard for the bug where
-    // bfdResolver::resolve's hard-coded 6-frame unwind made every frame report the
-    // SAME caller, regardless of which frame was being described).
+    // Verify per-frame caller info is correct (regression guard for the historical
+    // bug where get_call_stack() went through a resolver path that walked a fixed
+    // number of stack frames, so every frame reported the SAME caller regardless
+    // of which frame was being described).
     //
     // Each "FRAME: <fn> | CALLER: <file>:<line>" line should reference the source
     // file (callstack_api_program.cpp) for at least the inner ancestors, and the

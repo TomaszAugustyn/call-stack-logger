@@ -57,18 +57,6 @@
     #define NO_INSTRUMENT __attribute__((no_instrument_function))
 #endif
 
-// Applied to every function in the fixed call chain behind the frame-6 constant
-// (see bfdResolver::resolve in callStack.cpp). Without it, an optimized build of
-// the library (-O2, e.g. CMAKE_BUILD_TYPE=RelWithDebInfo — the build type the
-// README recommends to integrators) inlines parts of the chain, the hard-coded
-// frame count no longer matches the real stack, and every trace line silently
-// reports a wrong caller. NO_INLINE keeps the chain shape identical at every
-// optimization level; the cost is one genuine call per chain function per traced
-// call — noise next to the resolve pipeline itself.
-#ifndef NO_INLINE
-    #define NO_INLINE __attribute__((noinline))
-#endif
-
 namespace instrumentation {
 
 /**
@@ -119,33 +107,24 @@ public:
     NO_INSTRUMENT
     static storedBfd* ensure_bfd_loaded(Dl_info& _info);
 
-    /// Resolves callee + caller using the unwinder to find the actual user-code
-    /// caller from inside the instrumentation pipeline. The `caller_address`
-    /// parameter is the call site passed by `__cyg_profile_func_enter`; the
-    /// unwinder walks up the fixed depth of the resolve pipeline to reach the
-    /// real caller. Use this from instrumentation hooks.
-    /// NO_INLINE: frame 3 of the fixed chain behind the frame-6 constant.
-    NO_INSTRUMENT NO_INLINE
+    /// Resolves callee + caller for the instrumentation hooks. `caller_address`
+    /// is the hook's second argument: both GCC and Clang pass the instrumented
+    /// function's own return address (`__builtin_return_address(0)`), i.e. the
+    /// address just after the call instruction inside the REAL caller. This
+    /// steps one byte back into that call instruction (so the line lookup lands
+    /// on the call, not on whatever follows it) and resolves both addresses.
+    NO_INSTRUMENT
     static std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address);
 
-    /// Resolves callee + caller using both addresses verbatim — does NOT run the
-    /// unwinder. Use this when the caller is the actual user-code call site
-    /// (e.g. from `get_call_stack()`, where backtrace() already provides the
-    /// per-frame return addresses).
+    /// Resolves callee + caller using both addresses verbatim — no return-address
+    /// adjustment. Use this when `caller_address` already points inside the call
+    /// instruction (e.g. from `get_call_stack()`, which applies the same one-byte
+    /// step-back to backtrace()'s per-frame return addresses itself).
     NO_INSTRUMENT
     static std::optional<ResolvedFrame> resolve_no_unwind(
             void* callee_address, void* caller_address);
 
 private:
-    /// Returns true when name_cache() already records this callee as filtered
-    /// (cached nullopt: Clang std-library filter, internal-linkage functions
-    /// with no dladdr symbol, failed demangling). Used by resolve() to skip
-    /// the _Unwind_Backtrace walk for callees that can never produce a trace
-    /// line — the unwind exists only to key the caller-location lookup, which
-    /// such callees never reach. Takes s_bfd_mutex internally.
-    NO_INSTRUMENT
-    static bool is_cached_filtered(void* callee_address);
-
     /// Walks the object's section list to find the section containing `address`
     /// and writes the section-relative offset to `offset_out`. Returns nullptr
     /// when no section contains the address. Shared by resolve_function_name()
@@ -180,10 +159,7 @@ private:
     // per C++11 magic statics), closing that window. Same rationale as the
     // g_trace() singleton in trace.cpp. The per-call cost is one
     // already-initialized guard check on paths that already take s_bfd_mutex
-    // and do hash lookups — negligible, and none of these accessors run while
-    // the unwinder walks the stack (resolve_no_unwind() and is_cached_filtered()
-    // either run after the unwind or return before it), so the frame-6 constant
-    // is unaffected.
+    // and do hash lookups — negligible.
     //
     // Each instance is heap-allocated and deliberately LEAKED (never destroyed),
     // again mirroring g_trace(): these caches are first used during tracing,
@@ -276,9 +252,9 @@ NO_INSTRUMENT
 std::vector<std::optional<ResolvedFrame>> get_call_stack();
 
 /// Returns the ResolvedFrame if address resolution succeeds, std::nullopt if fails.
-/// NO_INLINE: frame 4 of the fixed chain behind the frame-6 constant (relevant
-/// under LTO, where even the cross-TU call from the enter hook could inline).
-NO_INSTRUMENT NO_INLINE
+/// `caller_address` is the return address as passed by `__cyg_profile_func_enter`
+/// (see bfdResolver::resolve).
+NO_INSTRUMENT
 std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address);
 
 } // namespace instrumentation

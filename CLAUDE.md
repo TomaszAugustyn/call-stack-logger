@@ -26,7 +26,9 @@ at every function entry and exit:
 - `__cyg_profile_func_exit(void *callee, void *caller)` - called before function exit
 
 Both receive raw `void*` pointers: `callee` is the address of the function being called,
-`caller` is the return address (call site). The framework resolves these addresses into
+`caller` is the instrumented function's own return address — both compilers emit the hook
+call as `__cyg_profile_func_enter(fn, __builtin_return_address(0))`, so it points just past
+the call instruction in the real caller. The framework resolves these addresses into
 human-readable function names, source filenames, and line numbers.
 
 ### Symbol Resolution Pipeline
@@ -50,62 +52,45 @@ Results are **memoized per address**: `resolve_no_unwind()` consults two hash ma
 pipeline executes only on first sight of each address — every repeat call is a hash
 lookup under the same mutex. A cached `nullopt` name records "filtered / not
 loggable", which also turns Clang's runtime std-library filter into a hash hit on
-repeat calls. `bfdResolver::resolve()` additionally consults that cached-nullopt
-state (via `is_cached_filtered()`) BEFORE running the stack unwinder, so
-permanently-filtered callees — internal-linkage (`static`) functions on both
-compilers, std-library instantiations on Clang — skip the per-call
-`_Unwind_Backtrace` walk entirely; the helper returns before the unwind runs, so
-it cannot shift the frame-6 constant. Cache growth is bounded by the program text (distinct instrumented
-functions + call sites), not by runtime input; `dlclose`+`dlopen` address reuse
-serves stale entries — the same accepted trade-off as the `bfds()` object cache.
+repeat calls — permanently-filtered callees (internal-linkage `static` functions
+on both compilers, std-library instantiations on Clang) cost one hash lookup and
+return before the caller-location lookup. Cache growth is bounded by the program
+text (distinct instrumented functions + call sites), not by runtime input;
+`dlclose`+`dlopen` address reuse serves stale entries — the same accepted
+trade-off as the `bfds()` object cache.
 
-### Stack Unwinding for Accurate Caller Location
+### Caller Location From the Hook's Return Address
 
-The `caller` address from `__cyg_profile_func_enter` points to the instrumentation call site,
-not the original source location. To get the real caller, the framework uses `_Unwind_Backtrace`
-and `_Unwind_GetIPInfo` from `<unwind.h>` to walk the stack to frame 6.
+The `caller` argument of `__cyg_profile_func_enter` is the instrumented function's
+own return address: GCC's gimplifier and Clang's codegen both emit the hook call as
+`__cyg_profile_func_enter(fn, __builtin_return_address(0))` at the top of the
+instrumented body. That address is the instruction right AFTER the call site in
+the real caller — no stack walk is needed to reach it. `bfdResolver::resolve()`
+subtracts one byte so the address lies INSIDE the call instruction (a call that
+ends a source line would otherwise be attributed to the next line) and hands both
+addresses to `resolve_no_unwind()`, which does the memoized dladdr + BFD +
+demangle work. `get_call_stack()` applies the same one-byte step-back to the
+return addresses `backtrace()` returns, so both entry points key the
+location cache with the same kind of address.
 
-The constant frame depth of 6 is derived from this fixed call chain (innermost first,
-matching the authoritative comment in `bfdResolver::resolve()`):
-```
-Frame 1: FrameUnwinder::unwind_nth_frame
-Frame 2: instrumentation::unwind_nth_frame
-Frame 3: bfdResolver::resolve
-Frame 4: instrumentation::resolve
-Frame 5: __cyg_profile_func_enter
-Frame 6: the instrumented function itself (the callee)
-Frame 7: the caller of the instrumented function — captured (one beyond the 6 increments)
-```
+History: earlier revisions walked the stack with `_Unwind_Backtrace` to a
+hard-coded frame depth (the "frame-6 constant"), which needed `noinline` on the
+whole hook-to-unwinder chain, a `volatile` trick against sibling-call
+optimization, and a separate fast path to skip the walk for filtered callees.
+A probe that logged both values on every traced call across the test programs
+on GCC and Clang at -O0 and -O2 showed the unwound address equals
+`caller - 1` on every call with identical resolved locations, so the walk was
+pure overhead (~1 µs per traced call on the reference host) and was removed.
+With `-fno-asynchronous-unwind-tables` the walk could even stop early and
+resolve the wrong line; the return address has no such dependency.
 
-**IMPORTANT:** If the resolution pipeline code is modified (adding/removing function calls in the
-chain), the frame number (currently 6) passed to `unwind_nth_frame()` inside
-`bfdResolver::resolve()` in `src/callStack.cpp` MUST be recalculated.
-
-**NO_INLINE is load-bearing for this constant.** Every function in frames 1–5
-(`FrameUnwinder::unwind_nth_frame`, `instrumentation::unwind_nth_frame`,
-`bfdResolver::resolve`, `instrumentation::resolve`, `__cyg_profile_func_enter`)
-carries `__attribute__((noinline))` (the `NO_INLINE` macro in `callStack.h`).
-Without it, an optimized build of the library (-O2, e.g.
-`CMAKE_BUILD_TYPE=RelWithDebInfo` — which FetchContent consumers inherit and the
-README recommends) inlines both `unwind_nth_frame` layers into
-`bfdResolver::resolve` (observed with GCC 16), the chain loses two frames, the
-walk overshoots the real caller, and every trace line silently reports junk
-caller info. `NO_INLINE` keeps the chain shape identical at all optimization
-levels; the cost (one genuine call per chain function per traced call) is noise
-next to the resolve pipeline itself, and default/-O0 builds are unchanged since
-nothing was inlined there anyway. `noinline` alone is NOT sufficient:
-GCC additionally turns the tail-position `_Unwind_Backtrace` call into a
-sibling-call `jmp` at -O2, recycling frame 1 and shifting every captured caller
-by one — `FrameUnwinder::unwind_nth_frame` therefore stores the call's result
-into a `volatile` local (an observable side effect after the call, keeping it
-out of tail position with plain C++ semantics).
-
-Remaining -O2 semantic (inherent, documented in README's RelWithDebInfo tip):
-when the OPTIMIZER inlines an instrumented USER function, its hooks still fire
-(GCC instruments inlined copies, so tree/depth/durations stay complete), but no
-physical frame exists — the reported `called from` is the enclosing physical
-frame's call site, one level up. No stack-walk can recover the conceptual
-caller of an inlined copy.
+-O2 semantic (inherent, documented in README's RelWithDebInfo tip): when the
+OPTIMIZER inlines an instrumented USER function, its hooks still fire (GCC
+instruments inlined copies, so tree/depth/durations stay complete), but
+`__builtin_return_address(0)` inside the inlined copy is the ENCLOSING physical
+frame's return address — the reported `called from` is that frame's call site,
+one level up. Nothing at the tracer level can recover the conceptual caller of
+an inlined copy; this behavior is unchanged from the stack-walking design.
 
 ### Excluding Standard Library from Instrumentation
 
@@ -116,7 +101,7 @@ The project uses a **two-tier exclusion approach** depending on the compiler:
 **GCC (compile-time exclusion):** The build system auto-discovers C++ standard library header
 paths using `${CMAKE_CXX_COMPILER} -xc++ -E -v -`, then passes them via
 `-finstrument-functions-exclude-file-list=<paths>`. The project's own instrumentation headers
-are also excluded: `callStack.h`, `unwinder.h`, `types.h`, `format.h`, `prettyTime.h`,
+are also excluded: `callStack.h`, `types.h`, `format.h`, `prettyTime.h`,
 `stdSymbolFilter.h`, `traceFilePath.h`, `durationFormat.h`.
 With this approach, GCC never inserts instrumentation hooks into std library functions.
 
@@ -460,7 +445,6 @@ call-stack-logger/
 |   |-- stdSymbolFilter.h       # is_std_library_symbol() — Clang runtime std filter
 |   |-- traceFilePath.h         # utils::resolve_base_trace_path + build_trace_filename
 |   |-- types.h                 # ResolvedFrame struct definition
-|   |-- unwinder.h              # FrameUnwinder template, Callback, unwind_nth_frame()
 |-- src/
 |   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, library + executable)
 |   |-- callStack.cpp           # Core implementation: BFD loading, symbol resolution
@@ -536,14 +520,8 @@ instantiations to the copies compiled in the user's instrumented TU (any TU
 including `callStack.h` emits them) — the enter hook then fires mid-resolver
 and re-locks `s_bfd_mutex` (observed via `unordered_map::find` inside
 `resolve_no_unwind`). GCC is immune only because its compile-time
-exclude-file-list keeps user-TU std instantiations hook-free. The guard's
-constructor returns before `bfdResolver::resolve()` runs, so it never shifts
-the frame-6 constant. Regression-pinned by
+exclude-file-list keeps user-TU std instantiations hook-free. Regression-pinned by
 `CallStackApiTest.WorksFromInstrumentedProgram` (runs under `timeout 10`).
-
-### `include/unwinder.h`
-Template class `FrameUnwinder<F>` that uses `_Unwind_Backtrace` to walk to the N-th stack
-frame and invoke a callback. The `Callback` struct captures the caller address.
 
 ### `include/format.h`
 `utils::format()` takes a `ResolvedFrame` and `current_stack_depth`, produces the formatted
@@ -595,7 +573,10 @@ The core implementation. Key functions:
   A successful `bfd_find_nearest_line()` with an EMPTY filename or line 0 (DWARF "no
   source line" sentinel) degrades through the same fallbacks as a failed lookup
   (`func:???` → `<unknown function>`) instead of rendering "(called from: :0)"
-- `bfdResolver::resolve()` - Orchestrates full resolution including stack unwinding
+- `bfdResolver::resolve()` - Entry point for the hooks: steps the hook's return-address
+  argument back one byte into the call instruction, then delegates to `resolve_no_unwind()`
+- `bfdResolver::resolve_no_unwind()` - Memoized callee-name + caller-location resolution
+  on two addresses taken verbatim (shared by the hooks and `get_call_stack()`)
 - `bfdResolver::get_argv0()` - Reads `/proc/self/cmdline` for executable path
 - `bfdResolver::ensure_actual_executable()` - Handles PATH-found executables via `/proc/self/exe`
 - `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames)
@@ -944,9 +925,11 @@ available locally via docker-compose.
 GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with five jobs:
 - **gcc**: builds with `BUILD_TESTS=ON` and `COVERAGE=ON`, runs tests via `ctest`, generates and uploads the lcov HTML coverage report.
 - **gcc-optimized**: builds with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` (the build type README
-  recommends to integrators), runs tests — pins caller resolution under optimizer inlining
-  and sibling-call optimization (the frame-6 chain shape). Locally available as the
-  `test-optimized` docker compose service.
+  recommends to integrators), runs tests — pins caller resolution and the documented
+  inlining semantics under optimization (the return-address mechanism, and the
+  `get_call_stack()` chain the API test keeps physical with `noinline` +
+  `-fno-optimize-sibling-calls`). Locally available as the `test-optimized` docker
+  compose service.
 - **clang**: builds with `-DCMAKE_CXX_COMPILER=clang++`, runs tests.
 - **sanitize-asan**: builds with `SANITIZE=address+undefined`, runs tests under ASan + UBSan + LSan (libbfd suppression via `${{ github.workspace }}/tests/lsan-suppressions.txt`).
 - **sanitize-tsan**: builds with `SANITIZE=thread`, runs tests under TSan.
@@ -976,7 +959,7 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
 ## Design Decisions & Caveats
 
 1. **Linux-only:** Relies on `/proc/self/cmdline`, `/proc/self/exe`, `dladdr`, BFD,
-   `_Unwind_*`, `localtime_r`, `O_NOFOLLOW`. Supports both GCC and Clang compilers.
+   `backtrace`, `localtime_r`, `O_NOFOLLOW`. Supports both GCC and Clang compilers.
    **Std library exclusion uses a two-tier approach:**
    - GCC: compile-time via `-finstrument-functions-exclude-file-list` (auto-discovered paths)
    - Clang: runtime via `is_std_library_symbol()` mangled name filter in `resolve_function_name()`
@@ -1011,14 +994,12 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    Worst-case shutdown artifact is one torn final line per thread. `fork()` is
    not supported — child inherits parent's thread_local FILE* pointers.
    `localtime_r` replaces `std::localtime` for thread-safe timestamp formatting.
-3. **Frame 6 constant:** The unwinder hard-codes frame depth 6 - must be recalculated if the
-   call chain between `__cyg_profile_func_enter` and `unwind_nth_frame` changes.
-   Only functions still on the stack during the unwind count: helpers that the enter
-   hook calls and that return before `resolve()` runs (e.g. `get_thread_fp()`) can
-   never shift the frame numbers, inlined or not. The chain functions themselves
-   (frames 1–5) all carry `NO_INLINE` — required, because -O2 otherwise inlines the
-   `unwind_nth_frame` layers into `bfdResolver::resolve` and shifts the constant
-   (see "Stack Unwinding for Accurate Caller Location").
+3. **Caller comes from the hook argument, not a stack walk:** `bfdResolver::resolve()`
+   resolves `caller - 1`, where `caller` is the return address both compilers pass to
+   `__cyg_profile_func_enter`. Nothing in the hook or resolver depends on the shape
+   of the call chain, so helpers may be inlined or split freely and the library needs
+   no `noinline` attributes or unwind tables of its own (see "Caller Location From
+   the Hook's Return Address").
 4. **Append mode:** Trace output is opened with `O_APPEND | O_NOFOLLOW` - multiple runs
    accumulate, separated by timestamped headers; output is line-buffered (`_IOLBF`)
    with `0600` permissions (owner read/write only). Note `O_NOFOLLOW` rejects a
@@ -1032,9 +1013,9 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    (see Symbol Resolution Pipeline) and cost a hash lookup plus the file write. Still
    a debugging/tracing tool, not for production use. `format()` uses `snprintf` with a
    stack buffer to avoid per-call heap allocation.
-7. **Header-only utilities:** `format.h`, `prettyTime.h`, `unwinder.h`,
-   `durationFormat.h` contain inline implementations in headers (definitions in
-   headers, not just declarations).
+7. **Header-only utilities:** `format.h`, `prettyTime.h`, `durationFormat.h`,
+   `traceFilePath.h`, `stdSymbolFilter.h` contain inline implementations in headers
+   (definitions in headers, not just declarations).
 8. **Per-function timing (`LOG_ELAPSED`)**: opt-in. Each thread opens a SECOND
    non-O_APPEND fd to its trace file (reopened via `/proc/self/fd/<fd>` so it is
    pinned to the same inode as the first fd) solely so `pwrite()` honors explicit
@@ -1096,3 +1077,5 @@ The project evolved through these milestones (earliest first):
 7. Migrated to CMake build system (legacy Makefiles kept for a while, since removed —
    they predated split compilation, LOG_ELAPSED, and the zstd link probe)
 8. Added documentation, article link, licensing, contribution guidelines
+9. Replaced the unwinder with the hook's return address (`caller - 1`) for caller
+   location — same output, one stack walk less per traced call

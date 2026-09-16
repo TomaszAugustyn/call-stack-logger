@@ -212,9 +212,10 @@ The residual ~2 % is mostly inlined helpers where the compiler dropped line info
 One caveat at optimized levels (`-O2` and up): when the compiler **inlines** an
 instrumented function into its caller, the enter/exit hooks still fire (the call
 tree stays complete, durations and nesting are unaffected), but the inlined call
-has no physical stack frame — its `(called from: ...)` then reports the nearest
-*enclosing* physical frame's call site, one level up. Functions the compiler
-keeps out-of-line get exact caller locations at every optimization level.
+has no physical stack frame — the return address the hook receives belongs to
+the *enclosing* physical frame, so `(called from: ...)` reports that frame's
+call site, one level up. Functions the compiler keeps out-of-line get exact
+caller locations at every optimization level.
 
 ### Available CMake targets ###
 
@@ -574,7 +575,7 @@ including `libc6-dbg` (debug symbols for libc, required for fast BFD symbol reso
 
 GitHub Actions runs on every push and pull request to `master`:
 - **GCC (build, test, coverage):** Builds, runs unit and integration tests, generates lcov HTML report (uploaded as an artifact).
-- **GCC RelWithDebInfo (optimized build, test):** Builds with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` (the build type recommended to integrators) and runs the full suite — pins caller resolution under optimizer inlining and sibling-call optimization.
+- **GCC RelWithDebInfo (optimized build, test):** Builds with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` (the build type recommended to integrators) and runs the full suite — pins caller resolution and the documented inlining semantics under optimization.
 - **Clang (build, test):** Builds and runs unit and integration tests.
 - **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer. Fails on any memory error, UB, or non-suppressed leak.
 - **Sanitize (GCC, TSan):** Builds with `SANITIZE=thread` and runs the full test suite under ThreadSanitizer.
