@@ -739,8 +739,10 @@ TEST(BadOutputPathTest, SymlinkOutputPathIsRejectedAndWarns) {
 // looped forever on exactly this input (holding the global BFD mutex), hanging
 // the traced program. The program runs under `timeout`, so a regression shows
 // up as exit code 124 instead of hanging the test suite. DEBUGINFOD_URLS is
-// cleared so libbfd builds with debuginfod support cannot fetch debug info
-// from the network and mask the stripped-object condition.
+// cleared as a precaution: libbfd itself only searches local separate-debug
+// locations (.build-id/ and .gnu_debuglink paths, verified with strace) and
+// never contacts a debuginfod server, but keeping the variable empty makes the
+// stripped-object condition independent of any future toolchain that might.
 // ============================================================================
 
 TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {

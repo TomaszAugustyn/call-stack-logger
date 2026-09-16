@@ -72,9 +72,9 @@ If the trace file cannot be opened, a warning is printed to `stderr`.
 
 ### Compiler-specific instrumentation ###
 
-Both GCC and Clang use `-finstrument-functions` for user code and produce identical trace
-output. The `callstacklogger` library itself is compiled without instrumentation flags (all its
-functions have the `NO_INSTRUMENT` attribute). Standard library exclusion differs by compiler:
+Both GCC and Clang use `-finstrument-functions` for user code. The `callstacklogger` library
+itself is compiled without instrumentation flags (all its functions have the `NO_INSTRUMENT`
+attribute). Standard library exclusion differs by compiler:
 
 |                                    | GCC                                                       | Clang                                                      |
 | ---------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------- |
@@ -85,6 +85,17 @@ GCC auto-discovers std library header paths and excludes them at compile time. C
 not support the exclude-file-list flag, so std library functions are filtered at runtime by
 checking the Itanium C++ ABI mangled name for known `std::`, `__gnu_cxx::`, and
 `__cxxabiv1::` prefixes.
+
+The two mechanisms draw the line in different places, so the traces are the same for
+ordinary user code but can differ at the edges:
+
+- **Your own code in namespace `std`** (a `std::hash<MyKey>` specialization, a custom
+  `std::swap` overload) lives in your source file, so GCC traces it. Clang's filter only
+  sees the mangled name, which starts with `std::`, and drops it.
+- **Third-party header-only code installed under `/usr/include`** (fmt, Boost, nlohmann
+  json, ...) sits inside a directory on GCC's exclude list — the list is built from the
+  compiler's system include paths, and `/usr/include` is one of them — so GCC never
+  instruments it. Clang instruments it and, because the names are not `std::`, traces it.
 
 **Known Clang limitation — exceptions.** Clang's `-finstrument-functions` does not call
 `__cyg_profile_func_exit` for frames unwound by a thrown exception, while GCC emits the
@@ -103,6 +114,25 @@ skipped frame for the rest of that thread's trace, and with `LOG_ELAPSED` later 
 patch durations onto the wrong lines. Avoid tracing code that `longjmp`s across
 instrumented frames (or keep such code in a translation unit compiled without
 `-finstrument-functions`).
+
+### What is not traced ###
+
+The hooks are compiled into every function, but they only write while the tracer is
+running: from the library's own startup constructor (`trace_begin`) until its `atexit`
+handler (`trace_shutdown`) has run. Calls outside that window are silently dropped:
+
+- **Global constructors** in your program that run before `trace_begin` — the order of
+  constructors across translation units and libraries is not defined, so a constructor in
+  your code may run first. Instrumented functions it calls leave no trace line.
+- **`atexit` handlers and static destructors** that run after `trace_shutdown`, which is
+  registered from `trace_begin` and therefore runs before the destructors of objects
+  constructed earlier than it (exit handlers run in reverse registration order).
+- **Frames still active when `exit()` is called.** `exit()` never returns, so the exit
+  hooks of `main` and everything below it on the stack never fire. With `LOG_ELAPSED` those
+  lines keep `[  pending ]` exactly as they would after a crash (see
+  [Crash diagnostics](#crash-diagnostics-via---pending-)) — a `[  pending ]` on `main` means
+  the program left through `exit()`, `_exit()`, `abort()` or a signal, not through
+  `return`.
 
 ## :jigsaw: Integrating into your own project ##
 
