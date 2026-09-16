@@ -258,11 +258,12 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address, con
     }
     // Private copy: ensure_bfd_loaded() may redirect dli_fname to /proc/self/exe.
     Dl_info info = *dl_info;
-#ifndef LOG_NOT_DEMANGLED
-    if (info.dli_sname == nullptr) {
-        return std::nullopt;
-    }
-#endif
+    // dli_sname is null for every callee without a dynamic symbol: static
+    // functions, anonymous-namespace functions, lambdas (their operator()),
+    // local classes. That is NOT a reason to drop the frame — BFD's symtab /
+    // DWARF lookup below names such functions fine, and the per-address name
+    // cache makes the extra BFD work a one-time cost per callee. The frame is
+    // dropped only when BFD has no name either (the nullopt returns below).
 
 #ifdef __clang__
     // Runtime std library filter (Clang only). GCC excludes std library functions at
@@ -298,7 +299,7 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address, con
 #ifdef __clang__
         // Re-apply the std-library filter to the BFD-derived name: the dladdr
         // check above only sees dli_sname, which can be null (no dynamic symbol
-        // — e.g. internal-linkage instantiations reached under LOG_NOT_DEMANGLED)
+        // — internal-linkage std instantiations and std-internal lambdas)
         // or a different, nearest-exported symbol than the precise symtab entry
         // BFD finds here. Either way a std-library frame could slip past the
         // first check and get logged. Cold path only: this runs once per
@@ -310,7 +311,13 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address, con
         auto demangled = demangle_cxa(func);
         return demangled.empty() ? std::nullopt : std::make_optional(demangled);
     }
-    return demangle_cxa(info.dli_sname != nullptr ? info.dli_sname : "") + " <bfd_error>";
+    // BFD found nothing for this address. With a dynamic symbol we can still
+    // name the frame; without one there is no name from either source, so the
+    // frame is not loggable (a bare " <bfd_error>" line would say nothing).
+    if (info.dli_sname == nullptr) {
+        return std::nullopt;
+    }
+    return demangle_cxa(info.dli_sname) + " <bfd_error>";
 }
 
 std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filename_and_line(

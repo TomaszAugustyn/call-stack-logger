@@ -29,8 +29,8 @@ namespace utils {
 // `after_timestamp` is inserted verbatim immediately after the "[<timestamp>] "
 // prefix and before everything else (addr / tree / name / caller). It exists so
 // LOG_ELAPSED can splice a fixed-width "[  pending ] " duration placeholder into
-// every line at a position whose byte offset is independent of LOG_ADDR /
-// LOG_NOT_DEMANGLED. The default empty string preserves today's output byte-for-
+// every line at a position whose byte offset is independent of LOG_ADDR.
+// The default empty string preserves today's output byte-for-
 // byte — all existing call sites are unaffected. This header stays flag-agnostic:
 // the caller in trace.cpp decides what, if anything, to splice in.
 //

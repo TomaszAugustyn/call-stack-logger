@@ -306,8 +306,25 @@ TEST_F(IntegrationTest, StlUsageFunctionPresent) {
             << "func_with_stl not found — user functions using STL must still appear";
 }
 
+// Verify internal-linkage callees are traced and named. None of these has a
+// dynamic symbol (dladdr() yields dli_sname == nullptr), so the resolver must
+// fall through to BFD's symtab / DWARF lookup instead of dropping the frame.
+// The lambda's operator() is spelled differently by the two compilers —
+// "main::{lambda(int)#1}::operator()(int) const" on GCC,
+// "main::$_0::operator()(int) const" on Clang — so the check accepts both.
+TEST_F(IntegrationTest, InternalLinkageFunctionsResolved) {
+    EXPECT_NE(trace_content.find("|_ file_static_func(int)"), std::string::npos)
+            << "static function missing from trace:\n" << trace_content;
+    EXPECT_NE(trace_content.find("|_ (anonymous namespace)::anon_ns_func(int)"), std::string::npos)
+            << "anonymous-namespace function missing from trace:\n" << trace_content;
+    std::regex lambda_pattern(
+            R"(\|_ main::(\{lambda\(int\)#1\}|\$_[0-9]+)::operator\(\)\(int\) const  \(called from:)");
+    EXPECT_TRUE(std::regex_search(trace_content, lambda_pattern))
+            << "lambda operator() missing from trace:\n" << trace_content;
+}
+
 // Verify trace has exactly the expected number of function entries.
-// The traced program produces 13 user-defined function entries. Without std
+// The traced program produces 16 user-defined function entries. Without std
 // library filtering, Clang would produce hundreds of entries from template
 // instantiations.
 TEST_F(IntegrationTest, ExactTraceLineCount) {
@@ -319,9 +336,10 @@ TEST_F(IntegrationTest, ExactTraceLineCount) {
     }
     // Expected: main, func_a, func_b, func_c, static_method, TracedClass (ctor),
     // instance_method, template_func, inline_func, func_with_stl,
-    // recursive_countdown x3 = 13 entries.
-    EXPECT_EQ(entry_count, 13)
-            << "Expected exactly 13 function entries; got " << entry_count
+    // recursive_countdown x3, file_static_func, anon_ns_func, the lambda's
+    // operator() = 16 entries.
+    EXPECT_EQ(entry_count, 16)
+            << "Expected exactly 16 function entries; got " << entry_count
             << ". If count is much higher, std library functions may be leaking through.";
 }
 
@@ -1081,8 +1099,8 @@ TEST(CallStackApiTest, WorksFromInstrumentedProgram) {
 }
 
 // ============================================================================
-// Build-flag tests — exercise the LOG_ADDR and LOG_NOT_DEMANGLED CMake options
-// via library variants built with each macro defined.
+// Build-flag tests — exercise the LOG_ADDR CMake option via a library variant
+// built with the macro defined.
 // ============================================================================
 
 namespace {
@@ -1155,24 +1173,6 @@ TEST(LogAddrFlagTest, NoAddressPrefixWithoutFlag) {
             << "Default build should not include 'addr: [0x' — LOG_ADDR macro "
                "may be leaking into the default callstacklogger target.";
 #endif
-}
-
-// Smoke test: with -DLOG_NOT_DEMANGLED=ON, the program still compiles, runs,
-// and produces normal trace output. The flag's actual differential behavior
-// (logging frames where dladdr returns dli_sname == nullptr) is hard to trigger
-// deterministically — so this test only verifies the macro wires through and
-// doesn't break the trace pipeline.
-TEST(LogNotDemangledFlagTest, ProducesNormalTraceOutput) {
-    std::string content = run_and_capture_trace(TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH);
-    ASSERT_FALSE(content.empty()) << "trace file is empty";
-
-    // Standard sanity checks — same as the default build's expectations.
-    EXPECT_NE(content.find("=== New trace run:"), std::string::npos)
-            << "missing run separator";
-    EXPECT_NE(content.find("(called from:"), std::string::npos)
-            << "no function entries";
-    EXPECT_NE(content.find("main"), std::string::npos)
-            << "main not in trace";
 }
 
 // ============================================================================
@@ -1495,7 +1495,7 @@ TEST(LogElapsedThreadedTest, PerThreadFilesPatchIndependently) {
 }
 
 // ============================================================================
-// Combined LOG_ELAPSED + LOG_ADDR + LOG_NOT_DEMANGLED — proves LOG_ELAPSED's
+// Combined LOG_ELAPSED + LOG_ADDR — proves LOG_ELAPSED's
 // fixed byte-offset math is independent of layout changes downstream of the
 // timestamp (LOG_ADDR prepends "addr: [0x...]" before the tree). If the
 // placeholder offset were derived from the line tail rather than from

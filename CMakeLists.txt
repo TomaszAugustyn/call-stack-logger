@@ -19,7 +19,6 @@ option(COVERAGE "Enable code coverage (requires GCC)" OFF)
 # the rest, matching the README's CMake-options table — behavior with plain
 # -D<flag>=ON on the command line is unchanged.
 option(LOG_ADDR "Include callee addresses in trace output" OFF)
-option(LOG_NOT_DEMANGLED "Log functions even when demangling fails" OFF)
 option(DISABLE_INSTRUMENTATION "Compile without any instrumentation hooks" OFF)
 
 # Opt-in per-function duration tracking. When ON, every instrumented function's

@@ -37,6 +37,10 @@ Address resolution happens in multiple stages (implemented in `src/callStack.cpp
 
 1. **`dladdr()`** (from `<dlfcn.h>`) - Retrieves basic symbol info from the dynamic linker,
    including the shared object base address (`dli_fbase`) and symbol name (`dli_sname`).
+   `dli_sname` is null for every callee without a dynamic symbol — `static` functions,
+   anonymous-namespace functions, lambdas (their `operator()`), local classes. Such
+   callees are NOT dropped: stage 2 names them from the symbol table / DWARF, and the
+   per-address name cache makes that a one-time cost per callee.
 
 2. **BFD Library** (`<bfd.h>` from GNU binutils) - Opens the object file and reads its symbol
    table. Uses `bfd_find_nearest_line()` to map an address offset within a section to a source
@@ -149,7 +153,8 @@ This filter runs inside `resolve_function_name()` right after `dladdr()` and bef
 loading, so filtered functions avoid the expensive BFD symbol resolution entirely. It is
 applied a second time to the symtab name returned by `bfd_find_nearest_line()` — `dli_sname`
 can be null (no dynamic symbol) or a different, nearest-exported symbol, so a std frame
-could otherwise slip past the first check (e.g. under `LOG_NOT_DEMANGLED`).
+could otherwise slip past the first check (internal-linkage std instantiations have no
+dynamic symbol at all).
 
 ### The NO_INSTRUMENT Macro
 
@@ -307,7 +312,7 @@ count. Placeholder offset for a frame is then
 `cursor_before_write + utils::PRETTY_TIME_LENGTH + 3` — the field is
 spliced immediately after `"[<timestamp>] "`, before the optional
 `addr:` column and the tree, which keeps the offset invariant under
-any combination of `LOG_ADDR` / `LOG_NOT_DEMANGLED`.
+`LOG_ADDR`.
 
 **64-bit offsets everywhere.** The library (and each test variant library) is
 compiled with a PRIVATE `_FILE_OFFSET_BITS=64`, so the cursor and pwrite patch
@@ -642,8 +647,6 @@ Demo program testing instrumentation with:
 mkdir build && cd build
 cmake ..                                    # Default logging
 cmake -DLOG_ADDR=ON ..                      # Include addresses in output
-cmake -DLOG_NOT_DEMANGLED=ON ..             # Log even undemangled functions
-cmake -DLOG_ADDR=ON -DLOG_NOT_DEMANGLED=ON ..  # Both flags
 cmake -DDISABLE_INSTRUMENTATION=ON ..       # No instrumentation at all
 make                                        # Build
 make run                                    # Build and run (generates trace.out)
@@ -665,7 +668,6 @@ make run                                    # Build and run (generates trace.out
 | Define | Effect |
 |--------|--------|
 | `LOG_ADDR` | Include function addresses in trace output |
-| `LOG_NOT_DEMANGLED` | Log functions even when demangling fails |
 | `LOG_ELAPSED` | Record per-function duration via in-place pwrite() patching of a 12-byte placeholder spliced after the timestamp. See "Per-function timing" below. |
 | `DISABLE_INSTRUMENTATION` | Compile without any instrumentation hooks |
 
@@ -741,7 +743,9 @@ Test pure/deterministic functions from the include headers:
 
 - `traced_program.cpp` — small instrumented program with varied call patterns (free functions,
   static methods, templates, constructors, inline functions, STL usage via `func_with_stl()`,
-  self-recursion via `recursive_countdown(3)` — same callee at three depths)
+  self-recursion via `recursive_countdown(3)` — same callee at three depths, and
+  internal-linkage callees: a `static` function, an anonymous-namespace function and a
+  lambda, which `InternalLinkageFunctionsResolved` asserts are traced by name)
 - `test_integration.cpp` — executes `traced_test_program`, parses trace output, verifies:
   function names resolved, nesting depth correct (including one-entry-per-level
   recursion via `RecursionProducesOneEntryPerLevel`), caller info present, timestamp
@@ -819,19 +823,13 @@ Test pure/deterministic functions from the include headers:
   runs under `timeout 10` (with `DEBUGINFOD_URLS` cleared so libbfd cannot
   fetch debug info from the network), so a regression fails fast with exit
   code 124 instead of hanging the suite.
-- `LogAddrFlagTest` (2 tests) and `LogNotDemangledFlagTest` (1 test) exercise the
-  build-time CMake options `-DLOG_ADDR=ON` and `-DLOG_NOT_DEMANGLED=ON`. Each flag
-  has its own library variant in `tests/integration/CMakeLists.txt` —
-  `callstacklogger_log_addr` / `callstacklogger_log_not_demangled` — built from the
-  same sources with the corresponding macro defined, and a `traced_test_program_<variant>`
-  that links it. `LogAddrFlagTest.AddressPrefixAppearsInTrace` asserts every entry in
-  the variant's trace has the `addr: [0x<hex>]` prefix, while
+- `LogAddrFlagTest` (2 tests) exercises the build-time CMake option `-DLOG_ADDR=ON`.
+  The flag has its own library variant in `tests/integration/CMakeLists.txt` —
+  `callstacklogger_log_addr` — built from the same sources with the macro defined, and
+  a `traced_test_program_log_addr` that links it. `LogAddrFlagTest.AddressPrefixAppearsInTrace`
+  asserts every entry in the variant's trace has the `addr: [0x<hex>]` prefix, while
   `LogAddrFlagTest.NoAddressPrefixWithoutFlag` is a negative test on the default
   build to guard against the macro accidentally becoming always-on.
-  `LogNotDemangledFlagTest.ProducesNormalTraceOutput` is a smoke test only — it
-  verifies the macro wires through and produces a valid trace, since the actual
-  differential behavior (logging frames where `dladdr` returns `dli_sname == nullptr`)
-  is hard to trigger deterministically without a stripped/JITted callee.
 - `threaded_traced_program.cpp` — spawns 4 worker threads (each calling a
   `worker_top → worker_mid → worker_leaf` chain), then runs `main_only_post_join()`
   on the main thread after join. Prints `MAIN_TID=<n>` to stdout so the test fixture
@@ -886,8 +884,8 @@ Test pure/deterministic functions from the include headers:
   the LOG_ELAPSED library variant, linked with Threads::Threads). Asserts 4
   worker files exist and every per-thread file (main + workers) is fully
   patched — proves per-thread cursor / patch_fd isolation.
-- `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the all-three-flags
-  variant `traced_test_program_log_elapsed_addr_not_demangled`. Asserts the
+- `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the both-flags
+  variant `traced_test_program_log_elapsed_addr`. Asserts the
   ordering "timestamp → duration → addr" via regex, the tree column stays
   byte-aligned across same-depth lines (proves the fixed-width LOG_ELAPSED
   prefix preserves alignment under the LOG_ADDR layout), no pending leftovers,
@@ -1128,3 +1126,5 @@ The project evolved through these milestones (earliest first):
 8. Added documentation, article link, licensing, contribution guidelines
 9. Replaced the unwinder with the hook's return address (`caller - 1`) for caller
    location — same output, one stack walk less per traced call
+10. Internal-linkage callees (static, anonymous-namespace, lambdas) are named via BFD by
+    default; the `LOG_NOT_DEMANGLED` option (which only gated that) was retired

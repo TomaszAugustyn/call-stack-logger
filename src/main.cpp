@@ -51,9 +51,12 @@ int main() {
     // Test logging static member methods.
     A::foo();
 
-    // Test logging lambdas
+    // Test logging lambdas. The first argument is read from a volatile so the
+    // call is not constant-folded away: lambdas are implicitly constexpr, and
+    // GCC folds a call with constant arguments even at -O0 — nothing to trace.
+    volatile int three = 3;
     auto isLessThan = [](auto a, auto b) { return a < b; };
-    bool out = isLessThan(3, 3.14);
+    bool out = isLessThan(three, 3.14);
     std::cout << "isLessThan: " << std::boolalpha << out << std::endl;
 
     // Test logging user-defined default constructor

@@ -21,8 +21,9 @@
  * trace file is line-buffered, so every enter line already reached the kernel
  * when abort() fires.
  *
- * Functions are deliberately NOT static — file-local linkage would hide them
- * from dladdr and they would silently vanish from the trace.
+ * Functions have external linkage so dladdr() names them directly; the
+ * resolver would also name static ones via BFD, but the test's assertions
+ * are simpler against plain function names.
  */
 
 #include <cstdlib>

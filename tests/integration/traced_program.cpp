@@ -17,6 +17,9 @@
  * - Constructor and non-static member method
  * - Inline function
  * - Self-recursion (same callee address at several depths)
+ * - Internal-linkage functions (static, anonymous namespace, lambda) — these
+ *   have no dynamic symbol, so dladdr() cannot name them and the resolver must
+ *   fall through to BFD's symtab / DWARF lookup
  *
  * The integration tests execute this program and parse its trace output.
  */
@@ -61,6 +64,19 @@ int recursive_countdown(int n) {
     return n + recursive_countdown(n - 1);
 }
 
+// Internal linkage: no .dynsym entry, so dladdr() reports dli_sname == nullptr
+// for both. They must still be traced, named via BFD (see
+// InternalLinkageFunctionsResolved in test_integration.cpp).
+static int file_static_func(int x) {
+    return x + 1;
+}
+
+namespace {
+int anon_ns_func(int x) {
+    return x + 2;
+}
+} // namespace
+
 void func_c() {
     std::cout << "func_c (leaf)\n";
 }
@@ -97,6 +113,16 @@ int main() {
     // Recursion: 3 nested frames of the same function
     int sum = recursive_countdown(3);
     (void)sum; // suppress unused warning
+
+    // Internal-linkage callees: static, anonymous-namespace, and a lambda
+    // (its operator() is a member of a local class — also internal linkage).
+    // The argument is read from a volatile so the lambda call cannot be
+    // constant-folded: lambdas are implicitly constexpr, and GCC folds a call
+    // with constant arguments even at -O0, emitting no operator() at all.
+    volatile int seed = 1;
+    auto lambda_func = [](int v) { return v + 3; };
+    int internal = file_static_func(seed) + anon_ns_func(seed) + lambda_func(seed);
+    (void)internal; // suppress unused warning
 
     return 0;
 }

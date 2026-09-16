@@ -52,8 +52,8 @@ cmake ..
 cmake -DCMAKE_CXX_COMPILER=clang++ ..
 # or to log the execution time of each function entry
 cmake -DLOG_ELAPSED=ON ..
-# or for extended logging you can play with these flags
-cmake -DLOG_ADDR=ON -DLOG_NOT_DEMANGLED=ON ..
+# or to include each callee's address in the output
+cmake -DLOG_ADDR=ON ..
 # or to compile your application with disabled instrumentation (no logging)
 cmake -DDISABLE_INSTRUMENTATION=ON ..
 # or to build with tests and code coverage
@@ -267,7 +267,6 @@ from the wrong file.
 | Option                    | Default | Description                                                                                                                                 |
 | ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `LOG_ADDR`                | `OFF`   | Include function addresses in trace output                                                                                                  |
-| `LOG_NOT_DEMANGLED`       | `OFF`   | Log functions even when demangling fails                                                                                                    |
 | `LOG_ELAPSED`             | `OFF`   | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed).                        |
 | `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks                                                                                                   |
 | `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test)                                                                                      |
@@ -310,7 +309,7 @@ cmake --build build
 
 A 12-byte fixed-width duration field is spliced **between the timestamp and the
 tree column**, so it never disturbs tree alignment and is independent of
-`LOG_ADDR` / `LOG_NOT_DEMANGLED`:
+`LOG_ADDR`:
 
 ```
 [21-04-2026 15:00:00.123] [ 105.323ms] |_ main  (called from: …libc-start.c:310)

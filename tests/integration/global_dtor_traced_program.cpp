@@ -24,9 +24,10 @@
  * Prints GLOBAL_DTOR_RAN from the destructor so the test can verify the
  * destructor actually executed and completed.
  *
- * Functions are deliberately NOT static — file-local linkage would hide them
- * from dladdr (the anonymous-namespace struct's destructor is internal-linkage
- * on purpose: its hook still fires, exercising the filtered path too).
+ * Functions have external linkage so dladdr() names them directly (the
+ * anonymous-namespace struct's destructor has internal linkage, which the
+ * resolver names via BFD instead — its hook fires in the disabled exit window
+ * either way).
  */
 
 #include <iostream>

@@ -182,7 +182,6 @@ function(cslg_add_flag_variant variant driver)
 endfunction()
 
 cslg_add_flag_variant(log_addr traced_program.cpp LOG_ADDR)
-cslg_add_flag_variant(log_not_demangled traced_program.cpp LOG_NOT_DEMANGLED)
 
 # LOG_ELAPSED uses a DEDICATED driver (log_elapsed_traced_program.cpp) with
 # usleep() sentinels at known depths, so LogElapsedFlagTest can assert specific
@@ -206,13 +205,12 @@ target_compile_options(crash_traced_program_log_elapsed PRIVATE ${INSTRUMENT_FLA
 target_link_libraries(crash_traced_program_log_elapsed PRIVATE callstacklogger_log_elapsed)
 cslg_apply_sanitizers(crash_traced_program_log_elapsed)
 
-# Combined-flags variant: all three gated macros defined simultaneously. Exercises
-# LOG_ELAPSED's byte-offset math under the line-layout changes introduced by
-# LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the placeholder
-# position (right after the fixed-width timestamp) is independent of the tail
-# layout and that pwrite() never stomps the addr column.
-cslg_add_flag_variant(log_elapsed_addr_not_demangled traced_program.cpp
-    LOG_ELAPSED LOG_ADDR LOG_NOT_DEMANGLED)
+# Combined-flags variant: both output-content macros defined simultaneously.
+# Exercises LOG_ELAPSED's byte-offset math under the line-layout changes
+# introduced by LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the
+# placeholder position (right after the fixed-width timestamp) is independent
+# of the tail layout and that pwrite() never stomps the addr column.
+cslg_add_flag_variant(log_elapsed_addr traced_program.cpp LOG_ELAPSED LOG_ADDR)
 
 # The integration test runner executes traced_test_program and parses output.
 # Compiled WITHOUT instrumentation — just gtest code.
@@ -237,14 +235,13 @@ target_compile_definitions(integration_tests PRIVATE
     GLOBAL_DTOR_PROGRAM_PATH="$<TARGET_FILE:global_dtor_traced_program>"
     CRASH_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:crash_traced_program_log_elapsed>"
     TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
-    TRACED_PROGRAM_LOG_NOT_DEMANGLED_PATH="$<TARGET_FILE:traced_test_program_log_not_demangled>"
     TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed>"
     THREADED_TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed_threaded>"
-    TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed_addr_not_demangled>"
+    TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed_addr>"
 )
 
-# When the user passes -DLOG_ADDR=ON, -DLOG_NOT_DEMANGLED=ON, or -DLOG_ELAPSED=ON
-# globally, the default callstacklogger target also defines that macro PUBLIC —
+# When the user passes -DLOG_ADDR=ON or -DLOG_ELAPSED=ON globally, the
+# default callstacklogger target also defines that macro PUBLIC —
 # so tests that expect the DEFAULT build to NOT have the macro must skip themselves
 # to avoid false failures.
 if(LOG_ADDR)
@@ -254,9 +251,6 @@ endif()
 # (documented limitation). ExceptionUnwindTest asserts only when this is set.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_definitions(integration_tests PRIVATE CSLG_COMPILER_IS_GNU)
-endif()
-if(LOG_NOT_DEMANGLED)
-    target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_NOT_DEMANGLED)
 endif()
 if(LOG_ELAPSED)
     target_compile_definitions(integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_ELAPSED)

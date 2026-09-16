@@ -59,14 +59,10 @@ target_link_libraries(callstacklogger_instrumented INTERFACE callstacklogger)
 add_library(callstacklogger::callstacklogger ALIAS callstacklogger)
 add_library(callstacklogger::instrumented ALIAS callstacklogger_instrumented)
 
-# LOG_ADDR / LOG_NOT_DEMANGLED apply to the library itself (they gate #ifdef in
-# format.h / callStack.cpp). Put them on the library target rather than globally.
+# LOG_ADDR / LOG_ELAPSED apply to the library itself (they gate #ifdef in
+# callStack.cpp / trace.cpp). Put them on the library target rather than globally.
 if(LOG_ADDR)
     target_compile_definitions(callstacklogger PUBLIC LOG_ADDR)
-endif()
-
-if(LOG_NOT_DEMANGLED)
-    target_compile_definitions(callstacklogger PUBLIC LOG_NOT_DEMANGLED)
 endif()
 
 if(LOG_ELAPSED)
