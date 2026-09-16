@@ -42,4 +42,28 @@ struct ResolvedFrame {
     NO_INSTRUMENT ResolvedFrame& operator=(ResolvedFrame&&) = default;
 };
 
+// Non-owning counterpart of ResolvedFrame, field for field. This is what the
+// enter hook works with on the hot path: the resolver fills the two string
+// pointers straight from its memoization caches instead of copying the strings
+// into a ResolvedFrame (the function name and, above all, the caller path
+// exceed std::string's small-buffer capacity, so each copy was a heap
+// allocation on every traced call). `timestamp` is not produced by the
+// resolver — the caller points it at its own stack buffer (see
+// utils::pretty_time_into) before formatting.
+//
+// Lifetime: the pointed-to strings live in bfdResolver's name_cache() /
+// location_cache(). Both are std::unordered_map (node-based, so a rehash
+// never relocates an element), entries are never erased or modified after
+// insertion, and the maps themselves are deliberately leaked — the pointers
+// therefore stay valid for the rest of the process, and reading through them
+// needs no lock. The public API keeps returning owning ResolvedFrame values;
+// this view exists for internal use.
+struct ResolvedFrameView {
+    const char* timestamp = "";
+    std::optional<void*> callee_address;
+    const std::string* callee_function_name = nullptr;
+    const std::string* caller_filename = nullptr;
+    std::optional<unsigned int> caller_line_number;
+};
+
 } // namespace instrumentation

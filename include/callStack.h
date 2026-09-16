@@ -113,16 +113,29 @@ public:
     /// address just after the call instruction inside the REAL caller. This
     /// steps one byte back into that call instruction (so the line lookup lands
     /// on the call, not on whatever follows it) and resolves both addresses.
+    /// Returns false when the callee is filtered / not loggable; on success `out`
+    /// points straight into the memoization caches (no string copies — see
+    /// ResolvedFrameView for the lifetime guarantee) with `timestamp` left for
+    /// the caller to fill.
     NO_INSTRUMENT
-    static std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address);
+    static bool resolve(void* callee_address, void* caller_address, ResolvedFrameView& out);
 
     /// Resolves callee + caller using both addresses verbatim — no return-address
     /// adjustment. Use this when `caller_address` already points inside the call
     /// instruction (e.g. from `get_call_stack()`, which applies the same one-byte
-    /// step-back to backtrace()'s per-frame return addresses itself).
+    /// step-back to backtrace()'s per-frame return addresses itself). Copies the
+    /// cached strings into an owning ResolvedFrame and stamps it with the current
+    /// time.
     NO_INSTRUMENT
     static std::optional<ResolvedFrame> resolve_no_unwind(
             void* callee_address, void* caller_address);
+
+    /// Non-owning form of resolve_no_unwind(): the memoized (or, on first
+    /// sight, freshly resolved) callee name and caller location are returned as
+    /// pointers into the caches. This is the only function that touches the
+    /// caches, so s_bfd_mutex is held exactly here and nowhere up the stack.
+    NO_INSTRUMENT
+    static bool resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out);
 
 private:
     /// Walks the object's section list to find the section containing `address`
@@ -274,5 +287,13 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack();
 /// (see bfdResolver::resolve).
 NO_INSTRUMENT
 std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address);
+
+/// Allocation-free form used by the enter hook: fills `out` with pointers into
+/// the resolver's caches (see ResolvedFrameView) instead of copying strings.
+/// Returns false when the frame is filtered / not loggable. `caller_address` is
+/// the hook's return-address argument; the one-byte step-back into the call
+/// instruction happens inside.
+NO_INSTRUMENT
+bool resolve(void* callee_address, void* caller_address, ResolvedFrameView& out);
 
 } // namespace instrumentation

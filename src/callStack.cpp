@@ -91,6 +91,21 @@ std::string demangle_cxa(const char* mangled) {
 // by resolve_function_name() — lives in include/stdSymbolFilter.h so its pure
 // mangled-name parsing is unit-testable on both compilers.
 
+// Copies a non-owning view into the owning ResolvedFrame the public API
+// returns, stamping it with the current time. Only the std::string-returning
+// entry points (get_call_stack(), instrumentation::resolve()) pay for these
+// copies; the enter hook formats straight from the view.
+NO_INSTRUMENT
+instrumentation::ResolvedFrame own_frame(const instrumentation::ResolvedFrameView& view) {
+    instrumentation::ResolvedFrame frame;
+    frame.timestamp = utils::pretty_time();
+    frame.callee_address = view.callee_address;
+    frame.callee_function_name = *view.callee_function_name;
+    frame.caller_filename = *view.caller_filename;
+    frame.caller_line_number = view.caller_line_number;
+    return frame;
+}
+
 } // namespace
 
 namespace instrumentation {
@@ -375,9 +390,7 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
     return std::make_pair(std::string("<bfd_error>"), std::nullopt);
 }
 
-std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
-        void* callee_address, void* caller_address) {
-    ResolvedFrame resolved;
+bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out) {
     bool have_name = false;
     bool have_location = false;
     {
@@ -385,28 +398,30 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
         // iteration, and bfd_find_nearest_line(). BFD library is not thread-safe —
         // concurrent calls on the same bfd* object corrupt internal state. This lock
         // serializes all BFD access and also protects the name_cache() /
-        // location_cache() memoization maps. Scoped so pretty_time() below — which
-        // needs no BFD state — runs after the lock is released instead of extending
-        // the global serialization window every traced call shares.
+        // location_cache() memoization maps. Timestamping and formatting happen in
+        // the callers, after the lock is released, so the global serialization
+        // window every traced call shares stays as small as the lookups themselves.
         //
         // Warm path: both memoized lookups hit (see the cache comments in
-        // callStack.h) and no BFD work happens at all. The cached values are read
-        // in place. A cached nullopt name means "filtered / not loggable" and is
-        // honored as such.
+        // callStack.h) and no BFD work happens at all. The cached values are handed
+        // out as pointers into the cache nodes: valid for the process lifetime and
+        // safe to read after the lock is dropped (node-based maps, entries never
+        // erased or modified, containers leaked — see ResolvedFrameView in types.h).
+        // A cached nullopt name means "filtered / not loggable" and is honored as such.
         std::lock_guard<std::mutex> lock(s_bfd_mutex);
         check_bfd_initialized();
         auto name_it = name_cache().find(callee_address);
         if (name_it != name_cache().end()) {
             if (!name_it->second) {
-                return std::nullopt;
+                return false;
             }
-            resolved.callee_function_name = *name_it->second;
+            out.callee_function_name = &name_it->second.value();
             have_name = true;
         }
         auto loc_it = location_cache().find(caller_address);
         if (loc_it != location_cache().end()) {
-            resolved.caller_filename = loc_it->second.first;
-            resolved.caller_line_number = loc_it->second.second;
+            out.caller_filename = &loc_it->second.first;
+            out.caller_line_number = loc_it->second.second;
             have_location = true;
         }
     }
@@ -452,9 +467,9 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
                                   .first;
             }
             if (!name_it->second) {
-                return std::nullopt;
+                return false;
             }
-            resolved.callee_function_name = *name_it->second;
+            out.callee_function_name = &name_it->second.value();
         }
         if (!have_location) {
             auto loc_it = location_cache().find(caller_address);
@@ -464,20 +479,26 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(
                                           resolve_filename_and_line(caller_address, caller_dl))
                                  .first;
             }
-            resolved.caller_filename = loc_it->second.first;
-            resolved.caller_line_number = loc_it->second.second;
+            out.caller_filename = &loc_it->second.first;
+            out.caller_line_number = loc_it->second.second;
         }
     }
 
 #ifdef LOG_ADDR
-    resolved.callee_address = std::make_optional(callee_address);
+    out.callee_address = std::make_optional(callee_address);
 #endif
-    resolved.timestamp = utils::pretty_time();
-
-    return std::make_optional(std::move(resolved));
+    return true;
 }
 
-std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* caller_address) {
+std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address) {
+    ResolvedFrameView view;
+    if (!resolve_no_unwind(callee_address, caller_address, view)) {
+        return std::nullopt;
+    }
+    return std::make_optional(own_frame(view));
+}
+
+bool bfdResolver::resolve(void* callee_address, void* caller_address, ResolvedFrameView& out) {
     // The hook's `caller` argument is NOT the address of the call into
     // __cyg_profile_func_enter: both GCC and Clang emit the hook call as
     // `__cyg_profile_func_enter(fn, __builtin_return_address(0))` inside the
@@ -493,7 +514,8 @@ std::optional<ResolvedFrame> bfdResolver::resolve(void* callee_address, void* ca
     // enclosing physical frame, so the reported call site is that frame's — one
     // level up. Documented in README's RelWithDebInfo tip.
     return resolve_no_unwind(
-            callee_address, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(caller_address) - 1));
+            callee_address, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(caller_address) - 1),
+            out);
 }
 
 std::vector<std::optional<ResolvedFrame>> get_call_stack() {
@@ -540,12 +562,22 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
     return res;
 }
 
-std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address) {
-    // Public API entry point — same guard as get_call_stack(). When the enter
-    // hook is the caller the guard is already set and this saves/restores it
-    // unchanged.
+bool resolve(void* callee_address, void* caller_address, ResolvedFrameView& out) {
+    // Entry point for the enter hook — same guard as get_call_stack(). The hook
+    // already holds the guard, so this saves/restores it unchanged.
     ScopedNoInstrument guard;
-    return bfdResolver::resolve(callee_address, caller_address);
+    return bfdResolver::resolve(callee_address, caller_address, out);
+}
+
+std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address) {
+    // Public, owning API entry point — same guard as get_call_stack(). The copy
+    // into a ResolvedFrame happens outside s_bfd_mutex.
+    ScopedNoInstrument guard;
+    ResolvedFrameView view;
+    if (!bfdResolver::resolve(callee_address, caller_address, view)) {
+        return std::nullopt;
+    }
+    return std::make_optional(own_frame(view));
 }
 
 } // namespace instrumentation

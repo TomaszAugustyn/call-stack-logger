@@ -635,10 +635,11 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
     // is required. The same fact (no unwind entry at the hook's call site) is why
     // the exception barrier below must never let anything escape.
     ScopedCancelDisable no_cancel;
-    // Set the guard BEFORE any work and clear it AFTER all local variables (especially
-    // maybe_resolved, a std::optional<ResolvedFrame>) have been destroyed. With Clang,
-    // destructors of std library types may be instrumented, so in_instrumentation must
-    // remain true until all destructors have run.
+    // Set the guard BEFORE any work and clear it only as the very last step. The
+    // hot path below holds no std objects any more (stack buffers and a non-owning
+    // view), but the cold path (a cache miss inside resolve) still runs std
+    // container/string code, and with Clang the destructors of std library types
+    // may be instrumented — the guard must stay set until every one of them has run.
     t_state.in_instrumentation = true;
     if (t_state.frame_overflow_count > 0) {
         // An enclosing frame overflowed (its record could not be pushed — see
@@ -657,11 +658,19 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         // Exception barrier: a tracing hook must never inject an exception into the
         // traced program. Everything that can realistically throw (bad_alloc from
         // growing the frame stack, from the std::string work in get_thread_fp's
-        // lazy open, resolve(), and utils::format()) runs inside this try. State
-        // mutations (depth increment, `logged`, cursor bookkeeping) happen only
-        // AFTER the last throwing operation, so an exception leaves the bookkeeping
-        // untouched: the frame simply goes untraced and the push below keeps
-        // enter/exit pairing intact. The catch body must not allocate.
+        // lazy open, and from resolve() when an address is seen for the first time
+        // and its result is inserted into the memoization caches) runs inside this
+        // try. State mutations (depth increment, `logged`, cursor bookkeeping)
+        // happen only AFTER the last throwing operation, so an exception leaves the
+        // bookkeeping untouched: the frame simply goes untraced and the push below
+        // keeps enter/exit pairing intact. The catch body must not allocate.
+        //
+        // Warm-path allocation budget: zero. Once both caches hold the callee and
+        // the call site, everything below runs on stack buffers — resolve() hands
+        // back pointers into the caches (ResolvedFrameView), the timestamp is
+        // rendered into `timestamp`, and the line is built in `line` and handed
+        // to fwrite by length. The previous ResolvedFrame / std::string design
+        // cost about three heap allocations per traced call.
         try {
             // Make room for this frame's record FIRST, so the push after the barrier
             // cannot allocate (and so cannot throw). Doubling keeps growth amortized:
@@ -677,19 +686,24 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 
             FILE* fp = get_thread_fp();
             if (fp != nullptr) {
-                auto maybe_resolved = instrumentation::resolve(callee, caller);
-                if (maybe_resolved.has_value()) {
+                instrumentation::ResolvedFrameView frame;
+                if (instrumentation::resolve(callee, caller, frame)) {
+                    // Timestamp only for frames that are actually logged; the view
+                    // points at this stack buffer for the rest of the hook.
+                    char timestamp[utils::PRETTY_TIME_BUF_SIZE];
+                    utils::pretty_time_into(timestamp, sizeof(timestamp));
+                    frame.timestamp = timestamp;
+                    char line[utils::FORMAT_BUF_SIZE];
 #ifdef LOG_ELAPSED
                     // Splice a fixed-width "[  pending ] " placeholder right after the
                     // timestamp. See include/durationFormat.h for the width invariant.
-                    // format() may allocate (throw) — called with the prospective
-                    // depth; the actual increment follows in the no-throw zone.
-                    // The '\n' is appended inside format()'s stack buffer, so the
-                    // ready-to-write line costs a single allocation.
-                    std::string line = utils::format(*maybe_resolved,
-                                                     t_state.current_stack_depth + 1,
-                                                     "[  pending ] ",
-                                                     /*append_newline=*/true);
+                    // Formatted with the prospective depth; the actual increment
+                    // follows in the no-throw zone. The '\n' lands in the same
+                    // stack buffer, so the line is ready to write as-is.
+                    const std::size_t line_size =
+                            utils::format_into(line, sizeof(line), frame,
+                                               t_state.current_stack_depth + 1,
+                                               "[  pending ] ", /*append_newline=*/true);
                     // ---- no-throw zone ----
                     t_state.current_stack_depth++;
                     logged = true;
@@ -705,19 +719,19 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                     // failure the cursor is not advanced and is marked invalid — an
                     // unknown number of bytes reached the file, so any further
                     // cursor-derived patch offset would corrupt existing lines.
-                    if (fwrite(line.data(), 1, line.size(), fp) == line.size()) {
-                        t_state.cursor += static_cast<off_t>(line.size());
+                    if (fwrite(line, 1, line_size, fp) == line_size) {
+                        t_state.cursor += static_cast<off_t>(line_size);
                     } else {
                         t_state.cursor_valid = false;
                     }
 #else
-                    // format() may allocate (throw) — called with the prospective
-                    // depth; the actual increment follows in the no-throw zone.
-                    // The '\n' is appended inside format()'s stack buffer, so the
-                    // ready-to-write line costs a single allocation.
-                    std::string line = utils::format(*maybe_resolved,
-                                                     t_state.current_stack_depth + 1,
-                                                     "", /*append_newline=*/true);
+                    // Formatted with the prospective depth; the actual increment
+                    // follows in the no-throw zone. The '\n' lands in the same
+                    // stack buffer, so the line is ready to write as-is.
+                    const std::size_t line_size =
+                            utils::format_into(line, sizeof(line), frame,
+                                               t_state.current_stack_depth + 1,
+                                               "", /*append_newline=*/true);
                     // ---- no-throw zone ----
                     t_state.current_stack_depth++;
                     logged = true;
@@ -725,10 +739,10 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                     // the newline-terminated line — a single stdio call with no
                     // per-line format-string parsing, mirroring the LOG_ELAPSED
                     // branch minus its cursor bookkeeping.
-                    (void)fwrite(line.data(), 1, line.size(), fp);
+                    (void)fwrite(line, 1, line_size, fp);
 #endif
                 }
-            } // maybe_resolved destructor runs here, still under guard
+            }
         } catch (...) {
             // Swallow (realistically only bad_alloc under OOM). The frame goes
             // untraced; `logged` stayed false and no state was half-updated.
