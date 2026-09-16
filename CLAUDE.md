@@ -174,6 +174,14 @@ instrumentation (which would cause infinite recursion and stack overflow).
 - **Worker threads** write to `<base>_tid_<gettid>` where `<gettid>` is the Linux
   kernel thread ID from `syscall(SYS_gettid)`.
 
+A relative base path is anchored to the working directory at program start:
+`trace_begin()` calls `getcwd()` once and prefixes it via the pure
+`utils::make_absolute_trace_path()` helper. Files are opened lazily per thread
+(below), so without this a `chdir()` between the main thread's open and a
+worker's would scatter one run's files across directories. If `getcwd()` fails
+the relative path is kept and tracing continues. Pinned by
+`ChdirTest.RelativeOutputPathIsAnchoredToStartupDirectory`.
+
 Every thread — main included — lazily opens its file on its first
 `__cyg_profile_func_enter` call. `trace_begin()` (an `__attribute__((constructor))`
 that runs before `main()`) only captures the main TID, resolves the base path,
@@ -477,7 +485,7 @@ call-stack-logger/
 |   |-- format.h                # utils::format() - formats ResolvedFrame into string
 |   |-- prettyTime.h            # utils::pretty_time() + PRETTY_TIME_LENGTH constant
 |   |-- stdSymbolFilter.h       # is_std_library_symbol() — Clang runtime std filter
-|   |-- traceFilePath.h         # utils::resolve_base_trace_path + build_trace_filename
+|   |-- traceFilePath.h         # utils::resolve_base_trace_path + make_absolute_trace_path + build_trace_filename
 |   |-- types.h                 # ResolvedFrame struct definition
 |-- src/
 |   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, library + executable)
@@ -492,11 +500,12 @@ call-stack-logger/
 |   |   |-- test_format.cpp     # Tests for utils::format()
 |   |   |-- test_pretty_time.cpp # Tests for utils::pretty_time() and to_ms()
 |   |   |-- test_std_symbol_filter.cpp # Tests for is_std_library_symbol() mangled-name parsing
-|   |   |-- test_trace_file_path.cpp # Tests for resolve_base_trace_path + build_trace_filename
+|   |   |-- test_trace_file_path.cpp # Tests for resolve_base_trace_path + make_absolute_trace_path + build_trace_filename
 |   |-- integration/
 |       |-- CMakeLists.txt      # Traced programs + integration test runner
 |       |-- traced_program.cpp  # Instrumented single-threaded program for testing
 |       |-- threaded_traced_program.cpp # Instrumented multi-threaded program (per-thread files)
+|       |-- chdir_traced_program.cpp # Instrumented; chdir()s before spawning a worker (relative CSLG_OUTPUT_FILE anchoring)
 |       |-- log_elapsed_traced_program.cpp # Instrumented program with usleep() sentinels for LOG_ELAPSED tests
 |       |-- overflow_depth_program.cpp # Instrumented; recursion past the frame stack's initial capacity
 |       |-- filtered_overflow_lib.cpp  # Instrumented shared lib, stripped post-build; its file-local helper is never logged
@@ -593,10 +602,14 @@ constants. The 12-byte width is a hard invariant — `static_assert`s and the
 LOG_ELAPSED is enabled.
 
 ### `include/traceFilePath.h`
-Two pure `NO_INSTRUMENT inline` helpers used by `trace.cpp` to compute per-thread trace
+Three pure `NO_INSTRUMENT inline` helpers used by `trace.cpp` to compute per-thread trace
 file paths:
 - `utils::resolve_base_trace_path(const char* env_value)` — returns `env_value` if
   non-null/non-empty, else `DEFAULT_TRACE_FILENAME` ("trace.out")
+- `utils::make_absolute_trace_path(path, cwd)` — prefixes a relative `path` with `cwd`
+  (no doubled `/` when cwd is the root); returns `path` unchanged when it is already
+  absolute or when `cwd` is null/empty (`getcwd()` failed). The `getcwd()` call itself
+  stays in `trace_begin()`
 - `utils::build_trace_filename(base, is_main, tid)` — returns `base` unchanged for the
   main thread, or `base + "_tid_<tid>"` for worker threads
 
@@ -750,8 +763,11 @@ Test pure/deterministic functions from the include headers:
   local entities, `__gnu_cxx` / `__cxxabiv1` / `__gnu_debug`) plus negatives that
   must never be filtered (user symbols, class literally named `St`, `_Z4Stopv`)
 - `test_trace_file_path.cpp` — `utils::resolve_base_trace_path()` (env var handling with
-  null/empty/absolute/relative/special-char paths) and `utils::build_trace_filename()`
-  (main vs worker thread suffix, small and LONG_MAX TIDs)
+  null/empty/absolute/relative/special-char paths), `utils::make_absolute_trace_path()`
+  (relative prefixed with cwd, absolute untouched, null/empty cwd keeps the relative
+  path, root and trailing-slash cwd never double the separator, `./` and `../` left
+  unnormalized) and `utils::build_trace_filename()` (main vs worker thread suffix,
+  small and LONG_MAX TIDs)
 - `test_duration_format.cpp` — exhaustive coverage of `utils::format_duration_12chars()`:
   zero, ns / us / ms / s ranges and boundaries, saturation at 1000s and UINT64_MAX,
   framing characters, fixed 12-byte width invariant, buffer-overflow canary
@@ -792,7 +808,9 @@ Test pure/deterministic functions from the include headers:
   before the first traced call into it),
   `global_dtor_traced_program` (instrumented; a global object's destructor
   calls traced code during exit() — both its ctor window, pre-trace_begin, and
-  its dtor window, post-trace_shutdown, must be silent no-ops).
+  its dtor window, post-trace_shutdown, must be silent no-ops), and
+  `chdir_traced_program` (instrumented; chdir()s into a subdirectory after
+  main()'s lazy open but before spawning a worker thread).
   The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs
   the non-instrumented version and verifies zero trace entries are produced.
 - `OverflowDepthTest.DepthBeyondMaxStaysConsistent` — runs `overflow_depth_program`
@@ -896,6 +914,12 @@ Test pure/deterministic functions from the include headers:
   helper's line carries a real patched duration — pins README's
   "Crash diagnostics" feature end-to-end (line-buffered mode guarantees the
   enter lines reach the kernel before the crash).
+- `ChdirTest.RelativeOutputPathIsAnchoredToStartupDirectory` — starts
+  `chdir_traced_program` inside a `mkdtemp()` directory with a RELATIVE
+  `CSLG_OUTPUT_FILE`. The driver chdir()s into `sub/` between the main thread's
+  lazy open and the worker's, so an unanchored base path would drop the worker
+  file into `sub/`. Asserts the main file and exactly one worker file sit in the
+  startup directory with their expected content, and `sub/` holds no trace file.
 - `GlobalDtorTest.InstrumentedGlobalDestructorAtExitIsSafe` — runs
   `global_dtor_traced_program`, asserts exit 0, the destructor's
   `GLOBAL_DTOR_RAN` stdout marker, and normal main()-time tracing. Pins the
@@ -1082,7 +1106,8 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    followed, so the trace path should point at a trusted directory, and the library
    must not be used in setuid/setgid binaries (the path comes from the environment).
 5. **Configurable output:** Set `CSLG_OUTPUT_FILE` environment variable to redirect trace
-   output to a custom path (defaults to `"trace.out"`)
+   output to a custom path (defaults to `"trace.out"`). A relative path is resolved
+   against the working directory at program start (see Trace File Lifecycle)
 6. **Performance overhead:** The first call for each callee/call-site address triggers
    full symbol resolution via BFD; repeat calls hit the per-address memoization caches
    (see Symbol Resolution Pipeline) and cost a hash lookup plus the file write. Still

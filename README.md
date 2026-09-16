@@ -277,7 +277,7 @@ from the wrong file.
 
 | Variable           | Default     | Description                                                                                                                                  |
 | ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CSLG_OUTPUT_FILE` | `trace.out` | Path to the trace output file for the main thread. Worker threads append `_tid_<gettid>` to this path (e.g., `/tmp/my_trace.out_tid_12345`). |
+| `CSLG_OUTPUT_FILE` | `trace.out` | Path to the trace output file for the main thread. Worker threads append `_tid_<gettid>` to this path (e.g., `/tmp/my_trace.out_tid_12345`). A relative path is resolved against the working directory at program start, so a later `chdir()` never splits one run's per-thread files across directories. |
 
 Example:
 ```bash

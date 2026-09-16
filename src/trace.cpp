@@ -13,6 +13,7 @@
 #include "traceFilePath.h"
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cstdlib>
 #include <fcntl.h>
 #include <mutex>
@@ -582,8 +583,16 @@ void trace_begin() {
     TraceGlobals& g = g_trace();
     g.main_tid = current_tid();
 
-    // Resolve the base path from the env var (pure helper in traceFilePath.h).
+    // Resolve the base path from the env var (pure helper in traceFilePath.h),
+    // then anchor a relative path to the startup working directory. Every
+    // thread opens its file lazily on its first traced call, so without this a
+    // chdir() between the main thread's open and a worker's would scatter one
+    // run's per-thread files across directories. If getcwd() fails (directory
+    // unlinked, or a path longer than PATH_MAX) the relative path is kept as is.
     g.base_path = utils::resolve_base_trace_path(std::getenv("CSLG_OUTPUT_FILE"));
+    char cwd[PATH_MAX];
+    const char* cwd_or_null = getcwd(cwd, sizeof(cwd));
+    g.base_path = utils::make_absolute_trace_path(g.base_path, cwd_or_null);
 
     // The main thread's file is deliberately NOT opened here: get_thread_fp()
     // opens it lazily on the first traced call, exactly like worker threads.

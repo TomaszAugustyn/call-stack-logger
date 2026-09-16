@@ -179,6 +179,15 @@ target_compile_features(threaded_traced_test_program PRIVATE cxx_std_17)
 target_link_libraries(threaded_traced_test_program PRIVATE callstacklogger_instrumented Threads::Threads)
 cslg_apply_sanitizers(threaded_traced_test_program)
 
+# chdir() driver: switches working directory between the main thread's lazy
+# open and a worker thread's, with a RELATIVE CSLG_OUTPUT_FILE. Pins that the
+# base path is anchored to the startup directory once in trace_begin(), so all
+# per-thread files of one run land together (see ChdirTest).
+add_executable(chdir_traced_program chdir_traced_program.cpp)
+target_compile_features(chdir_traced_program PRIVATE cxx_std_17)
+target_link_libraries(chdir_traced_program PRIVATE callstacklogger_instrumented Threads::Threads)
+cslg_apply_sanitizers(chdir_traced_program)
+
 # Library variants for testing build-time flags. Each rebuilds the library sources
 # with one or more of the gated #defines so we can exercise the corresponding code
 # path without polluting the main build (the main library is built without these
@@ -274,6 +283,7 @@ target_compile_definitions(integration_tests PRIVATE
     GLOBAL_DTOR_PROGRAM_PATH="$<TARGET_FILE:global_dtor_traced_program>"
     CANCEL_TRACED_PROGRAM_PATH="$<TARGET_FILE:cancel_traced_program>"
     CANCEL_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:cancel_traced_program_log_elapsed>"
+    CHDIR_TRACED_PROGRAM_PATH="$<TARGET_FILE:chdir_traced_program>"
     CRASH_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:crash_traced_program_log_elapsed>"
     TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
     TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed>"

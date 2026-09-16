@@ -8,9 +8,10 @@
  */
 
 /*
- * Unit tests for utils::resolve_base_trace_path() and utils::build_trace_filename()
- * in include/traceFilePath.h. Both are pure functions — no I/O, no globals — so they
- * can be tested in isolation without any program state or linked instrumentation.
+ * Unit tests for utils::resolve_base_trace_path(), utils::make_absolute_trace_path()
+ * and utils::build_trace_filename() in include/traceFilePath.h. All three are pure
+ * functions — no I/O, no globals — so they can be tested in isolation without any
+ * program state or linked instrumentation.
  */
 
 #include "traceFilePath.h"
@@ -45,6 +46,55 @@ TEST(ResolveBaseTracePathTest, PathWithSpacesPassedThrough) {
 TEST(ResolveBaseTracePathTest, PathWithSpecialCharsPassedThrough) {
     EXPECT_EQ(utils::resolve_base_trace_path("/var/log/trace-123.out"),
               "/var/log/trace-123.out");
+}
+
+// ---------- make_absolute_trace_path ----------
+
+TEST(MakeAbsoluteTracePathTest, RelativePathIsPrefixedWithCwd) {
+    EXPECT_EQ(utils::make_absolute_trace_path("trace.out", "/home/user/proj"),
+              "/home/user/proj/trace.out");
+}
+
+TEST(MakeAbsoluteTracePathTest, NestedRelativePathIsPrefixedWithCwd) {
+    EXPECT_EQ(utils::make_absolute_trace_path("logs/run.out", "/work"), "/work/logs/run.out");
+}
+
+TEST(MakeAbsoluteTracePathTest, AbsolutePathIsUnchanged) {
+    EXPECT_EQ(utils::make_absolute_trace_path("/tmp/trace.out", "/home/user"), "/tmp/trace.out");
+}
+
+TEST(MakeAbsoluteTracePathTest, NullCwdKeepsRelativePath) {
+    // getcwd() failed in trace_begin(): the path stays relative and tracing continues.
+    EXPECT_EQ(utils::make_absolute_trace_path("trace.out", nullptr), "trace.out");
+}
+
+TEST(MakeAbsoluteTracePathTest, EmptyCwdKeepsRelativePath) {
+    EXPECT_EQ(utils::make_absolute_trace_path("trace.out", ""), "trace.out");
+}
+
+TEST(MakeAbsoluteTracePathTest, RootCwdDoesNotDoubleSeparator) {
+    EXPECT_EQ(utils::make_absolute_trace_path("trace.out", "/"), "/trace.out");
+}
+
+TEST(MakeAbsoluteTracePathTest, CwdWithTrailingSlashDoesNotDoubleSeparator) {
+    EXPECT_EQ(utils::make_absolute_trace_path("trace.out", "/work/"), "/work/trace.out");
+}
+
+TEST(MakeAbsoluteTracePathTest, DotRelativePathIsPrefixedVerbatim) {
+    // No normalization: "./" and "../" components are left for the kernel to resolve.
+    EXPECT_EQ(utils::make_absolute_trace_path("./trace.out", "/work"), "/work/./trace.out");
+    EXPECT_EQ(utils::make_absolute_trace_path("../trace.out", "/work/sub"),
+              "/work/sub/../trace.out");
+}
+
+TEST(MakeAbsoluteTracePathTest, EmptyPathIsUnchanged) {
+    EXPECT_EQ(utils::make_absolute_trace_path("", "/work"), "");
+}
+
+TEST(MakeAbsoluteTracePathTest, DefaultNameResolvesUnderCwd) {
+    // The documented default: "trace.out" relative to the directory at program start.
+    const std::string base = utils::resolve_base_trace_path(nullptr);
+    EXPECT_EQ(utils::make_absolute_trace_path(base, "/start/dir"), "/start/dir/trace.out");
 }
 
 // ---------- build_trace_filename ----------

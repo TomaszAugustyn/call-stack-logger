@@ -73,6 +73,9 @@
 #ifndef CANCEL_PROGRAM_LOG_ELAPSED_PATH
     #error "CANCEL_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
 #endif
+#ifndef CHDIR_TRACED_PROGRAM_PATH
+    #error "CHDIR_TRACED_PROGRAM_PATH must be defined by CMake"
+#endif
 #ifndef CRASH_PROGRAM_LOG_ELAPSED_PATH
     #error "CRASH_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
 #endif
@@ -1943,4 +1946,60 @@ TEST(PthreadCancelTest, LogElapsedCancellationIsHonoredAtTheProgramsOwnCancellat
 
 TEST(PthreadCancelTest, LogElapsedHooksAndThreadExitAddNoCancellationPoints) {
     expect_no_tracer_cancellation_points(CANCEL_PROGRAM_LOG_ELAPSED_PATH);
+}
+
+// ============================================================================
+// A relative CSLG_OUTPUT_FILE must be anchored to the working directory at program
+// start. The driver chdir()s into "sub" after the main thread's lazy open but
+// before the worker thread's, so without the startup-time resolution in
+// trace_begin() the worker file would land in "sub" while main's stays in the
+// startup directory — the exact scatter this test guards against.
+TEST(ChdirTest, RelativeOutputPathIsAnchoredToStartupDirectory) {
+    char dir_tmpl[] = "/tmp/cslg_chdir_XXXXXX";
+    char* d = mkdtemp(dir_tmpl);
+    ASSERT_NE(d, nullptr) << "mkdtemp failed";
+    const std::string dir = d;
+    const std::string sub_dir = dir + "/sub";
+    const std::string base_name = "rel_trace.out";
+    const std::string stdout_path = dir + "/stdout.txt";
+
+    // Start the program IN the temp directory with a purely relative output path.
+    std::string cmd = "cd \"" + dir + "\" && CSLG_OUTPUT_FILE=\"" + base_name + "\" \""
+                    + CHDIR_TRACED_PROGRAM_PATH + "\" > \"" + stdout_path + "\" 2>&1";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "chdir_traced_program failed, exit=" << ret << "\n"
+                      << read_file(stdout_path);
+    ASSERT_NE(read_file(stdout_path).find("CHDIR_OK"), std::string::npos)
+            << "driver never switched directory. Stdout:\n" << read_file(stdout_path);
+
+    // Main file and exactly one worker file, both in the startup directory.
+    std::vector<std::string> worker_files;
+    bool main_found = false;
+    for (const std::string& name : list_files_in(dir)) {
+        if (name == base_name) {
+            main_found = true;
+        } else if (parse_tid_suffix(name, base_name) >= 0) {
+            worker_files.push_back(name);
+        }
+    }
+    EXPECT_TRUE(main_found) << "main trace file missing from startup directory " << dir;
+    ASSERT_EQ(worker_files.size(), 1u)
+            << "expected exactly one worker file in the startup directory " << dir;
+
+    const std::string main_trace = read_file(dir + "/" + base_name);
+    EXPECT_NE(main_trace.find("chdir_main_post_join"), std::string::npos)
+            << "main file lacks main-thread content:\n" << main_trace;
+    const std::string worker_trace = read_file(dir + "/" + worker_files[0]);
+    EXPECT_NE(worker_trace.find("chdir_worker_leaf"), std::string::npos)
+            << "worker file lacks the worker chain:\n" << worker_trace;
+
+    // The directory the program chdir()ed into must hold no trace file at all.
+    for (const std::string& name : list_files_in(sub_dir)) {
+        EXPECT_TRUE(name != base_name && parse_tid_suffix(name, base_name) < 0)
+                << "trace file '" << name << "' was written to the chdir() target "
+                << sub_dir << " instead of the startup directory";
+    }
+
+    remove_dir_tree(sub_dir);
+    remove_dir_tree(dir);
 }
