@@ -736,17 +736,6 @@ make run                                    # Build and run (generates trace.out
 | `LOG_ELAPSED` | Record per-function duration via in-place pwrite() patching of a 12-byte placeholder spliced after the timestamp. See "Per-function timing" below. |
 | `DISABLE_INSTRUMENTATION` | Compile without any instrumentation hooks |
 
-**What `LOG_NOT_DEMANGLED` actually gates.** The name is historical and misleading:
-the flag has nothing to do with demangling failures. In `resolve_function_name()`,
-a callee whose `dladdr()` lookup returns `dli_sname == nullptr` — no entry in the
-dynamic symbol table, which is the case for `static` functions, functions in
-anonymous namespaces and lambda bodies (`-rdynamic` exports only external-linkage
-symbols) — is dropped from the trace by default. With the flag defined the lookup
-continues into BFD, which finds the name in the regular `.symtab` / debug info, and
-the function is traced normally (verified: `file_local_helper` and
-`(anonymous namespace)::anon_helper` appear only in the `LOG_NOT_DEMANGLED` build).
-If a callee cannot be named at all, both builds emit `<bfd_error>` fallbacks; the
-flag does not change that path.
 
 ### Link Dependencies
 
@@ -773,8 +762,7 @@ The build produces three CMake targets:
   the library itself (`callStack.cpp` + `trace.cpp`). As an INTERFACE it propagates
   `-g`, `-rdynamic`, the include path, and `-ldl -lbfd` to consumers. Link plain
   `callstacklogger` when you want the on-demand `get_call_stack()` API without
-  per-call `-finstrument-functions` hooks. The `LOG_ADDR` / `LOG_NOT_DEMANGLED` /
-  `LOG_ELAPSED` macros are PRIVATE compile definitions on this target: only
+  per-call `-finstrument-functions` hooks. The `LOG_ADDR` / `LOG_ELAPSED` macros are PRIVATE compile definitions on this target: only
   `callStack.cpp` and `trace.cpp` test them (nothing in `include/` does), and as
   PUBLIC definitions they leaked into every consumer TU, where any unrelated
   identifier spelled `LOG_ADDR` (an enum member, say) broke under the macro. The
@@ -844,7 +832,9 @@ Test pure/deterministic functions from the include headers:
   recursion via `RecursionProducesOneEntryPerLevel`), caller info present, timestamp
   format, run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
   exact trace line count (catches std library pollution regressions)
-- Built as eleven non-variant targets: `cslg_traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
+- Built as the following non-variant targets (the per-flag
+  `cslg_traced_test_program_<variant>` executables come from a loop and are described with
+  their tests below): `cslg_traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
   `cslg_noninstrumented_test_program` (compiled WITHOUT — simulates
   `DISABLE_INSTRUMENTATION`), `cslg_threaded_traced_test_program` (spawns 4 worker
   threads via `std::thread`, exercises per-thread trace files),
@@ -855,26 +845,31 @@ Test pure/deterministic functions from the include headers:
   `INSTRUMENT_FLAGS` — proves the on-demand API and the per-call hooks coexist
   in one process; `CallStackApiTest.WorksFromInstrumentedProgram` checks both
   the printed stack and the trace file), `cslg_stripped_caller` (shared
-  library, `strip --strip-all`-ed post-build), `cslg_stripped_caller_program`
+  library, `strip --strip-all`-ed post-build) with `cslg_stripped_caller_program`
   (instrumented; its callback is invoked from a file-local function inside the
   stripped library), `cslg_overflow_depth_program` (instrumented; recurses 3000
-  frames — past the frame stack's initial capacity), `cslg_filtered_overflow_program`
-  (instrumented; the same recursion calling, at every level, into the stripped
-  instrumented `cslg_filtered_overflow_lib` whose file-local helper is unnameable and hence
-  never logged), `cslg_exception_traced_program` (instrumented;
-  throws and catches through instrumented frames), and
-  `cslg_dlopen_plugin` (instrumented shared library, not linked — dlopen()ed by
-  `cslg_dlopen_traced_program` via a RELATIVE path, which then chdir()s to `/`
-  before the first traced call into it),
-  `cslg_global_dtor_traced_program` (instrumented; a global object's destructor
-  calls traced code during exit() — both its ctor window, pre-trace_begin, and
-  its dtor window, post-trace_shutdown, must be silent no-ops), and
-  `cslg_chdir_traced_program` (instrumented; chdir()s into a subdirectory after
-  main()'s lazy open but before spawning a worker thread), and
+  frames — past the frame stack's initial capacity), `cslg_filtered_overflow_lib`
+  (instrumented shared library, stripped post-build; its file-local helper is
+  unnameable and hence never logged) with `cslg_filtered_overflow_program`
+  (instrumented; the same recursion calling into that helper at every level),
+  `cslg_exception_traced_program` (instrumented; throws and catches through
+  instrumented frames), `cslg_global_dtor_traced_program` (instrumented; a global
+  object's destructor calls traced code during exit() — both its ctor window,
+  pre-trace_begin, and its dtor window, post-trace_shutdown, must be silent no-ops),
+  `cslg_dlopen_plugin` (instrumented shared library, not linked) with
+  `cslg_dlopen_traced_program` (instrumented; dlopen()s the plugin via a RELATIVE
+  path, then chdir()s to `/` before the first traced call into it),
+  `cslg_dlopen_ctor_plugin` (instrumented shared library with a static initializer,
+  not linked) with `cslg_dlopen_ctor_traced_program` (instrumented; dlopen()s and
+  dlclose()s the plugin in a loop while another thread resolves thousands of
+  never-seen callees), `cslg_chdir_traced_program` (instrumented; chdir()s into a
+  subdirectory after main()'s lazy open but before spawning a worker thread),
+  `cslg_cancel_traced_program` (instrumented; a worker thread is pthread_cancel()ed
+  while tracing) and `cslg_cancel_traced_program_log_elapsed` (the same driver
+  against the `callstacklogger_log_elapsed` variant library), and
   `cslg_crash_traced_program_log_elapsed` (instrumented; linked against the
   `callstacklogger_log_elapsed` variant library, abort()s mid-chain — see
-  `LogElapsedCrashTest` below). The per-flag `cslg_traced_test_program_<variant>`
-  executables are generated by a loop and are not counted here.
+  `LogElapsedCrashTest` below).
   The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs
   the non-instrumented version and verifies zero trace entries are produced.
 - `OverflowDepthTest.DepthBeyondMaxStaysConsistent` — runs `cslg_overflow_depth_program`
@@ -1020,6 +1015,14 @@ ctest --output-on-failure
 With `-DDISABLE_INSTRUMENTATION=ON` the integration suite is skipped at configure
 time (it asserts on trace output the disabled hooks can never produce); unit tests
 still build and run.
+
+The one test program that crashes by design (`cslg_crash_traced_program_log_elapsed`)
+disables core dumps itself. When experimenting with builds whose programs might crash
+unexpectedly — a patched hook, a probe — run them as `prlimit --core=1:1 -- ctest ...`
+(or wrap the single binary the same way): a core limit of exactly one byte makes the
+kernel skip the `core_pattern` handler (systemd-coredump) entirely, so desktop crash
+reporters stay quiet. `ulimit -c 0` is not enough — the handler is still invoked and
+still logs the crash.
 
 ### Code Coverage
 
@@ -1180,8 +1183,14 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
 6. **Performance overhead:** The first call for each callee/call-site address triggers
    full symbol resolution via BFD; repeat calls hit the per-address memoization caches
    (see Symbol Resolution Pipeline) and cost a hash lookup plus the file write. Still
-   a debugging/tracing tool, not for production use. `format()` uses `snprintf` with a
-   stack buffer to avoid per-call heap allocation.
+   a debugging/tracing tool, not for production use. The warm path allocates nothing:
+   the enter hook formats from pointers into the caches (`ResolvedFrameView`) into
+   stack buffers (`pretty_time_into`, `format_into`). Measured on a Fedora 44 VM with
+   the `hpet` clocksource (GCC 16, library at -O0, trace written to `/dev/null`): about
+   2.5 µs per warm traced call and 349 `malloc` calls for 200,000 traced calls — all of
+   them from the cold path — down from about 4.4 µs and three `malloc`s per call before
+   the unwinder removal and the view-based hook. On a `tsc` clocksource the
+   `clock_gettime`-bound parts shrink by another microsecond or so.
 7. **Header-only utilities:** `format.h`, `prettyTime.h`, `durationFormat.h`,
    `traceFilePath.h`, `stdSymbolFilter.h` contain inline implementations in headers
    (definitions in headers, not just declarations).
@@ -1271,3 +1280,11 @@ The project evolved through these milestones (earliest first):
    location — same output, one stack walk less per traced call
 10. Internal-linkage callees (static, anonymous-namespace, lambdas) are named via BFD by
     default; the `LOG_NOT_DEMANGLED` option (which only gated that) was retired
+11. Hardening from the 2026 audit: the hooks and the thread-exit teardown run with
+    cancellation blocked (the compiler emits the hook call as non-throwing, so any unwind
+    leaving a hook terminates); `dladdr()` moved outside `s_bfd_mutex` (lock order against
+    `dlopen()` running an instrumented plugin's initializer); the per-thread frame stack
+    grows on demand; object files are located through `/proc/self/maps`; a relative
+    `CSLG_OUTPUT_FILE` is anchored to the startup directory; the Clang std filter handles
+    ref-qualified members; the warm hook path is allocation-free; test targets carry a
+    `cslg_` prefix and the `LOG_*` macros are private to the library
