@@ -514,7 +514,7 @@ call-stack-logger/
 |   |-- callStack.cpp           # Core implementation: BFD loading, symbol resolution
 |   |-- trace.cpp               # __cyg_profile_func_enter/exit, trace file I/O
 |   |-- main.cpp                # Demo program exercising various C++ features
-|-- tests/                      # Unit and integration tests (BUILD_TESTS=ON)
+|-- tests/                      # Unit and integration tests (BUILD_TESTS=ON, top-level builds only)
 |   |-- CMakeLists.txt          # FetchContent for Google Test, add subdirs
 |   |-- unit/
 |   |   |-- CMakeLists.txt      # Unit test executable (no instrumentation)
@@ -748,7 +748,13 @@ The build produces three CMake targets:
   the library itself (`callStack.cpp` + `trace.cpp`). As an INTERFACE it propagates
   `-g`, `-rdynamic`, the include path, and `-ldl -lbfd` to consumers. Link plain
   `callstacklogger` when you want the on-demand `get_call_stack()` API without
-  per-call `-finstrument-functions` hooks.
+  per-call `-finstrument-functions` hooks. The `LOG_ADDR` / `LOG_NOT_DEMANGLED` /
+  `LOG_ELAPSED` macros are PRIVATE compile definitions on this target: only
+  `callStack.cpp` and `trace.cpp` test them (nothing in `include/` does), and as
+  PUBLIC definitions they leaked into every consumer TU, where any unrelated
+  identifier spelled `LOG_ADDR` (an enum member, say) broke under the macro. The
+  integration test runner learns about the flags through its own
+  `CSLG_DEFAULT_HAS_*` definitions instead.
 - `callstacklogger_instrumented` (INTERFACE, plus alias `callstacklogger::instrumented`) —
   bundles `INSTRUMENT_FLAGS` (compile-time `-finstrument-functions` plus GCC's
   exclude-file-list) and links `callstacklogger`. **The single target users link to get
@@ -766,8 +772,15 @@ propagates through the INTERFACE. See README "Integrating into your own project"
 
 ## Testing
 
-Tests are built when `BUILD_TESTS=ON` is passed to CMake. Google Test is fetched via
-FetchContent (downloaded once, cached for offline use).
+Tests are built when `BUILD_TESTS=ON` is passed to CMake AND cslg is the top-level
+project (`BUILD_TESTS AND CSLG_TOP_LEVEL` in the root `CMakeLists.txt`). A parent
+project that consumes cslg via `add_subdirectory` / FetchContent and happens to
+have its own `BUILD_TESTS=ON` (a very common option name) therefore never gets
+cslg's test tree or the Google Test download as a side effect. Every cslg test
+target and ctest name carries a `cslg_` prefix (`cslg_unit_tests`,
+`cslg_integration_tests`, `cslg_traced_test_program`, ...) so they can never
+collide with a parent's own `cslg_unit_tests` / `cslg_integration_tests` targets. Google
+Test is fetched via FetchContent (downloaded once, cached for offline use).
 
 ### Unit Tests (`tests/unit/`)
 
@@ -801,48 +814,48 @@ Test pure/deterministic functions from the include headers:
   self-recursion via `recursive_countdown(3)` — same callee at three depths, and
   internal-linkage callees: a `static` function, an anonymous-namespace function and a
   lambda, which `InternalLinkageFunctionsResolved` asserts are traced by name)
-- `test_integration.cpp` — executes `traced_test_program`, parses trace output, verifies:
+- `test_integration.cpp` — executes `cslg_traced_test_program`, parses trace output, verifies:
   function names resolved, nesting depth correct (including one-entry-per-level
   recursion via `RecursionProducesOneEntryPerLevel`), caller info present, timestamp
   format, run separator, CSLG_OUTPUT_FILE redirection, std library functions excluded,
   exact trace line count (catches std library pollution regressions)
-- Built as eleven non-variant targets: `traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
-  `noninstrumented_test_program` (compiled WITHOUT — simulates
-  `DISABLE_INSTRUMENTATION`), `threaded_traced_test_program` (spawns 4 worker
+- Built as eleven non-variant targets: `cslg_traced_test_program` (compiled WITH `INSTRUMENT_FLAGS`),
+  `cslg_noninstrumented_test_program` (compiled WITHOUT — simulates
+  `DISABLE_INSTRUMENTATION`), `cslg_threaded_traced_test_program` (spawns 4 worker
   threads via `std::thread`, exercises per-thread trace files),
-  `callstack_api_program` (compiled WITHOUT `INSTRUMENT_FLAGS`; exercises the
+  `cslg_callstack_api_program` (compiled WITHOUT `INSTRUMENT_FLAGS`; exercises the
   public on-demand `instrumentation::get_call_stack()` API by walking a known
   nested chain and printing each resolved frame),
-  `callstack_api_program_instrumented` (same source compiled WITH
+  `cslg_callstack_api_program_instrumented` (same source compiled WITH
   `INSTRUMENT_FLAGS` — proves the on-demand API and the per-call hooks coexist
   in one process; `CallStackApiTest.WorksFromInstrumentedProgram` checks both
-  the printed stack and the trace file), `stripped_caller` (shared
-  library, `strip --strip-all`-ed post-build), `stripped_caller_program`
+  the printed stack and the trace file), `cslg_stripped_caller` (shared
+  library, `strip --strip-all`-ed post-build), `cslg_stripped_caller_program`
   (instrumented; its callback is invoked from a file-local function inside the
-  stripped library), `overflow_depth_program` (instrumented; recurses 3000
-  frames — past the frame stack's initial capacity), `filtered_overflow_program`
+  stripped library), `cslg_overflow_depth_program` (instrumented; recurses 3000
+  frames — past the frame stack's initial capacity), `cslg_filtered_overflow_program`
   (instrumented; the same recursion calling, at every level, into the stripped
-  instrumented `filtered_overflow_lib` whose file-local helper is unnameable and hence
-  never logged), `exception_traced_program` (instrumented;
+  instrumented `cslg_filtered_overflow_lib` whose file-local helper is unnameable and hence
+  never logged), `cslg_exception_traced_program` (instrumented;
   throws and catches through instrumented frames), and
-  `dlopen_plugin` (instrumented shared library, not linked — dlopen()ed by
-  `dlopen_traced_program` via a RELATIVE path, which then chdir()s to `/`
+  `cslg_dlopen_plugin` (instrumented shared library, not linked — dlopen()ed by
+  `cslg_dlopen_traced_program` via a RELATIVE path, which then chdir()s to `/`
   before the first traced call into it),
-  `global_dtor_traced_program` (instrumented; a global object's destructor
+  `cslg_global_dtor_traced_program` (instrumented; a global object's destructor
   calls traced code during exit() — both its ctor window, pre-trace_begin, and
   its dtor window, post-trace_shutdown, must be silent no-ops), and
-  `chdir_traced_program` (instrumented; chdir()s into a subdirectory after
+  `cslg_chdir_traced_program` (instrumented; chdir()s into a subdirectory after
   main()'s lazy open but before spawning a worker thread).
   The `DisableInstrumentationTest.NoTraceOutputWithoutInstrumentation` test runs
   the non-instrumented version and verifies zero trace entries are produced.
-- `OverflowDepthTest.DepthBeyondMaxStaysConsistent` — runs `overflow_depth_program`
+- `OverflowDepthTest.DepthBeyondMaxStaysConsistent` — runs `cslg_overflow_depth_program`
   (recursion 3000 deep, ~950 frames past the frame stack's initial capacity of 2048).
   Verifies every enter still produced a timestamped line (3002 total: main + 3000
   recursion + marker) and that `post_overflow_marker()`, traced after all exits, sits
   at the same depth as the first recursion frame — pins on-demand growth end-to-end.
 - `FilteredOverflowTest.UnloggedFramesBeyondInitialCapacityKeepDepthExact` — runs
-  `filtered_overflow_program` (same recursion, plus a call at every level into
-  `filtered_overflow_lib`, an instrumented shared library stripped after the build whose
+  `cslg_filtered_overflow_program` (same recursion, plus a call at every level into
+  `cslg_filtered_overflow_lib`, an instrumented shared library stripped after the build whose
   file-local helper has no symbol left for `dladdr()` or BFD — its enter hook fires but
   writes no line). Asserts exactly one line per logged enter (6003) and that the markers
   traced afterwards sit at their true depths
@@ -850,17 +863,17 @@ Test pure/deterministic functions from the include headers:
   deeper) — the regression that a fixed-size stack with a logged-or-not guess for deep
   frames cannot pass.
 - `ExceptionUnwindTest.DepthConsistentAfterCatchOnGcc` — runs
-  `exception_traced_program` (throw through two instrumented frames, catch one
+  `cslg_exception_traced_program` (throw through two instrumented frames, catch one
   level up, then a marker call). On GCC the exit hooks fire on the unwind path,
   so the marker must trace at the same depth as the catcher — pins the
   empirically-verified GCC enter/exit pairing guarantee. Skipped under Clang
   (via the `CSLG_COMPILER_IS_GNU` compile definition), where unwound frames'
   exit hooks are silently skipped (documented limitation).
-- `CallStackApiTest.GetCallStackResolvesAncestors` — runs `callstack_api_program`,
+- `CallStackApiTest.GetCallStackResolvesAncestors` — runs `cslg_callstack_api_program`,
   captures stdout, verifies the on-demand stack contains the expected ancestor
   functions (`print_stack_from_leaf → callstack_mid → callstack_top → main`) in
   innermost-first order.
-- `BadOutputPathTest.OpenFailureIsNonFatalAndWarns` — runs `traced_test_program`
+- `BadOutputPathTest.OpenFailureIsNonFatalAndWarns` — runs `cslg_traced_test_program`
   with `CSLG_OUTPUT_FILE` pointing to a non-existent directory, captures stderr,
   verifies the program exits 0 (graceful degradation) and emits the documented
   `[call-stack-logger] WARNING` with the attempted path.
@@ -869,14 +882,14 @@ Test pure/deterministic functions from the include headers:
   program still exits 0 with the documented warning, and the symlink's target
   stays empty (pins the security behavior).
 - `DlopenConstructorTest.InstrumentedPluginConstructorDoesNotDeadlock` — runs
-  `dlopen_ctor_traced_program` under `timeout 30`: one thread resolves ~2400 never-seen
+  `cslg_dlopen_ctor_traced_program` under `timeout 30`: one thread resolves ~2400 never-seen
   callees (distinct template instantiations, so each call is a cache miss) while another
-  `dlopen()`s/`dlclose()`s `dlopen_ctor_plugin` in a loop. The plugin's instrumented
+  `dlopen()`s/`dlclose()`s `cslg_dlopen_ctor_plugin` in a loop. The plugin's instrumented
   static initializer fires the enter hook with glibc's loader lock held; with `dladdr()`
   under `s_bfd_mutex` the two threads deadlocked on every run (exit 124). Pins the
   lock-order rule in `resolve_no_unwind()`.
 - `DlopenPluginTest.RelativeDlopenPathResolvesAfterChdir` — runs
-  `dlopen_traced_program`: the instrumented plugin is dlopen()ed as
+  `cslg_dlopen_traced_program`: the instrumented plugin is dlopen()ed as
   `./libdlopen_plugin.so` and first entered after `chdir("/")`, so `dli_fname`
   no longer names the file. Asserts no `<could not open ...>` fallback, both
   plugin functions traced by name, and the helper's caller attributed to
@@ -885,7 +898,7 @@ Test pure/deterministic functions from the include headers:
 - `StrippedCallerTest.CallerInStrippedLibraryDoesNotHang` — regression test for
   the `resolve_filename_and_line()` infinite loop: the instrumented callback's
   caller address lies in a file-local function of the stripped
-  `libstripped_caller.so`, so `dladdr` yields no symbol and
+  `libcslg_stripped_caller.so`, so `dladdr` yields no symbol and
   `bfd_find_nearest_line` fails; the resolver must return the `<bfd_error>`
   fallback instead of spinning forever while holding `s_bfd_mutex`. The program
   runs under `timeout 10` (with `DEBUGINFOD_URLS` cleared so libbfd cannot
@@ -894,7 +907,7 @@ Test pure/deterministic functions from the include headers:
 - `LogAddrFlagTest` (2 tests) exercises the build-time CMake option `-DLOG_ADDR=ON`.
   The flag has its own library variant in `tests/integration/CMakeLists.txt` —
   `callstacklogger_log_addr` — built from the same sources with the macro defined, and
-  a `traced_test_program_log_addr` that links it. `LogAddrFlagTest.AddressPrefixAppearsInTrace`
+  a `cslg_traced_test_program_log_addr` that links it. `LogAddrFlagTest.AddressPrefixAppearsInTrace`
   asserts every entry in the variant's trace has the `addr: [0x<hex>]` prefix, while
   `LogAddrFlagTest.NoAddressPrefixWithoutFlag` is a negative test on the default
   build to guard against the macro accidentally becoming always-on.
@@ -913,7 +926,7 @@ Test pure/deterministic functions from the include headers:
   (important on Clang — `std::thread` internals would explode the trace without
   the runtime filter), all worker files have identical function entry counts
   (proves deterministic per-thread traces).
-- `LogElapsedFlagTest` fixture (5 tests) drives `traced_test_program_log_elapsed`
+- `LogElapsedFlagTest` fixture (5 tests) drives `cslg_traced_test_program_log_elapsed`
   built from `log_elapsed_traced_program.cpp` (a dedicated driver with an
   `elapsed_outer → elapsed_middle → elapsed_inner` chain and a `usleep(10000)`
   sentinel inside `elapsed_inner`). Verifies: every entry line carries a 12-byte
@@ -926,7 +939,7 @@ Test pure/deterministic functions from the include headers:
   `LogElapsedDefaultBuildTest.NoDurationFieldWithoutFlag` is a negative test
   on the default build (skipped when the build is configured with
   `-DLOG_ELAPSED=ON`, via `CSLG_DEFAULT_HAS_LOG_ELAPSED`).
-- `LogElapsedCrashTest` (2 tests) — drives `crash_traced_program_log_elapsed`
+- `LogElapsedCrashTest` (2 tests) — drives `cslg_crash_traced_program_log_elapsed`
   (built from `crash_traced_program.cpp` against the same
   `callstacklogger_log_elapsed` variant library): calls a helper that completes
   (usleep(1000) inside, so its patched duration must be ≥ 1 ms), then abort()s
@@ -937,13 +950,13 @@ Test pure/deterministic functions from the include headers:
   "Crash diagnostics" feature end-to-end (line-buffered mode guarantees the
   enter lines reach the kernel before the crash).
 - `ChdirTest.RelativeOutputPathIsAnchoredToStartupDirectory` — starts
-  `chdir_traced_program` inside a `mkdtemp()` directory with a RELATIVE
+  `cslg_chdir_traced_program` inside a `mkdtemp()` directory with a RELATIVE
   `CSLG_OUTPUT_FILE`. The driver chdir()s into `sub/` between the main thread's
   lazy open and the worker's, so an unanchored base path would drop the worker
   file into `sub/`. Asserts the main file and exactly one worker file sit in the
   startup directory with their expected content, and `sub/` holds no trace file.
 - `GlobalDtorTest.InstrumentedGlobalDestructorAtExitIsSafe` — runs
-  `global_dtor_traced_program`, asserts exit 0, the destructor's
+  `cslg_global_dtor_traced_program`, asserts exit 0, the destructor's
   `GLOBAL_DTOR_RAN` stdout marker, and normal main()-time tracing. Pins the
   exit-window behavior (hooks disabled both pre-trace_begin and
   post-trace_shutdown); under the ASan/TSan CI jobs it also proves no
@@ -954,12 +967,12 @@ Test pure/deterministic functions from the include headers:
   separators, zero `[  pending ]` leftovers, and a duration field on every entry
   in both runs — a mis-seeded cursor would fail all three.
 - `LogElapsedThreadedTest.PerThreadFilesPatchIndependently` — drives
-  `traced_test_program_log_elapsed_threaded` (the threaded driver built against
+  `cslg_traced_test_program_log_elapsed_threaded` (the threaded driver built against
   the LOG_ELAPSED library variant, linked with Threads::Threads). Asserts 4
   worker files exist and every per-thread file (main + workers) is fully
   patched — proves per-thread cursor / patch_fd isolation.
 - `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the both-flags
-  variant `traced_test_program_log_elapsed_addr`. Asserts the
+  variant `cslg_traced_test_program_log_elapsed_addr`. Asserts the
   ordering "timestamp → duration → addr" via regex, the tree column stays
   byte-aligned across same-depth lines (proves the fixed-width LOG_ELAPSED
   prefix preserves alignment under the LOG_ADDR layout), no pending leftovers,
@@ -994,7 +1007,7 @@ genhtml coverage.info --output-directory coverage-report
 
 Notes:
 - `COVERAGE=ON` compiles with `--coverage -fprofile-update=atomic`. The atomic
-  counter updates are load-bearing: the multi-threaded `threaded_traced_test_program`
+  counter updates are load-bearing: the multi-threaded `cslg_threaded_traced_test_program`
   runs the instrumented library (`trace.cpp`) on 4 worker threads that would otherwise
   race on the default non-atomic gcov counters. A lost update can drive a counter
   negative, and lcov 2.x's `geninfo` treats a negative count as a *fatal* error
@@ -1185,7 +1198,7 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    rethrown" / `std::terminate`). The same fact is why the enter hook's `catch (...)`
    barrier must never let anything escape. With cancellation disabled the tracer adds
    no cancellation points: a pending request is acted on at the program's own next
-   cancellation point. Pinned by `PthreadCancelTest` (2 tests, `cancel_traced_program`).
+   cancellation point. Pinned by `PthreadCancelTest` (2 tests, `cslg_cancel_traced_program`).
    Asynchronous cancellation stays unsupported. The library links `Threads::Threads`
    for `pthread_setcancelstate` (in libc since glibc 2.34, libpthread before).
 11. **Signal handlers must not be instrumented (known limitation):** the hooks

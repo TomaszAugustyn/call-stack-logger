@@ -10,10 +10,10 @@ cmake_minimum_required(VERSION 3.14)
 
 project(call-stack-logger)
 
-option(BUILD_TESTS "Build unit and integration tests" OFF)
+option(BUILD_TESTS "Build unit and integration tests (top-level builds only)" OFF)
 option(COVERAGE "Enable code coverage (requires GCC)" OFF)
 
-# Output-content flags (consumed in src/CMakeLists.txt as PUBLIC compile
+# Output-content flags (consumed in src/CMakeLists.txt as PRIVATE compile
 # definitions on the library) and the instrumentation kill-switch. Declared
 # here as first-class options so they show up in ccmake / cmake-gui alongside
 # the rest, matching the README's CMake-options table — behavior with plain
@@ -74,7 +74,8 @@ function(cslg_apply_sanitizers target)
 endfunction()
 
 # True when this project is built standalone (not via add_subdirectory/FetchContent
-# from a parent project). Guards the demo executable and the `run` target.
+# from a parent project). Guards the demo executable, the `run` target and the
+# test tree.
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(CSLG_TOP_LEVEL TRUE)
 else()
@@ -100,7 +101,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -Wextra")
 
 # Code coverage support (GCC --coverage flag).
 # -fprofile-update=atomic makes gcov counter updates thread-safe. Without it the
-# multi-threaded threaded_traced_test_program runs the instrumented library
+# multi-threaded cslg_threaded_traced_test_program runs the instrumented library
 # (trace.cpp) on several worker threads that race on the default non-atomic
 # counters; a lost update can drive a counter negative, which lcov 2.x's geninfo
 # rejects with a fatal "Unexpected negative count" error — a nondeterministic
@@ -117,7 +118,7 @@ endif()
 
 # Split compilation: the callstacklogger library is compiled WITHOUT instrumentation
 # (all its functions have NO_INSTRUMENT attribute). INSTRUMENT_FLAGS is applied only to
-# user code targets (runDemo, traced_test_program) via target_compile_options.
+# user code targets (runDemo, cslg_traced_test_program) via target_compile_options.
 #
 # GCC: -finstrument-functions with exclude-file-list for std library headers.
 # Clang: plain -finstrument-functions. Clang lacks the exclude-file-list, so std library
@@ -231,7 +232,12 @@ if(CSLG_TOP_LEVEL)
     add_custom_target(run COMMAND runDemo)
 endif()
 
-if(BUILD_TESTS)
+# Tests are built only for a standalone build. BUILD_TESTS is a common option
+# name, so a parent project that pulls cslg in via add_subdirectory/FetchContent
+# and has its own BUILD_TESTS=ON would otherwise get cslg's test tree (and the
+# Google Test download) as a side effect. All cslg test targets and ctest names
+# also carry a cslg_ prefix, so they cannot clash with a parent's own targets.
+if(BUILD_TESTS AND CSLG_TOP_LEVEL)
     enable_testing()
     add_subdirectory(tests)
 endif()

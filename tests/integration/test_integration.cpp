@@ -754,7 +754,7 @@ TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {
     int ret = system(cmd.c_str());
     // timeout(1) exits 124 when it had to kill the program — the historical
     // infinite-loop failure mode of resolve_filename_and_line().
-    EXPECT_EQ(ret, 0) << "stripped_caller_program did not finish cleanly (raw status="
+    EXPECT_EQ(ret, 0) << "cslg_stripped_caller_program did not finish cleanly (raw status="
                       << ret << "; status 124<<8 means killed by timeout — the "
                          "caller-resolution hang has regressed)";
 

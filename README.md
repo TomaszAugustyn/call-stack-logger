@@ -111,6 +111,14 @@ every flag needed for tracing — `-finstrument-functions`, `-g`, `-rdynamic`, t
 std-library exclude-file-list, and the library itself (`-ldl -lbfd`). A user project
 only needs to link against it; no per-target `target_compile_options` boilerplate.
 
+Consuming the project this way stays side-effect free: the demo executable and the
+test tree are built only for a standalone (top-level) build, so your own
+`BUILD_TESTS` option never pulls in Call Stack Logger's tests or its Google Test
+download; every test target the project does define carries a `cslg_` prefix
+(`cslg_unit_tests`, ...), so it cannot clash with a `unit_tests` target of yours; and
+the `LOG_ADDR` / `LOG_NOT_DEMANGLED` / `LOG_ELAPSED` macros stay private to the
+library — they are never defined in your translation units.
+
 ### Prerequisites ###
 
 Same as building Call Stack Logger standalone:
@@ -269,7 +277,7 @@ from the wrong file.
 | `LOG_ADDR`                | `OFF`   | Include function addresses in trace output                                                                                                  |
 | `LOG_ELAPSED`             | `OFF`   | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed).                        |
 | `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks                                                                                                   |
-| `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test)                                                                                      |
+| `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test). Honored only when Call Stack Logger is the top-level project, never when consumed via `add_subdirectory` / FetchContent. |
 | `COVERAGE`                | `OFF`   | Enable code coverage via GCC `--coverage` flag                                                                                              |
 | `SANITIZE`                | (empty) | Enable a sanitizer for all cslg-owned targets: `address`, `undefined`, `address+undefined`, or `thread`. See [Sanitizers](#bug-sanitizers). |
 
@@ -484,6 +492,11 @@ cmake -DBUILD_TESTS=ON ..
 make
 ctest --output-on-failure
 ```
+
+`ctest` registers two tests, `cslg_unit_tests` and `cslg_integration_tests` (each a
+Google Test binary of the same name under `build/tests/`). `BUILD_TESTS` is honored
+only for a top-level build of this repository — see
+[Integrating into your own project](#jigsaw-integrating-into-your-own-project).
 
 To generate a code coverage report (requires `lcov` 2.0+):
 ```bash

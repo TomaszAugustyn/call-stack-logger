@@ -62,14 +62,17 @@ target_link_libraries(callstacklogger_instrumented INTERFACE callstacklogger)
 add_library(callstacklogger::callstacklogger ALIAS callstacklogger)
 add_library(callstacklogger::instrumented ALIAS callstacklogger_instrumented)
 
-# LOG_ADDR / LOG_ELAPSED apply to the library itself (they gate #ifdef in
-# callStack.cpp / trace.cpp). Put them on the library target rather than globally.
+# LOG_ADDR / LOG_ELAPSED gate #ifdef blocks in callStack.cpp and trace.cpp only —
+# nothing in the public headers tests them. PRIVATE is load-bearing: as PUBLIC
+# definitions they would reach every consumer TU that links callstacklogger,
+# where an unrelated identifier named e.g. LOG_ADDR (an enum member, a function)
+# would silently break under the macro.
 if(LOG_ADDR)
-    target_compile_definitions(callstacklogger PUBLIC LOG_ADDR)
+    target_compile_definitions(callstacklogger PRIVATE LOG_ADDR)
 endif()
 
 if(LOG_ELAPSED)
-    target_compile_definitions(callstacklogger PUBLIC LOG_ELAPSED)
+    target_compile_definitions(callstacklogger PRIVATE LOG_ELAPSED)
 endif()
 
 # Demo executable: only built when cslg is the top-level project (standalone

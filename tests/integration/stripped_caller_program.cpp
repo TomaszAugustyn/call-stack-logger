@@ -9,7 +9,7 @@
 
 /*
  * Instrumented driver for the stripped-caller regression test — compiled WITH
- * -finstrument-functions and linked against libstripped_caller.so.
+ * -finstrument-functions and linked against libcslg_stripped_caller.so.
  *
  * traced_callback() is entered from a file-local function inside the stripped
  * library, so its caller address resolves to an object with no symbol and no
