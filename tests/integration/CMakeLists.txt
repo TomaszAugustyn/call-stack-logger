@@ -163,6 +163,15 @@ target_compile_features(global_dtor_traced_program PRIVATE cxx_std_17)
 target_link_libraries(global_dtor_traced_program PRIVATE callstacklogger_instrumented)
 cslg_apply_sanitizers(global_dtor_traced_program)
 
+# pthread_cancel driver: a worker loops on a traced leaf while main cancels it.
+# The hooks contain cancellation points and the compiler emits the hook call as
+# non-throwing, so a cancellation landing inside a hook used to abort the whole
+# process; the hooks now run with cancellation disabled (see PthreadCancelTest).
+add_executable(cancel_traced_program cancel_traced_program.cpp)
+target_compile_features(cancel_traced_program PRIVATE cxx_std_17)
+target_link_libraries(cancel_traced_program PRIVATE callstacklogger_instrumented Threads::Threads)
+cslg_apply_sanitizers(cancel_traced_program)
+
 # Multi-threaded traced test program. Exercises per-thread trace files by spawning
 # worker threads, each of which produces its own <base>_tid_<tid> file.
 add_executable(threaded_traced_test_program threaded_traced_program.cpp)
@@ -190,7 +199,7 @@ function(cslg_add_flag_variant variant driver)
     target_compile_definitions(callstacklogger_${variant} PRIVATE _FILE_OFFSET_BITS=64)
     target_compile_options(callstacklogger_${variant} INTERFACE -g)
     target_link_options(callstacklogger_${variant} INTERFACE -rdynamic)
-    target_link_libraries(callstacklogger_${variant} PUBLIC ${CSLG_BFD_LINK_LIBS})
+    target_link_libraries(callstacklogger_${variant} PUBLIC ${CSLG_BFD_LINK_LIBS} Threads::Threads)
 
     add_executable(traced_test_program_${variant} ${driver})
     target_compile_features(traced_test_program_${variant} PRIVATE cxx_std_17)
@@ -225,6 +234,15 @@ target_compile_options(crash_traced_program_log_elapsed PRIVATE ${INSTRUMENT_FLA
 target_link_libraries(crash_traced_program_log_elapsed PRIVATE callstacklogger_log_elapsed)
 cslg_apply_sanitizers(crash_traced_program_log_elapsed)
 
+# The cancel driver against the LOG_ELAPSED variant: the exit hook's pwrite and the
+# thread-exit close() of the patch descriptor are cancellation points of their own
+# (see PthreadCancelTest).
+add_executable(cancel_traced_program_log_elapsed cancel_traced_program.cpp)
+target_compile_features(cancel_traced_program_log_elapsed PRIVATE cxx_std_17)
+target_compile_options(cancel_traced_program_log_elapsed PRIVATE ${INSTRUMENT_FLAGS})
+target_link_libraries(cancel_traced_program_log_elapsed PRIVATE callstacklogger_log_elapsed Threads::Threads)
+cslg_apply_sanitizers(cancel_traced_program_log_elapsed)
+
 # Combined-flags variant: both output-content macros defined simultaneously.
 # Exercises LOG_ELAPSED's byte-offset math under the line-layout changes
 # introduced by LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the
@@ -254,6 +272,8 @@ target_compile_definitions(integration_tests PRIVATE
     FILTERED_OVERFLOW_PROGRAM_PATH="$<TARGET_FILE:filtered_overflow_program>"
     EXCEPTION_TRACED_PROGRAM_PATH="$<TARGET_FILE:exception_traced_program>"
     GLOBAL_DTOR_PROGRAM_PATH="$<TARGET_FILE:global_dtor_traced_program>"
+    CANCEL_TRACED_PROGRAM_PATH="$<TARGET_FILE:cancel_traced_program>"
+    CANCEL_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:cancel_traced_program_log_elapsed>"
     CRASH_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:crash_traced_program_log_elapsed>"
     TRACED_PROGRAM_LOG_ADDR_PATH="$<TARGET_FILE:traced_test_program_log_addr>"
     TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:traced_test_program_log_elapsed>"

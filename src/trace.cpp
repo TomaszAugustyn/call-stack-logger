@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <mutex>
+#include <pthread.h>
 #include <stdio.h>
 #include <string>
 #include <sys/syscall.h>
@@ -60,6 +61,32 @@ struct FrameRecord {
     // duration at this offset. off_t keeps its signedness explicit at the use site.
     off_t placeholder_offset;
 #endif
+};
+
+// RAII: blocks thread cancellation for the enclosing scope and restores the previous
+// state on exit. Used by every tracer scope that contains a POSIX cancellation point
+// (fwrite -> write, the lazy open, BFD's reads, pwrite, close). Two facts make this
+// load-bearing rather than cosmetic:
+//   * Both GCC and Clang emit the call to __cyg_profile_func_enter/exit as
+//     non-throwing, so the instrumented function has no unwind entry for that call
+//     site. ANY unwind that leaves a hook frame — a C++ exception or the forced
+//     unwind glibc implements pthread_cancel with — terminates the process (verified:
+//     "FATAL: exception not rethrown" from glibc, or std::terminate from the
+//     personality routine, on both compilers).
+//   * ~PerThreadTraceFile runs from __call_tls_dtors BEFORE glibc marks the thread
+//     as exiting, so a still-pending request would be honored at its close() — a
+//     forced unwind out of a destructor (implicitly noexcept) terminates too.
+// With cancellation blocked here the tracer adds no cancellation points of its own:
+// a pending request is acted on at the traced program's next cancellation point,
+// exactly as if the program were not instrumented. Asynchronous cancellation
+// (PTHREAD_CANCEL_ASYNCHRONOUS) stays unsupported, as it is for practically every
+// library. pthread_setcancelstate is a few instructions on glibc — no syscall.
+struct ScopedCancelDisable {
+    int previous = PTHREAD_CANCEL_ENABLE;
+    NO_INSTRUMENT ScopedCancelDisable() { pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &previous); }
+    NO_INSTRUMENT ~ScopedCancelDisable() { pthread_setcancelstate(previous, nullptr); }
+    ScopedCancelDisable(const ScopedCancelDisable&) = delete;
+    ScopedCancelDisable& operator=(const ScopedCancelDisable&) = delete;
 };
 
 // Per-thread RAII wrapper around the thread's FILE*. On thread exit, the destructor
@@ -484,6 +511,9 @@ PerThreadTraceFile::~PerThreadTraceFile() {
     // Set the re-entrancy guard permanently — the thread is about to die, and any
     // instrumented callee inside fclose/erase (possible with Clang) must be a no-op.
     t_state.in_instrumentation = true;
+    // close() below is a cancellation point and this destructor runs before glibc
+    // marks the exiting thread as such — see ScopedCancelDisable.
+    ScopedCancelDisable no_cancel;
 
     // Fast path: never opened → nothing to close, nothing registered. Cheap
     // short-circuit for threads that never produced any trace output.
@@ -592,6 +622,10 @@ void trace_begin() {
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_enter(void *callee, void *caller) {
     if (t_state.in_instrumentation) { return; }
+    // Block cancellation for the whole hook — see ScopedCancelDisable for why this
+    // is required. The same fact (no unwind entry at the hook's call site) is why
+    // the exception barrier below must never let anything escape.
+    ScopedCancelDisable no_cancel;
     // Set the guard BEFORE any work and clear it AFTER all local variables (especially
     // maybe_resolved, a std::optional<ResolvedFrame>) have been destroyed. With Clang,
     // destructors of std library types may be instrumented, so in_instrumentation must
@@ -753,10 +787,12 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
 #ifdef LOG_ELAPSED
     // Set the re-entrancy guard because below we call std::chrono::steady_clock::now()
     // and pwrite() — calls that are safe in trace.cpp (compiled without instrumentation)
-    // but want protection from any exotic indirect instrumentation path. Without
+    // but want protection from any exotic indirect instrumentation path. pwrite is
+    // also a cancellation point, so cancellation is blocked (see ScopedCancelDisable). Without
     // LOG_ELAPSED the exit handler is mutex-free and I/O-free, so we keep the
     // zero-overhead guarantee by skipping these stores entirely.
     t_state.in_instrumentation = true;
+    ScopedCancelDisable no_cancel;
 #endif
     // Pop a frame record for EVERY call — the exact mirror of the unconditional push
     // in __cyg_profile_func_enter (see the comment there). Deliberately NO fp check:

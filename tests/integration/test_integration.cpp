@@ -67,6 +67,12 @@
 #ifndef GLOBAL_DTOR_PROGRAM_PATH
     #error "GLOBAL_DTOR_PROGRAM_PATH must be defined by CMake"
 #endif
+#ifndef CANCEL_TRACED_PROGRAM_PATH
+    #error "CANCEL_TRACED_PROGRAM_PATH must be defined by CMake"
+#endif
+#ifndef CANCEL_PROGRAM_LOG_ELAPSED_PATH
+    #error "CANCEL_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
+#endif
 #ifndef CRASH_PROGRAM_LOG_ELAPSED_PATH
     #error "CRASH_PROGRAM_LOG_ELAPSED_PATH must be defined by CMake"
 #endif
@@ -1862,4 +1868,79 @@ TEST(DlopenConstructorTest, InstrumentedPluginConstructorDoesNotDeadlock) {
                          << "; 124<<8 means killed by timeout — the dladdr/dlopen lock-order "
                             "deadlock has regressed). Output:\n" << out;
     EXPECT_NE(out.find("DLOPEN_CTOR_DONE"), std::string::npos) << "Output:\n" << out;
+}
+
+// ============================================================================
+// pthread_cancel through instrumented code. The hooks contain cancellation
+// points (fwrite, the lazy open, pwrite with LOG_ELAPSED) and both compilers
+// emit the hook call as non-throwing, so a cancellation request that landed
+// inside a hook made glibc's forced unwind escape a frame without an unwind
+// entry and the whole process died ("FATAL: exception not rethrown" or
+// std::terminate). The hooks now disable cancellation for their duration.
+// The LOG_ELAPSED variant is covered too: its exit hook pwrite()s and its thread-exit
+// destructor close()s the patch descriptor — both cancellation points of their own
+// (the destructor runs before glibc marks the thread as exiting, so a pending request
+// would otherwise be honored inside a noexcept destructor). Two runs per variant pin
+// both halves of the fix:
+//   - "testcancel": the worker loop has its own cancellation point, so the
+//     request is honored there — the thread ends with PTHREAD_CANCELED.
+//   - default: the loop has no cancellation point of its own; instrumentation
+//     must not add one, so the request is never honored and the program falls
+//     back to a cooperative stop (JOIN_TIMEOUT) — but it must never abort.
+// ============================================================================
+
+namespace {
+
+std::string run_cancel_program(const char* program, const std::string& arg, int& exit_status) {
+    char dir_tmpl[] = "/tmp/cslg_cancel_XXXXXX";
+    char* d = mkdtemp(dir_tmpl);
+    if (d == nullptr) {
+        exit_status = -1;
+        return {};
+    }
+    const std::string dir = d;
+    const std::string stdout_path = dir + "/stdout.txt";
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + dir + "/trace.out\" timeout 20 \"" + program + "\" "
+                    + arg + " > \"" + stdout_path + "\" 2>&1";
+    exit_status = system(cmd.c_str());
+    std::string out = read_file(stdout_path);
+    remove_dir_tree(dir);
+    return out;
+}
+
+void expect_cancellation_honored(const char* program) {
+    int status = -1;
+    const std::string out = run_cancel_program(program, "testcancel", status);
+    EXPECT_EQ(status, 0) << program << " did not exit cleanly (raw status " << status
+                         << "; 134 means SIGABRT — a cancellation escaped the tracer). Output:\n" << out;
+    EXPECT_NE(out.find("JOINED: PTHREAD_CANCELED"), std::string::npos)
+            << "worker was not cancelled at its pthread_testcancel(). Output:\n" << out;
+}
+
+void expect_no_tracer_cancellation_points(const char* program) {
+    int status = -1;
+    const std::string out = run_cancel_program(program, "", status);
+    EXPECT_EQ(status, 0) << program << " did not exit cleanly (raw status " << status
+                         << "; 134 means SIGABRT — a cancellation escaped the tracer). Output:\n" << out;
+    EXPECT_NE(out.find("JOIN_TIMEOUT"), std::string::npos)
+            << "a cancellation was honored inside the tracer (the hooks acted as cancellation "
+               "points). Output:\n" << out;
+}
+
+} // namespace
+
+TEST(PthreadCancelTest, CancellationIsHonoredAtTheProgramsOwnCancellationPoint) {
+    expect_cancellation_honored(CANCEL_TRACED_PROGRAM_PATH);
+}
+
+TEST(PthreadCancelTest, HooksAddNoCancellationPoints) {
+    expect_no_tracer_cancellation_points(CANCEL_TRACED_PROGRAM_PATH);
+}
+
+TEST(PthreadCancelTest, LogElapsedCancellationIsHonoredAtTheProgramsOwnCancellationPoint) {
+    expect_cancellation_honored(CANCEL_PROGRAM_LOG_ELAPSED_PATH);
+}
+
+TEST(PthreadCancelTest, LogElapsedHooksAndThreadExitAddNoCancellationPoints) {
+    expect_no_tracer_cancellation_points(CANCEL_PROGRAM_LOG_ELAPSED_PATH);
 }

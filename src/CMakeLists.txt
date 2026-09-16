@@ -19,8 +19,11 @@ target_include_directories(callstacklogger PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>)
 
 # CSLG_BFD_LINK_LIBS is "dl bfd" plus, when the configure-time probe in the
-# root CMakeLists.txt detected that static libbfd needs it, "zstd".
-target_link_libraries(callstacklogger PUBLIC ${CSLG_BFD_LINK_LIBS})
+# root CMakeLists.txt detected that static libbfd needs it, "zstd". Threads is
+# needed for pthread_setcancelstate() in the hooks (part of libc since glibc
+# 2.34, a separate libpthread before that).
+find_package(Threads REQUIRED)
+target_link_libraries(callstacklogger PUBLIC ${CSLG_BFD_LINK_LIBS} Threads::Threads)
 
 # 64-bit file offsets on 32-bit Linux targets: the LOG_ELAPSED cursor and
 # pwrite() patch offsets are off_t, which defaults to 32 bits there, and

@@ -504,6 +504,7 @@ call-stack-logger/
 |       |-- exception_traced_program.cpp # Instrumented; throw/catch through instrumented frames (GCC pairing)
 |       |-- crash_traced_program.cpp # Instrumented, LOG_ELAPSED; abort()s mid-chain (pending-placeholder crash diagnostics)
 |       |-- global_dtor_traced_program.cpp # Instrumented; global object dtor calls traced code during exit()
+|       |-- cancel_traced_program.cpp # Instrumented; worker thread is pthread_cancel()ed while tracing
 |       |-- callstack_api_program.cpp # Non-instrumented; exercises get_call_stack() API
 |       |-- stripped_caller_lib.cpp # Shared-lib fixture, stripped of symtab/debug info post-build
 |       |-- stripped_caller_program.cpp # Instrumented; callback invoked from the stripped lib
@@ -1121,7 +1122,21 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    several depths). `longjmp`/`setjmp` causes the same drift on BOTH compilers —
    `longjmp` runs no cleanups, so jumped-over frames' exit hooks never fire
    (documented in README next to the Clang exception limitation).
-10. **Signal handlers must not be instrumented (known limitation):** the hooks
+10. **The hooks are opaque to `pthread_cancel`:** both hooks that contain cancellation
+   points (the enter hook: `fwrite`, the lazy `open`, BFD's reads; the LOG_ELAPSED exit
+   hook: `pwrite`) run with cancellation disabled via `pthread_setcancelstate`. This is
+   load-bearing: GCC and Clang emit the hook call as non-throwing, so the instrumented
+   function has no unwind entry for that call site and ANY unwind leaving a hook —
+   a C++ exception or glibc's forced unwind for cancellation — terminates the process
+   (verified: a `throw` from a probe hook is never caught by the caller's `catch`; a
+   cancellation landing in `fwrite` inside the hook died with "FATAL: exception not
+   rethrown" / `std::terminate`). The same fact is why the enter hook's `catch (...)`
+   barrier must never let anything escape. With cancellation disabled the tracer adds
+   no cancellation points: a pending request is acted on at the program's own next
+   cancellation point. Pinned by `PthreadCancelTest` (2 tests, `cancel_traced_program`).
+   Asynchronous cancellation stays unsupported. The library links `Threads::Threads`
+   for `pthread_setcancelstate` (in libc since glibc 2.34, libpthread before).
+11. **Signal handlers must not be instrumented (known limitation):** the hooks
    allocate, lock `s_bfd_mutex`, and use stdio — none async-signal-safe. A signal
    interrupting a thread mid-`malloc` whose handler runs instrumented functions
    re-enters the allocator on the same thread and can deadlock. (The

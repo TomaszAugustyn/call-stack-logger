@@ -436,6 +436,14 @@ line, bounded by line-buffered mode to at most one per thread.
 `fork()` is not supported — the child process inherits the parent's `thread_local`
 state including `FILE*` pointers pointing to inherited file descriptors.
 
+**Thread cancellation.** The hooks run with cancellation disabled
+(`pthread_setcancelstate`), so a `pthread_cancel()` request never lands inside the
+tracer: it is honored at the next cancellation point of the traced program itself,
+exactly as it would be without instrumentation. This is required, not optional — both
+compilers emit the call to the hook as non-throwing, so an unwind that started inside
+a hook (glibc implements cancellation as a forced unwind) would terminate the process.
+Asynchronous cancellation (`PTHREAD_CANCEL_ASYNCHRONOUS`) is not supported.
+
 **Signal handlers are not safe to trace.** The instrumentation hooks allocate
 memory, take a mutex, and use stdio — none of which is async-signal-safe. If a
 signal interrupts a thread mid-`malloc` (or mid-resolution) and the handler runs
