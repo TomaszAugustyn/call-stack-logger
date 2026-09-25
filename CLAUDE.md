@@ -1201,7 +1201,11 @@ Test pure/deterministic functions from the include headers:
   `dlopen()`s/`dlclose()`s `cslg_dlopen_ctor_plugin` in a loop. The plugin's instrumented
   static initializer fires the enter hook with glibc's loader lock held; with `dladdr()`
   under `s_bfd_mutex` the two threads deadlocked on every run (exit 124). Pins the
-  lock-order rule in `resolve_no_unwind()`.
+  lock-order rule in `resolve_no_unwind()`. The loop is bounded (20,000 rounds): the two
+  threads compete for `s_bfd_mutex` with an unfair handoff, and an unbounded loop starved
+  the cold path for 1–42 s per run on Ubuntu 24.04 in every configuration, which the
+  timeout reported as the deadlock; the real deadlock strikes within the first rounds and
+  never reaches the bound.
 - `DlopenPluginTest.RelativeDlopenPathResolvesAfterChdir` — runs
   `cslg_dlopen_traced_program`: the instrumented plugin is dlopen()ed as
   `./libdlopen_plugin.so` and first entered after `chdir("/")`, so `dli_fname`

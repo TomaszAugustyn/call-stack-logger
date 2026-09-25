@@ -22,6 +22,15 @@
  * holds the loader lock and waits for the mutex. The fixed resolver calls
  * dladdr() outside its mutex, so the program always finishes; the test runs it
  * under `timeout`.
+ *
+ * Thread B's loop is bounded. The two threads compete for the resolver mutex
+ * on every iteration and the handoff is not fair: on some systems the cold
+ * path is starved for a long time (the same binary measured between 1 s and
+ * 42 s on Ubuntu 24.04, with or without sanitizers), which the test's timeout
+ * would report as the deadlock. The deadlock itself strikes within the first
+ * iterations, since the cold path starts with main() and every dlopen() runs
+ * the initializer, and a deadlocked loader never reaches the bound — so the
+ * bound keeps the run short without weakening what the test detects.
  */
 
 #include <atomic>
@@ -47,9 +56,12 @@ __attribute__((noinline)) int cold<0>() {
 std::atomic<bool> g_cold_done { false };
 
 int main() {
+    // Enough dlopen()/dlclose() rounds to overlap the whole cold path when the
+    // handoff is fair (about two seconds of looping when it is not).
+    constexpr int MAX_LOADER_ITERATIONS = 20000;
     std::thread loader([] {
         int iterations = 0;
-        while (!g_cold_done.load()) {
+        while (!g_cold_done.load() && iterations < MAX_LOADER_ITERATIONS) {
             void* handle = dlopen(DLOPEN_CTOR_PLUGIN_PATH, RTLD_NOW);
             if (handle == nullptr) {
                 std::fprintf(stderr, "dlopen: %s\n", dlerror());
