@@ -491,7 +491,11 @@ frames that returned normally keep `|_`.
   `called from`: file and line of the statement (the `catch` clause's line for a
   catch). A throw born inside libstdc++ (`vector::at`, `new` failing) or inside a
   library you did not instrument is seen too; its site resolves as far as that
-  object's debug info allows, with the same fallbacks as call sites.
+  object's debug info allows, with the same fallbacks as call sites. One
+  compiler quirk is handled: GCC 13 at `-O2` gives the entry of a `catch`
+  landing pad no source location, so the line of whatever code precedes it
+  would be reported (a line of the previous function); the tracer notices the
+  leaked line and reports the handler's first statement instead.
 - **Rethrows.** `throw;` gives `!! rethrow std::logic_error  (rethrown at: ...)`.
   `std::rethrow_exception()`, the mechanism behind futures, coroutines and
   stored exception pointers, gives the same line with `via

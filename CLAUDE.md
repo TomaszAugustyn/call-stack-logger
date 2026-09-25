@@ -985,7 +985,19 @@ The core implementation. Key functions:
   `chdir`), else `dli_fname`
 - `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames)
 - `resolve_site()` / `bfdResolver::resolve_location()` - Location-only lookup of an
-  instruction address (a throw or catch site) through the location cache; `demangle_symbol()`
+  instruction address (a throw or catch site) through the location cache, via
+  `resolve_event_site_location()`: `resolve_filename_and_line()` plus a check that the
+  line row covering the address did not leak across a symbol boundary. GCC 13 at -O2
+  gives a landing pad's entry (the `call __cxa_begin_catch`, first instruction of the
+  function's cold partition) no location, so the row of the code before it in
+  `.text.unlikely` — another function's line — covers it; the symbol table bounds
+  what the line table cannot: when the line at the containing symbol's first byte
+  equals the line at the byte before the symbol, the row leaked, and the site is taken
+  from the first instruction after the call (the handler's first statement, resolved
+  through `bfd_find_inliner_info` to its outermost inline frame), or left without a
+  line when that leaks too. GCC 16 and Clang give the entry the clause's line, so the
+  check changes nothing there. Found by CI's GCC RelWithDebInfo job on Ubuntu 24.04
+  (`LogExceptionsTest.CatchLinesNameTypeMessageAndExactSite`); `demangle_symbol()`
   - the public demangler (LOG_EXCEPTIONS event lines); `inline_chain_at()` /
   `bfdResolver::resolve_inline_chain()` - the DWARF inline chain at an address as base
   names, innermost first, memoized (LOG_EXCEPTIONS reconciliation of inlined frames)

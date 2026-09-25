@@ -195,6 +195,14 @@ private:
     NO_INSTRUMENT
     static CachedLocation resolve_filename_and_line(void* caller_address, const Dl_info* dl_info);
 
+    /// Location of an exception event's site (the interposer's return address
+    /// minus one): resolve_filename_and_line() plus a check that the line row
+    /// covering the address did not leak across a symbol boundary from the code
+    /// before it (GCC 13 at -O2 gives a landing pad's entry no location of its
+    /// own — see the definition), with the handler's first statement as the
+    /// fallback. Must be called with s_bfd_mutex held.
+    static CachedLocation resolve_event_site_location(void* address, const Dl_info* dl_info);
+
     /// Reads the inline chain for `address` (see resolve_inline_chain) — must be
     /// called with s_bfd_mutex held; `dl_info` is the address's dladdr() result
     /// obtained outside the mutex (null when dladdr() failed).

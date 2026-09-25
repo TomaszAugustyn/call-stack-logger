@@ -36,6 +36,7 @@
 #endif
 
 #include <cstdlib> // for strtoull
+#include <cstring>
 #include <cxxabi.h> // for __cxa_demangle
 #include <dlfcn.h> // for dladdr
 #include <execinfo.h> // for backtrace
@@ -549,11 +550,119 @@ void bfdResolver::resolve_location(void* address, ResolvedFrameView& out) {
     std::lock_guard<std::mutex> lock(s_bfd_mutex);
     auto loc_it = location_cache().find(address);
     if (loc_it == location_cache().end()) {
-        loc_it = location_cache().emplace(address, resolve_filename_and_line(address, dl)).first;
+        loc_it = location_cache().emplace(address, resolve_event_site_location(address, dl)).first;
     }
     out.caller_filename = &loc_it->second.file;
     out.caller_line_number = loc_it->second.line;
     out.caller_function_base = &loc_it->second.function_base;
+}
+
+namespace {
+
+// One line-table answer for an offset in a section, for comparing rows. `file`
+// points into BFD's own storage, valid for as long as the bfd is open.
+struct LineRow {
+    const char* file = nullptr;
+    unsigned int line = 0;
+
+    NO_INSTRUMENT bool same_as(const LineRow& other) const {
+        return line != 0 && line == other.line && file != nullptr && other.file != nullptr
+               && std::strcmp(file, other.file) == 0;
+    }
+};
+
+NO_INSTRUMENT
+LineRow line_row_at(bfdResolver::storedBfd& currBfd, asection* section, bfd_vma offset) {
+    LineRow row;
+    const char* func = nullptr;
+    if (!bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &row.file, &func,
+                               &row.line)) {
+        return LineRow {};
+    }
+    return row;
+}
+
+// The row at `offset` resolved to its OUTERMOST inline frame: when the offset
+// lies inside code inlined from elsewhere, the line where the enclosing
+// function called it.
+NO_INSTRUMENT
+LineRow outermost_line_row_at(bfdResolver::storedBfd& currBfd, asection* section, bfd_vma offset) {
+    LineRow row = line_row_at(currBfd, section, offset);
+    if (row.line == 0) {
+        return row;
+    }
+    const char* file = nullptr;
+    const char* func = nullptr;
+    unsigned int line = 0;
+    while (bfd_find_inliner_info(currBfd.abfd.get(), &file, &func, &line)) {
+        if (file != nullptr && file[0] != '\0' && line != 0) {
+            row.file = file;
+            row.line = line;
+        }
+    }
+    return row;
+}
+
+} // namespace
+
+bfdResolver::CachedLocation bfdResolver::resolve_event_site_location(void* address, const Dl_info* dl_info) {
+    CachedLocation location = resolve_filename_and_line(address, dl_info);
+    if (!location.line || dl_info == nullptr) {
+        return location;
+    }
+    // GCC 13 at -O2 gives the entry of a landing pad no location of its own.
+    // The pad is the first thing in the function's cold partition, and the line
+    // row of whatever precedes it in .text.unlikely — another function's code —
+    // covers its `call __cxa_begin_catch`, so the catch site reads as some line
+    // of that other function (the throw line of exc_rec for the catch in
+    // exc_rec_catcher of the test driver; GCC 16 and Clang give the entry the
+    // catch clause's line). The line table cannot say where a row starts, but
+    // the symbol table can bound it: a row that already covers the byte before
+    // the containing symbol's first byte belongs to the code before the symbol.
+    // The site is then taken from the first instruction after the call — the
+    // handler's first statement, resolved to its outermost inline frame — or
+    // reported without a line when that one leaks too.
+    Dl_info info = *dl_info;
+    storedBfd* currBfd = ensure_bfd_loaded(info);
+    if (currBfd == nullptr || currBfd->abfd->sections == nullptr || currBfd->symbols == nullptr) {
+        return location;
+    }
+    intptr_t offset = 0;
+    asection* section = find_containing_section(*currBfd, address, offset);
+    if (section == nullptr) {
+        return location;
+    }
+    // The containing symbol: the highest symbol of the section at or below the
+    // offset (bfd_canonicalize_symtab terminates the array with a null).
+    bfd_vma symbol_start = 0;
+    bool symbol_found = false;
+    for (asymbol** it = currBfd->symbols.get(); *it != nullptr; ++it) {
+        const asymbol& symbol = **it;
+        if (symbol.section != section || (symbol.flags & BSF_SECTION_SYM) != 0
+            || symbol.value > static_cast<bfd_vma>(offset)) {
+            continue;
+        }
+        if (!symbol_found || symbol.value > symbol_start) {
+            symbol_start = symbol.value;
+            symbol_found = true;
+        }
+    }
+    if (!symbol_found || symbol_start == 0) {
+        return location; // nothing precedes the symbol in its section: nothing to leak from
+    }
+    const LineRow at_site = line_row_at(*currBfd, section, static_cast<bfd_vma>(offset));
+    if (!at_site.same_as(line_row_at(*currBfd, section, symbol_start))
+        || !at_site.same_as(line_row_at(*currBfd, section, symbol_start - 1))) {
+        return location;
+    }
+    const LineRow after_call = outermost_line_row_at(*currBfd, section, static_cast<bfd_vma>(offset) + 1);
+    if (after_call.line == 0 || after_call.same_as(at_site)) {
+        location.line.reset();
+        return location;
+    }
+    location.file = after_call.file;
+    location.line = after_call.line;
+    return location;
 }
 
 std::vector<std::string> bfdResolver::read_inline_chain(void* address, const Dl_info* dl_info) {
