@@ -464,6 +464,65 @@ A `thread_local` `current_stack_depth` counter in `trace.cpp`:
 The `utils::format()` function in `format.h` uses this depth to produce tree-style indentation
 with `|  ` and `|_ ` prefixes.
 
+### Frame Reconciliation After Non-Local Exits (LOG_EXCEPTIONS)
+
+Opt-in via `-DLOG_EXCEPTIONS=ON` (PRIVATE macro on the library, like the other
+`LOG_*` flags; the default build's object code is byte-identical without it).
+
+The positional enter/exit pairing above breaks silently whenever a frame leaves
+WITHOUT running its exit hook: Clang emits no exit hook on the exception-unwind
+path, and `longjmp` runs none on either compiler. The stale record makes every
+later exit pop the wrong record (indentation drifts, LOG_ELAPSED patches the
+wrong lines). With the option on, every `FrameRecord` also carries the frame's
+`callee`, `caller`, `level` and `uncaught_at_enter`, and the hooks apply the
+pure rules in `include/frameReconcile.h` (templates over the record type, so
+`FrameRecord` stays private to `trace.cpp`; unit-tested with synthetic records
+in `tests/unit/test_frame_reconcile.cpp`):
+
+- **Level = canonical frame address (CFA)**, the stack pointer just before the
+  call that created the frame. Deeper frames have LOWER levels; two functions
+  called from the same place have the SAME level; an inlined copy has its
+  host's level. The hook's own `__builtin_frame_address(0)` would NOT do: it
+  also depends on the callee's frame size (a smaller callee called from the
+  same place got a higher address, which made a dead frame look like a live
+  ancestor — the first probe passed only by coincidence). `frame_level()` in
+  `trace.cpp` derives the CFA from the hook's frame address plus a per-hook-site
+  distance measured once with `_Unwind_Backtrace`: the walk matches the frame
+  resuming at the hook's return address BY ADDRESS (so inlining of the helper
+  cannot shift it) and reads the CFA from the NEXT context — libgcc stores in a
+  context the CFA of the frame it just unwound, and LLVM libunwind reports the
+  caller's stack pointer there, the same value. The distance is cached in the
+  per-thread `level_offsets` map (private `HookSite` key type, bounded by the
+  number of hook call sites); later hooks pay one hash lookup. A site the
+  unwinder cannot describe gets the minimum distance (24 bytes), which keeps
+  its level at or below the true value and the ordering sound.
+- **Enter** (`dead_records_on_enter`): pop records whose level is below the
+  entering frame's (deeper, cannot be alive) and records at the SAME level with
+  a DIFFERENT caller (reused stack slot after longjmp). Equal level with equal
+  caller is kept: that is a live inline host or a recursive inlined copy — and
+  also a frame re-called from the same site after longjmp'ing out, which is
+  therefore reclaimed only when its host exits (one extra indentation level
+  per iteration meanwhile; documented).
+- **Exit** (`exiting_record_index`): candidates are records with the same
+  (callee, caller); a normally called hook takes the one with the identical
+  level, a TAIL-CALLED hook (both compilers emit `jmp __cyg_profile_func_exit`
+  at -O2 for void functions; detected as `__builtin_return_address(0) ==
+  caller`) resolves to the CALLER's level and takes the closest candidate below
+  it; otherwise the topmost candidate; no candidate at all → the positional
+  pop of the default build. Records above the match are dead and popped.
+- **Thread-stack confinement**: `pthread_getattr_np` bounds, resolved once per
+  thread inside the enter hook's barrier (the main thread's lookup reads
+  /proc/self/maps). Records off the thread stack (fibers, sigaltstack) are
+  never compared and a frame running off it gets the positional behavior —
+  fibers stay exactly as (un)supported as before.
+- `reclaim_dead_records()` pops the dead records and lowers the depth for the
+  logged ones; the exit hook sets the re-entrancy guard and blocks cancellation
+  under this option too (`std::uncaught_exceptions()`, hash lookups).
+
+Pinned by `LogExceptionsTest` (driver `exceptions_traced_program.cpp`, all
+scenario functions `noinline` so frames stay physical at every -O level) on
+both compilers, including -O2 and the sanitizer builds.
+
 ### Output Format
 
 Each line in `trace.out` follows this pattern:
@@ -512,6 +571,7 @@ call-stack-logger/
 |   |-- callStack.h             # bfdResolver struct, get_call_stack(), resolve() API
 |   |-- durationFormat.h        # utils::format_duration_12chars (LOG_ELAPSED helper)
 |   |-- format.h                # utils::format() - formats ResolvedFrame into string
+|   |-- frameReconcile.h        # LOG_EXCEPTIONS: pure frame-stack reconciliation rules (levels)
 |   |-- prettyTime.h            # utils::pretty_time() + PRETTY_TIME_LENGTH constant
 |   |-- stdSymbolFilter.h       # is_std_library_symbol() — Clang runtime std filter
 |   |-- traceFilePath.h         # utils::resolve_base_trace_path + make_absolute_trace_path + build_trace_filename
@@ -527,6 +587,7 @@ call-stack-logger/
 |   |   |-- CMakeLists.txt      # Unit test executable (no instrumentation)
 |   |   |-- test_duration_format.cpp # Tests for utils::format_duration_12chars()
 |   |   |-- test_format.cpp     # Tests for utils::format()
+|   |   |-- test_frame_reconcile.cpp # Tests for the LOG_EXCEPTIONS reconciliation rules
 |   |   |-- test_pretty_time.cpp # Tests for utils::pretty_time() and to_ms()
 |   |   |-- test_std_symbol_filter.cpp # Tests for is_std_library_symbol() mangled-name parsing
 |   |   |-- test_trace_file_path.cpp # Tests for resolve_base_trace_path + make_absolute_trace_path + build_trace_filename
@@ -540,6 +601,8 @@ call-stack-logger/
 |       |-- filtered_overflow_lib.cpp  # Instrumented shared lib, stripped post-build; its file-local helper is never logged
 |       |-- filtered_overflow_program.cpp # Instrumented; same recursion with an unlogged frame at every level
 |       |-- exception_traced_program.cpp # Instrumented; throw/catch through instrumented frames (GCC pairing)
+|       |-- exceptions_traced_program.cpp # Instrumented LOG_EXCEPTIONS driver: every kind of non-local exit + markers
+|       |-- throwing_lib.cpp      # Shared lib built without instrumentation whose only function throws
 |       |-- crash_traced_program.cpp # Instrumented, LOG_ELAPSED; abort()s mid-chain (pending-placeholder crash diagnostics)
 |       |-- global_dtor_traced_program.cpp # Instrumented; global object dtor calls traced code during exit()
 |       |-- cancel_traced_program.cpp # Instrumented; worker thread is pthread_cancel()ed while tracing
@@ -636,6 +699,14 @@ constants. The 12-byte width is a hard invariant — `static_assert`s and the
 `DurationFormatTest` suite enforce every code path matches it. Used only when
 LOG_ELAPSED is enabled.
 
+### `include/frameReconcile.h`
+The LOG_EXCEPTIONS reconciliation rules as pure `NO_INSTRUMENT inline` templates over
+any record type with `callee`, `caller` and `level` fields: `FrameKey`, `StackBounds`,
+`on_thread_stack()`, `dead_records_on_enter()`, `dead_records_on_catch()`,
+`exiting_record_index()`. No globals, no I/O — see "Frame Reconciliation After
+Non-Local Exits" for the rules and `test_frame_reconcile.cpp` for the shapes covered.
+`trace.cpp` supplies the levels (`frame_level()`) and applies the results.
+
 ### `include/traceFilePath.h`
 Three pure `NO_INSTRUMENT inline` helpers used by `trace.cpp` to compute per-thread trace
 file paths:
@@ -712,6 +783,7 @@ Demo program testing instrumentation with:
 mkdir build && cd build
 cmake ..                                    # Default logging
 cmake -DLOG_ADDR=ON ..                      # Include addresses in output
+cmake -DLOG_EXCEPTIONS=ON ..                # Reconcile the frame stack after exceptions / longjmp
 cmake -DDISABLE_INSTRUMENTATION=ON ..       # No instrumentation at all
 make                                        # Build
 make run                                    # Build and run (generates trace.out)
@@ -734,6 +806,7 @@ make run                                    # Build and run (generates trace.out
 |--------|--------|
 | `LOG_ADDR` | Include function addresses in trace output |
 | `LOG_ELAPSED` | Record per-function duration via in-place pwrite() patching of a 12-byte placeholder spliced after the timestamp. See "Per-function timing" below. |
+| `LOG_EXCEPTIONS` | Key frame records by stack level and reclaim frames that left without an exit hook (Clang exception unwinding, longjmp). See "Frame Reconciliation After Non-Local Exits" above. |
 | `DISABLE_INSTRUMENTATION` | Compile without any instrumentation hooks |
 
 
@@ -819,6 +892,14 @@ Test pure/deterministic functions from the include headers:
 - `test_duration_format.cpp` — exhaustive coverage of `utils::format_duration_12chars()`:
   zero, ns / us / ms / s ranges and boundaries, saturation at 1000s and UINT64_MAX,
   framing characters, fixed 12-byte width invariant, buffer-overflow canary
+- `test_frame_reconcile.cpp` — every rule in `frameReconcile.h` against synthetic
+  records: deeper records reclaimed at enter, reused slot (equal level, different
+  caller) reclaimed, equal level with equal caller kept (inline host / same-site
+  retry), scans stopping at the first kept record, foreign-stack records and frames
+  left alone, unknown bounds treated as one stack; catch reclaiming everything below
+  the catcher and nothing at its level; exit matching exact level, tail-called
+  closest-below, dead records above the match, recursion runs before and after
+  longjmp, positional fallback without a matching record or on a foreign stack
 
 ### Integration Tests (`tests/integration/`)
 
@@ -995,6 +1076,19 @@ Test pure/deterministic functions from the include headers:
   the LOG_ELAPSED library variant, linked with Threads::Threads). Asserts 4
   worker files exist and every per-thread file (main + workers) is fully
   patched — proves per-thread cursor / patch_fd isolation.
+- `LogExceptionsTest` fixture (4 tests) drives `cslg_traced_test_program_log_exceptions`,
+  the `LOG_EXCEPTIONS` variant built from `exceptions_traced_program.cpp` (linked with
+  Threads and the non-instrumented `cslg_throwing_lib`). The driver runs every kind of
+  non-local exit — an exception caught two frames up with a destructor helper traced
+  during unwinding, a throw four recursion levels down, throws from inside libstdc++ and
+  from the shared library, `throw;`, `std::rethrow_exception`, a throw inside a catch
+  handler, `longjmp` over two frames followed by a call at the same level, a
+  same-call-site `longjmp` retry loop, void recursion (tail-called exit hooks at -O2),
+  and an exception caught inside a worker thread — and calls a marker after each. The
+  tests assert every marker's exact depth on both compilers, the depths of the unwound
+  frames and of the cleanup helper, level-by-level pairing of the recursive frames, and
+  the worker thread's own file. All driver functions are `noinline`; the driver prints
+  `<TAG>=<line>` for its throw and catch statements for later exact-site assertions.
 - `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the both-flags
   variant `cslg_traced_test_program_log_elapsed_addr`. Asserts the
   ordering "timestamp → duration → addr" via regex, the tree column stays
@@ -1224,7 +1318,10 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    for now: it cannot disambiguate recursive frames (same callee address at
    several depths). `longjmp`/`setjmp` causes the same drift on BOTH compilers —
    `longjmp` runs no cleanups, so jumped-over frames' exit hooks never fire
-   (documented in README next to the Clang exception limitation).
+   (documented in README next to the Clang exception limitation). Both drifts are
+   repaired by the opt-in `LOG_EXCEPTIONS` build (see "Frame Reconciliation After
+   Non-Local Exits"): records keyed by stack LEVEL disambiguate recursive frames,
+   which is what the rejected callee-address self-heal could not do.
 10. **The hooks are opaque to `pthread_cancel`:** both hooks that contain cancellation
    points (the enter hook: `fwrite`, the lazy `open`, BFD's reads; the LOG_ELAPSED exit
    hook: `pwrite`) run with cancellation disabled via `pthread_setcancelstate`. This is

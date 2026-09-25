@@ -29,6 +29,15 @@ option(DISABLE_INSTRUMENTATION "Compile without any instrumentation hooks" OFF)
 # "Per-function timing" section in README.md for details.
 option(LOG_ELAPSED "Record and display per-function duration in trace output" OFF)
 
+# Opt-in exception awareness. When ON, every frame record carries the frame's
+# stack address, and the hooks use it to reclaim records of frames that left
+# WITHOUT running their exit hook — Clang's exception-unwind path emits none,
+# longjmp() runs none on either compiler — instead of letting those stale
+# records shift every later line of the thread's tree. When OFF (default), zero
+# runtime or code-size cost: all of it is inside #ifdef LOG_EXCEPTIONS blocks.
+# See the "Exceptions in the trace tree" section in README.md.
+option(LOG_EXCEPTIONS "Repair the call tree after exceptions and longjmp, trace exception events" OFF)
+
 # Sanitizers: opt-in, for debugging / CI runs. Flags are applied PRIVATE to every
 # cslg target (library + demo + tests) so external users who link callstacklogger
 # never inherit sanitizer flags — they link a clean library regardless.

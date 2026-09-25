@@ -54,6 +54,8 @@ cmake -DCMAKE_CXX_COMPILER=clang++ ..
 cmake -DLOG_ELAPSED=ON ..
 # or to include each callee's address in the output
 cmake -DLOG_ADDR=ON ..
+# or to keep the tree exact across exceptions and longjmp (see "Exceptions in the trace tree")
+cmake -DLOG_EXCEPTIONS=ON ..
 # or to compile your application with disabled instrumentation (no logging)
 cmake -DDISABLE_INSTRUMENTATION=ON ..
 # or to build with tests and code coverage
@@ -103,17 +105,22 @@ exit call on the exceptional path too (like a cleanup), keeping enter/exit paire
 Clang build, a caught exception that unwinds through instrumented frames leaves one
 unmatched enter per unwound frame: tree indentation drifts one level deeper for the rest
 of that thread's trace, and with `LOG_ELAPSED` later exits can patch durations onto the
-wrong lines while the unwound frames' own lines keep `[  pending ]`. If the code you
-trace throws exceptions across instrumented frames, prefer GCC.
+wrong lines while the unwound frames' own lines keep `[  pending ]`. Building with
+`-DLOG_EXCEPTIONS=ON` removes the drift: the tracer recognizes the unwound frames by
+their stack level and reclaims them (see
+[Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions)).
+Without it, if the code you trace throws exceptions across instrumented frames, prefer
+GCC.
 
 **Known limitation — `longjmp` / `setjmp` (both compilers).** `longjmp` restores the
 stack without running any cleanups, so the exit hooks of the jumped-over instrumented
 frames never fire — on GCC too, since no unwinder is involved. The effect is the same
 as the Clang exception case above: tree indentation drifts one level deeper per
 skipped frame for the rest of that thread's trace, and with `LOG_ELAPSED` later exits
-patch durations onto the wrong lines. Avoid tracing code that `longjmp`s across
-instrumented frames (or keep such code in a translation unit compiled without
-`-finstrument-functions`).
+patch durations onto the wrong lines. `-DLOG_EXCEPTIONS=ON` repairs this case too
+(same mechanism, see the section linked above). Without it, avoid tracing code that
+`longjmp`s across instrumented frames (or keep such code in a translation unit
+compiled without `-finstrument-functions`).
 
 ### What is not traced ###
 
@@ -312,6 +319,7 @@ from the wrong file.
 | ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `LOG_ADDR`                | `OFF`   | Include function addresses in trace output                                                                                                  |
 | `LOG_ELAPSED`             | `OFF`   | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed).                        |
+| `LOG_EXCEPTIONS`          | `OFF`   | Keep the call tree exact when frames leave without an exit hook (exceptions under Clang, `longjmp` on both compilers). See [Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions). |
 | `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks                                                                                                   |
 | `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test). Honored only when Call Stack Logger is the top-level project, never when consumed via `add_subdirectory` / FetchContent. |
 | `COVERAGE`                | `OFF`   | Enable code coverage via GCC `--coverage` flag                                                                                              |
@@ -442,6 +450,64 @@ same file shifts the real offsets and the in-place duration patches would land
 inside the other process's lines. (Concurrent *threads* are fine — they write
 to separate per-thread files. Sequential runs are fine too — each run re-reads
 the file size on start.)
+
+## :boom: Exceptions in the trace tree (`LOG_EXCEPTIONS`) ##
+
+Build with `-DLOG_EXCEPTIONS=ON` to keep the call tree exact when frames leave
+without running their exit hook.
+
+```bash
+cmake -B build -DLOG_EXCEPTIONS=ON
+cmake --build build
+./build/runDemo
+```
+
+### Repairing the tree after non-local exits ###
+
+The tracer pairs enters and exits positionally: every enter pushes a record on a
+per-thread stack, every exit pops one. Two things break that pairing silently.
+Clang emits no exit hook for frames an exception unwinds through, and `longjmp`
+skips the exit hooks of every frame it jumps over on both compilers. A stale
+record then makes each later exit pop the wrong record: the tree drifts one
+level deeper per skipped frame for the rest of the thread, and with
+`LOG_ELAPSED` durations land on the wrong lines.
+
+With `LOG_EXCEPTIONS` every record also carries the frame's **level**, its
+canonical frame address: the stack pointer's value just before the call that
+created the frame. Stacks grow downward, so a frame deeper than the one running
+now always has a lower level, and a deeper frame cannot still be alive under a
+running shallower one. The hooks use that to reclaim what is gone:
+
+- **At every enter**, records whose level lies below the entering frame's are
+  dead (deeper frames that never ran their exit hook), and so is a record at the
+  same level that was called from a different place (the frame's stack slot is
+  being reused after a `longjmp`). They are popped before the new line is
+  written, so the line lands at its true depth.
+- **At every exit**, the hook looks for the record carrying its own callee,
+  caller and level instead of blindly taking the top one; whatever sits above it
+  is dead and is popped along.
+
+The level is the canonical frame address and not the hook's own frame address on
+purpose: the latter also depends on the callee's frame size, so two functions
+called from the same place would not compare equal. The distance between the two
+is a constant of each hook call site, measured once per site with a two-frame
+unwind and cached per thread; afterwards each hook pays one hash lookup and an
+addition.
+
+What this does not cover, and what happens instead:
+
+- A frame that `longjmp`s out and is then called again **from the very same call
+  site** at the same level looks like a recursive inlined copy of itself and is
+  kept until the frame that contains the loop returns; calls made inside that
+  loop meanwhile are indented one level deeper per iteration. The pairing itself
+  stays correct.
+- **Fibers and stackful coroutines** switch stacks within one thread. The
+  tracer's frame stack interleaves their frames today, and `LOG_EXCEPTIONS`
+  leaves them exactly as they are: the level rules only ever compare frames on
+  the thread's own stack (found with `pthread_getattr_np`).
+- Code compiled **without unwind tables** cannot be measured by the unwinder;
+  such a hook site gets the smallest distance any frame can have, which keeps
+  its level at or below the true one and the ordering rules sound.
 
 ## :shield: Thread Safety ##
 

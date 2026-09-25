@@ -75,6 +75,10 @@ if(LOG_ELAPSED)
     target_compile_definitions(callstacklogger PRIVATE LOG_ELAPSED)
 endif()
 
+if(LOG_EXCEPTIONS)
+    target_compile_definitions(callstacklogger PRIVATE LOG_EXCEPTIONS)
+endif()
+
 # Demo executable: only built when cslg is the top-level project (standalone
 # build). When a parent project pulls cslg in via add_subdirectory, runDemo is
 # skipped — it's not useful and would clutter the parent's build output.

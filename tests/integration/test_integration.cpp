@@ -88,6 +88,9 @@
 #ifndef TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH
     #error "TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH must be defined by CMake"
 #endif
+#ifndef TRACED_PROGRAM_LOG_EXCEPTIONS_PATH
+    #error "TRACED_PROGRAM_LOG_EXCEPTIONS_PATH must be defined by CMake"
+#endif
 
 namespace {
 
@@ -2004,4 +2007,139 @@ TEST(ChdirTest, RelativeOutputPathIsAnchoredToStartupDirectory) {
 
     remove_dir_tree(sub_dir);
     remove_dir_tree(dir);
+}
+
+// ============================================================================
+// LOG_EXCEPTIONS — frame-stack reconciliation after non-local exits.
+//
+// exceptions_traced_program.cpp makes instrumented frames leave without their
+// exit hook in every way the tracer knows (exceptions caught above them, which
+// run no exit hooks on Clang; longjmp over them, which runs none on either
+// compiler) and calls a marker from a known depth after each scenario. With
+// the reconciliation rules (include/frameReconcile.h) every marker must sit at
+// its true depth on BOTH compilers — a stale record would shift it deeper.
+// ============================================================================
+
+namespace {
+
+// Runs the LOG_EXCEPTIONS driver in a fresh directory (it spawns a worker
+// thread, so a second trace file appears), captures its stdout and parses the
+// "<TAG>=<line>" pairs the driver prints for its throw and catch sites.
+class LogExceptionsTest : public ::testing::Test {
+protected:
+    std::string dir;
+    std::string trace_content;
+    std::vector<std::string> trace_lines;
+    std::string worker_content;
+    std::vector<std::string> worker_lines;
+    std::map<std::string, int> site_lines;
+
+    void SetUp() override {
+        char dir_tmpl[] = "/tmp/cslg_exceptions_XXXXXX";
+        char* d = mkdtemp(dir_tmpl);
+        ASSERT_NE(d, nullptr) << "mkdtemp failed";
+        dir = d;
+        const std::string trace_path = dir + "/trace.out";
+        const std::string stdout_path = dir + "/stdout.txt";
+
+        std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_path + "\" \""
+                        + TRACED_PROGRAM_LOG_EXCEPTIONS_PATH + "\" > \"" + stdout_path + "\" 2>&1";
+        int ret = system(cmd.c_str());
+        ASSERT_EQ(ret, 0) << "exceptions driver failed, exit=" << ret << "\n" << read_file(stdout_path);
+
+        trace_content = read_file(trace_path);
+        trace_lines = split_lines(trace_content);
+
+        for (const auto& name : list_files_in(dir)) {
+            if (name.rfind("trace.out_tid_", 0) == 0) {
+                worker_content = read_file(dir + "/" + name);
+                worker_lines = split_lines(worker_content);
+            }
+        }
+
+        for (const auto& line : split_lines(read_file(stdout_path))) {
+            const size_t eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            const std::string tag = line.substr(0, eq);
+            if (tag.empty() || tag.find(' ') != std::string::npos) continue;
+            try {
+                site_lines[tag] = std::stoi(line.substr(eq + 1));
+            } catch (...) {
+            }
+        }
+    }
+
+    void TearDown() override {
+        if (!dir.empty()) {
+            remove_dir_tree(dir);
+        }
+    }
+
+    // Depth of the unique entry line naming `function` (-1 when missing or ambiguous).
+    static int depth_of(const std::vector<std::string>& lines, const std::string& function) {
+        const std::string line = find_unique_line(lines, function);
+        return line.empty() ? -1 : count_indentation_depth(line);
+    }
+
+    // Depths of every entry line naming `function`, in file order.
+    static std::vector<int> depths_of(const std::vector<std::string>& lines, const std::string& function) {
+        std::vector<int> depths;
+        for (const auto& line : lines) {
+            if (line.find(function) != std::string::npos && line.find("(called from:") != std::string::npos) {
+                depths.push_back(count_indentation_depth(line));
+            }
+        }
+        return depths;
+    }
+};
+
+} // namespace
+
+// Every scenario is followed by a marker called from main (depth 1) or from the
+// scenario's root frame. Stale records from any scenario would push the markers
+// that follow it deeper — so this single test pins all of them, on GCC and Clang.
+TEST_F(LogExceptionsTest, MarkersAfterEveryScenarioSitAtTheirTrueDepth) {
+    EXPECT_EQ(depth_of(trace_lines, "exc_catcher"), 1) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "exc_marker_a"), 1) << "after an exception caught two frames up:\n" << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "exc_marker_b"), 1) << "after a throw four recursion levels down:\n" << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "exc_lib_throw"), 1);
+    EXPECT_EQ(depth_of(trace_lines, "exc_so_throw"), 1);
+    EXPECT_EQ(depth_of(trace_lines, "exc_rethrow_stmt"), 1);
+    EXPECT_EQ(depth_of(trace_lines, "exc_rethrow_ptr"), 1);
+    EXPECT_EQ(depth_of(trace_lines, "exc_nested_in_handler"), 1);
+    EXPECT_EQ(depth_of(trace_lines, "exc_jump_root"), 1);
+    EXPECT_EQ(depth_of(trace_lines, "exc_jump_after"), 2)
+            << "the call right after a longjmp landed must be a child of the setjmp frame:\n" << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "exc_marker_h"), 1) << "after longjmp over two frames:\n" << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "exc_loop_marker"), 2)
+            << "after three longjmps out of the same call site:\n" << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "exc_messages"), 1);
+    EXPECT_EQ(depth_of(trace_lines, "exc_final_marker"), 1) << "at the very end:\n" << trace_content;
+}
+
+// The frames the exception unwinds through were entered normally and sit at
+// their true depth; so does the helper a destructor runs DURING unwinding.
+TEST_F(LogExceptionsTest, UnwoundFramesAndCleanupHelpersKeepTheirDepth) {
+    EXPECT_EQ(depth_of(trace_lines, "exc_mid"), 2) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "exc_thrower"), 3) << trace_content;
+    // main -> exc_catcher -> exc_mid -> ExcGuard::~ExcGuard -> exc_helper
+    EXPECT_EQ(depth_of(trace_lines, "ExcGuard::~ExcGuard"), 3) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "exc_helper"), 4) << trace_content;
+}
+
+// Recursion produces one record per level with the same callee and caller; the
+// rules must still pop the right one, both for the exceptional exit at depth
+// four and for the plain void recursion whose exit hooks are tail-called at -O2.
+TEST_F(LogExceptionsTest, RecursiveFramesPairLevelByLevel) {
+    EXPECT_EQ(depths_of(trace_lines, "exc_rec("), (std::vector<int>{ 2, 3, 4, 5 })) << trace_content;
+    EXPECT_EQ(depths_of(trace_lines, "exc_void_rec"), (std::vector<int>{ 1, 2, 3, 4 })) << trace_content;
+}
+
+// The worker thread's own file: an exception caught inside the thread leaves
+// the marker that follows at the depth of the frame that caught it.
+TEST_F(LogExceptionsTest, WorkerThreadFileIsReconciledIndependently) {
+    ASSERT_FALSE(worker_lines.empty()) << "no worker trace file produced";
+    EXPECT_EQ(depth_of(worker_lines, "exc_thread_body"), 1) << worker_content;
+    EXPECT_EQ(depth_of(worker_lines, "exc_thread_thrower"), 2) << worker_content;
+    EXPECT_EQ(depth_of(worker_lines, "exc_thread_marker"), 1) << worker_content;
 }

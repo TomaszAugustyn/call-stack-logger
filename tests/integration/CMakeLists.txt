@@ -156,6 +156,14 @@ target_compile_features(cslg_exception_traced_program PRIVATE cxx_std_17)
 target_link_libraries(cslg_exception_traced_program PRIVATE callstacklogger_instrumented)
 cslg_apply_sanitizers(cslg_exception_traced_program)
 
+# Throwing-library fixture for the LOG_EXCEPTIONS driver: a shared library built
+# WITHOUT instrumentation whose only function throws. The exception is born in
+# code the tracer never instrumented and is caught by an instrumented frame —
+# the shape of an exception escaping a third-party library. Not sanitized, for
+# the same reasons as cslg_stripped_caller.
+add_library(cslg_throwing_lib SHARED throwing_lib.cpp)
+target_compile_features(cslg_throwing_lib PRIVATE cxx_std_17)
+
 # Exit-window driver: a global object's instrumented destructor runs during
 # exit(). Its construction (pre-trace_begin) and destruction
 # (post-trace_shutdown) both hit disabled hooks and must be silent no-ops —
@@ -256,6 +264,15 @@ target_compile_options(cslg_cancel_traced_program_log_elapsed PRIVATE ${INSTRUME
 target_link_libraries(cslg_cancel_traced_program_log_elapsed PRIVATE callstacklogger_log_elapsed Threads::Threads)
 cslg_apply_sanitizers(cslg_cancel_traced_program_log_elapsed)
 
+# LOG_EXCEPTIONS uses a DEDICATED driver (exceptions_traced_program.cpp) whose
+# scenarios end in frames that leave without an exit hook: exceptions caught
+# above instrumented frames (no exit hooks on Clang's unwind path), longjmp
+# over instrumented frames (no exit hooks on either compiler), plus recursion
+# and a throw from a shared library built without instrumentation. Every
+# scenario ends with a marker call whose depth the tests assert exactly.
+cslg_add_flag_variant(log_exceptions exceptions_traced_program.cpp LOG_EXCEPTIONS)
+target_link_libraries(cslg_traced_test_program_log_exceptions PRIVATE Threads::Threads cslg_throwing_lib)
+
 # Combined-flags variant: both output-content macros defined simultaneously.
 # Exercises LOG_ELAPSED's byte-offset math under the line-layout changes
 # introduced by LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the
@@ -293,6 +310,7 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_elapsed>"
     THREADED_TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_elapsed_threaded>"
     TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_elapsed_addr>"
+    TRACED_PROGRAM_LOG_EXCEPTIONS_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions>"
 )
 
 # When the user passes -DLOG_ADDR=ON or -DLOG_ELAPSED=ON globally, the
@@ -309,6 +327,9 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 if(LOG_ELAPSED)
     target_compile_definitions(cslg_integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_ELAPSED)
+endif()
+if(LOG_EXCEPTIONS)
+    target_compile_definitions(cslg_integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_EXCEPTIONS)
 endif()
 
 add_test(NAME cslg_integration_tests COMMAND cslg_integration_tests)

@@ -30,17 +30,26 @@
     #include <chrono>
 #endif
 
+#ifdef LOG_EXCEPTIONS
+    #include "frameReconcile.h"
+    #include <exception>
+    #include <functional>
+    #include <unordered_map>
+    #include <unwind.h>
+#endif
+
 // clang-format off
 #ifndef DISABLE_INSTRUMENTATION
 
 // Initial capacity (in frames) of the per-thread frame stack. NOT a depth limit: the
 // stack is a std::vector that doubles whenever it fills up, so depth accounting stays
 // exact at any call depth and the hot path is allocation-free once the current
-// capacity covers the program's deepest call chain. Each FrameRecord is 1 byte
-// without LOG_ELAPSED and 24 bytes with it (flag + time_point + off_t, padded), so
-// the first reservation costs a tracing thread 2 KB / 48 KB of heap. Growth can only
-// fail under OOM — see frame_overflow_count for how that fallback keeps enter/exit
-// pairing exact.
+// capacity covers the program's deepest call chain. A FrameRecord is 1 byte in the
+// default build, 24 bytes with LOG_ELAPSED (flag + time_point + off_t, padded) and 32
+// bytes more with LOG_EXCEPTIONS (callee, caller, level, uncaught count), so
+// the first reservation costs a tracing thread between 2 KB and 112 KB of heap.
+// Growth can only fail under OOM — see frame_overflow_count for how that fallback
+// keeps enter/exit pairing exact.
 static constexpr std::size_t INITIAL_FRAME_CAPACITY = 2048;
 
 // One record per instrumented frame currently on a thread's stack, pushed by every
@@ -53,6 +62,22 @@ struct FrameRecord {
     // resolution succeeded). Only logged frames adjust current_stack_depth on
     // enter/exit and (with LOG_ELAPSED) get a duration patch on exit.
     bool logged;
+#ifdef LOG_EXCEPTIONS
+    // The frame's identity for the reconciliation rules in frameReconcile.h: the
+    // hook's two arguments and the frame's level (its canonical frame address,
+    // see frame_level()). They let the exit hook find THIS frame's record instead
+    // of blindly popping the top, and let any hook recognize records of frames
+    // that left without an exit hook.
+    const void* callee;
+    const void* caller;
+    const void* level;
+    // std::uncaught_exceptions() at enter. GCC runs the exit hook of a frame the
+    // unwinder passes through while the exception is still in flight, so a
+    // higher count at exit means the frame ended by exception; a destructor (or
+    // its callees) running DURING unwinding sees the same count at both ends and
+    // is not mistaken for one.
+    int uncaught_at_enter;
+#endif
 #ifdef LOG_ELAPSED
     // Enter timestamp, used to compute the elapsed duration on exit.
     std::chrono::steady_clock::time_point enter_time;
@@ -142,6 +167,23 @@ struct PerThreadTraceFile {
 // guard has no lifetime end to worry about and no member-order dependency.
 static thread_local bool t_in_instrumentation = false;
 
+#ifdef LOG_EXCEPTIONS
+// Key of the per-thread level cache (see frame_level()): a hook site, i.e. the
+// return address of one call into a hook. A private key type keeps the
+// std::unordered_map instantiation unique to this TU, for the same reason
+// FrameRecord is private (a user TU cannot supply an instrumented copy of it).
+struct HookSite {
+    const void* address;
+    NO_INSTRUMENT bool operator==(const HookSite& other) const { return address == other.address; }
+};
+
+struct HookSiteHash {
+    NO_INSTRUMENT std::size_t operator()(const HookSite& site) const {
+        return std::hash<const void*>{}(site.address);
+    }
+};
+#endif
+
 // All per-thread state bundled in one struct for readability.
 struct PerThreadState {
     int current_stack_depth = -1;
@@ -158,6 +200,17 @@ struct PerThreadState {
     int frame_overflow_count = 0;
     // Cached gettid() result (0 means not yet resolved). Avoids a syscall per trace call.
     pid_t cached_tid = 0;
+
+#ifdef LOG_EXCEPTIONS
+    // Extent of this thread's own stack (see StackBounds in frameReconcile.h),
+    // resolved once by resolve_thread_stack_bounds() on the thread's first enter.
+    instrumentation::StackBounds stack_bounds;
+    bool stack_bounds_resolved = false;
+    // Per hook site, the distance from the hook's own frame address to the level
+    // (canonical frame address) of the frame that called the hook. Filled by
+    // frame_level(); bounded by the number of hook call sites in the program.
+    std::unordered_map<HookSite, std::ptrdiff_t, HookSiteHash> level_offsets;
+#endif
 
 #ifdef LOG_ELAPSED
     // Running byte position for this thread's trace file. Seeded from the file's
@@ -266,6 +319,124 @@ pid_t current_tid() {
     }
     return t_state.cached_tid;
 }
+
+#ifdef LOG_EXCEPTIONS
+// State of the _Unwind_Backtrace walk in frame_level(): the hook site looked
+// for and the CFA of the frame that resumes there.
+struct LevelSearch {
+    const void* site;
+    std::uintptr_t cfa;
+    bool matched; // the context resuming at `site` has been seen
+    bool found;   // `cfa` is valid
+};
+
+// One step of the walk. The frame that resumes at `site` is recognized by its
+// IP, but its CFA is read from the NEXT context: libgcc stores in a context the
+// CFA of the frame it has just unwound, and LLVM's libunwind reports a frame's
+// stack pointer, which for the caller of the matched frame is that frame's CFA
+// too — the same value from both unwinders.
+NO_INSTRUMENT
+_Unwind_Reason_Code level_search_step(_Unwind_Context* context, void* argument) {
+    LevelSearch* search = static_cast<LevelSearch*>(argument);
+    if (search->matched) {
+        search->cfa = _Unwind_GetCFA(context);
+        search->found = true;
+        return _URC_END_OF_STACK; // anything but _URC_NO_REASON stops the walk
+    }
+    if (reinterpret_cast<const void*>(_Unwind_GetIP(context)) == search->site) {
+        search->matched = true;
+    }
+    return _URC_NO_REASON;
+}
+
+// The level of the frame that called a hook: its canonical frame address (CFA,
+// the stack pointer just before the call that created the frame), derived from
+// the hook's return address (`site`) and the hook's own frame address (`frame`).
+//
+// The distance between `frame` and that CFA is a constant of the hook site: the
+// hook's frame address is the calling frame's stack pointer at the call minus
+// the hook's fixed prologue, and the CFA lies a fixed frame size above that
+// stack pointer. So the distance is measured ONCE per site — an unwinder walk
+// that stops at the frame resuming at `site`, matched by address rather than by
+// frame count so inlining of this helper can never shift it — and every later
+// call is a hash lookup and an addition. The CFA rather than the hook's frame
+// address is what the reconciliation rules need: two different functions called
+// from the same place have the same CFA but frame addresses that differ by their
+// frame sizes.
+//
+// A site whose frame the unwinder cannot describe (an object without unwind
+// tables) gets the smallest distance any frame can have, which keeps its level
+// at or below its true value and the ordering rules sound. Never throws: a
+// failed cache insertion just repeats the measurement on the next call. Runs
+// with no lock held (the walk consults the loader's tables).
+NO_INSTRUMENT
+const void* frame_level(const void* site, const void* frame) {
+    const HookSite key{ site };
+    auto it = t_state.level_offsets.find(key);
+    if (it != t_state.level_offsets.end()) {
+        return static_cast<const char*>(frame) + it->second;
+    }
+    // Smallest possible distance: the call into the frame leaves its return
+    // address 8 bytes below the CFA, and the hook's prologue puts a return
+    // address and a saved frame pointer (16 bytes) below the frame's stack
+    // pointer — 24 bytes for a frame with no locals of its own.
+    std::ptrdiff_t distance = 24;
+    LevelSearch search{ site, 0, false, false };
+    _Unwind_Backtrace(level_search_step, &search);
+    const std::uintptr_t frame_address = reinterpret_cast<std::uintptr_t>(frame);
+    if (search.found && search.cfa > frame_address) {
+        distance = static_cast<std::ptrdiff_t>(search.cfa - frame_address);
+    }
+    try {
+        t_state.level_offsets.emplace(key, distance);
+    } catch (...) {
+        // Out of memory: not cached, measured again next time.
+    }
+    return static_cast<const char*>(frame) + distance;
+}
+
+// Pops `count` records from the top of this thread's frame stack whose frames are
+// gone without having run their exit hook (see frameReconcile.h for how they are
+// recognized). A logged record's frame had raised the depth on enter, and the exit
+// hook that would have lowered it never ran, so the depth comes back down here.
+// Never allocates or throws: pop_back() keeps the vector's capacity.
+NO_INSTRUMENT
+void reclaim_dead_records(std::size_t count) {
+    while (count-- > 0) {
+        const FrameRecord dead = t_state.frames.back();
+        t_state.frames.pop_back();
+        if (dead.logged) {
+            t_state.current_stack_depth--;
+        }
+    }
+}
+
+// Resolves the extent of this thread's own stack once, with pthread_getattr_np().
+// For the main thread glibc reads /proc/self/maps to find the stack mapping, so
+// this may allocate — it is only ever called from inside the enter hook's exception
+// barrier. If the lookup fails the bounds stay unknown, which the reconciliation
+// rules treat as "the thread has one stack" (the case for every program that does
+// not switch stacks itself).
+NO_INSTRUMENT
+void resolve_thread_stack_bounds() {
+    if (t_state.stack_bounds_resolved) {
+        return;
+    }
+    t_state.stack_bounds_resolved = true;
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) != 0) {
+        return;
+    }
+    void* lowest = nullptr;
+    std::size_t size = 0;
+    if (pthread_attr_getstack(&attr, &lowest, &size) == 0 && size > 0) {
+        t_state.stack_bounds.lo = reinterpret_cast<std::uintptr_t>(lowest);
+        t_state.stack_bounds.hi = t_state.stack_bounds.lo + size;
+        t_state.stack_bounds.known = true;
+    }
+    pthread_attr_destroy(&attr);
+}
+#endif
 
 // Writes the "=== New trace run: <timestamp>, thread ID: <tid> ===" header framed
 // above and below by `=` lines of matching length. Called immediately after a
@@ -666,6 +837,15 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 #ifdef LOG_ELAPSED
         off_t line_start = 0;
 #endif
+#ifdef LOG_EXCEPTIONS
+        // This frame's identity for the reconciliation rules (frameReconcile.h). The
+        // hook's return address and frame address must be read here, in the hook
+        // itself; the level is derived from them inside the barrier below, since a
+        // first sight of this hook site caches its distance (frame_level()).
+        const void* const hook_site = __builtin_return_address(0);
+        const void* const hook_frame = __builtin_frame_address(0);
+        instrumentation::FrameKey key{ callee, caller, nullptr };
+#endif
         // Exception barrier: a tracing hook must never inject an exception into the
         // traced program. Everything that can realistically throw (bad_alloc from
         // growing the frame stack, from the std::string work in get_thread_fp's
@@ -694,6 +874,17 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                                                               : t_state.frames.capacity() * 2);
             }
             have_slot = true;
+
+#ifdef LOG_EXCEPTIONS
+            // Frames that left without an exit hook (Clang's exception-unwind path
+            // runs none, longjmp runs none on either compiler) leave records behind.
+            // Reclaim them BEFORE this frame is formatted, so its line lands at the
+            // depth of the frames that are really alive. Rules: frameReconcile.h.
+            resolve_thread_stack_bounds();
+            key.level = frame_level(hook_site, hook_frame);
+            reclaim_dead_records(instrumentation::dead_records_on_enter(
+                    t_state.frames.data(), t_state.frames.size(), key, t_state.stack_bounds));
+#endif
 
             FILE* fp = get_thread_fp();
             if (fp != nullptr) {
@@ -777,6 +968,14 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             // duration field.
             FrameRecord record{};
             record.logged = logged;
+#ifdef LOG_EXCEPTIONS
+            record.callee = key.callee;
+            record.caller = key.caller;
+            // Null only if the barrier above was left before the level was derived
+            // (then the record is an unlogged one whose level nothing will match).
+            record.level = key.level;
+            record.uncaught_at_enter = std::uncaught_exceptions();
+#endif
 #ifdef LOG_ELAPSED
             record.placeholder_offset = -1;
             if (logged) {
@@ -818,13 +1017,14 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
     (void)callee;
     (void)caller;
     if (t_in_instrumentation) { return; }
-#ifdef LOG_ELAPSED
-    // Set the re-entrancy guard because below we call std::chrono::steady_clock::now()
-    // and pwrite() — calls that are safe in trace.cpp (compiled without instrumentation)
-    // but want protection from any exotic indirect instrumentation path. pwrite is
-    // also a cancellation point, so cancellation is blocked (see ScopedCancelDisable). Without
-    // LOG_ELAPSED the exit handler is mutex-free and I/O-free, so we keep the
-    // zero-overhead guarantee by skipping these stores entirely.
+#if defined(LOG_ELAPSED) || defined(LOG_EXCEPTIONS)
+    // Set the re-entrancy guard because below we call std::chrono::steady_clock::now(),
+    // pwrite() and std::uncaught_exceptions() — calls that are safe in trace.cpp
+    // (compiled without instrumentation) but want protection from any exotic indirect
+    // instrumentation path. pwrite is also a cancellation point, so cancellation is
+    // blocked (see ScopedCancelDisable). Without either option the exit handler is
+    // mutex-free and I/O-free, so we keep the zero-overhead guarantee by skipping
+    // these stores entirely.
     t_in_instrumentation = true;
     ScopedCancelDisable no_cancel;
 #endif
@@ -841,6 +1041,21 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
         // counter before popping keeps the pairing exact.
         t_state.frame_overflow_count--;
     } else if (!t_state.frames.empty()) {
+#ifdef LOG_EXCEPTIONS
+        // Find THIS frame's record instead of taking the top one blindly: records
+        // above it belong to frames that left without an exit hook (frameReconcile.h).
+        // `tail_called` tells whether the compiler turned this hook call into a jump
+        // (both do at -O2 for void functions): the frame is already gone then and the
+        // level resolves to the caller's, which the rule accounts for. frame_level()
+        // never throws, so no barrier is needed here.
+        const void* const hook_site = __builtin_return_address(0);
+        const instrumentation::FrameKey key{ callee, caller,
+                                             frame_level(hook_site, __builtin_frame_address(0)) };
+        const bool tail_called = hook_site == caller;
+        const std::size_t index = instrumentation::exiting_record_index(
+                t_state.frames.data(), t_state.frames.size(), key, tail_called, t_state.stack_bounds);
+        reclaim_dead_records(t_state.frames.size() - 1 - index);
+#endif
         // Copy the record out BEFORE popping so LOG_ELAPSED patches the very line
         // the enter handler wrote for this frame. pop_back() never shrinks the
         // vector's capacity, so the hot path stays allocation-free.
@@ -874,7 +1089,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
 #endif
         }
     }
-#ifdef LOG_ELAPSED
+#if defined(LOG_ELAPSED) || defined(LOG_EXCEPTIONS)
     t_in_instrumentation = false;
 #endif
 }
