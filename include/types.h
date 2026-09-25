@@ -62,6 +62,9 @@ struct ResolvedFrameView {
     const char* timestamp = "";
     std::optional<void*> callee_address;
     const std::string* callee_function_name = nullptr;
+    // Base name of the callee (see function_base_name in frameReconcile.h),
+    // cached with the name; used only by LOG_EXCEPTIONS.
+    const std::string* callee_base_name = nullptr;
     const std::string* caller_filename = nullptr;
     std::optional<unsigned int> caller_line_number;
     // Base name (see function_base_name in frameReconcile.h) of the innermost

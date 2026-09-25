@@ -37,7 +37,6 @@
     #include <cstring>
     #include <exception>
     #include <functional>
-    #include <string_view>
     #include <unordered_map>
     #include <unwind.h>
 #endif
@@ -92,11 +91,11 @@ struct FrameRecord {
     const void* callee;
     const void* caller;
     const void* level;
-    // Base name (function_base_name) of the frame's demangled name — a view into
-    // the resolver's leaked name cache, empty for an unlogged frame. Compared
-    // with the base names DWARF gives for inlined functions when records share
-    // a physical frame (see reclaim_dead_inlined_records_*).
-    std::string_view name_base;
+    // Base name (function_base_name) of the frame's demangled name — a pointer
+    // into the resolver's leaked name cache, null for an unlogged frame.
+    // Compared with the base names DWARF gives for inlined functions when
+    // records share a physical frame (see reclaim_dead_inlined_records_*).
+    const std::string* name_base;
     // std::uncaught_exceptions() at enter. GCC runs the exit hook of a frame the
     // unwinder passes through while the exception is still in flight, so a
     // higher count at exit means the frame ended by exception; a destructor (or
@@ -244,6 +243,16 @@ struct PerThreadState {
     // (canonical frame address) of the frame that called the hook. Filled by
     // frame_level(); bounded by the number of hook call sites in the program.
     std::unordered_map<HookSite, std::ptrdiff_t, HookSiteHash> level_offsets;
+    // Direct-mapped front cache of level_offsets, indexed by site address: one
+    // compare on a hit, so the hot path never pays the hash map's machinery
+    // (which, with the library built at -O0, costs more than everything else the
+    // option adds per call). 256 slots x 16 bytes per thread.
+    struct LevelCacheSlot {
+        const void* site;
+        std::ptrdiff_t distance;
+    };
+    static constexpr std::size_t LEVEL_CACHE_SLOTS = 256;
+    LevelCacheSlot level_cache[LEVEL_CACHE_SLOTS] = {};
 #endif
 
 #ifdef CSLG_LINE_PATCHING
@@ -471,9 +480,18 @@ _Unwind_Reason_Code level_search_step(_Unwind_Context* context, void* argument) 
 // with no lock held (the walk consults the loader's tables).
 NO_INSTRUMENT
 const void* frame_level(const void* site, const void* frame) {
+    // Sites are instruction addresses following a call, so the low bits vary:
+    // drop the two lowest and take the next eight as the slot.
+    PerThreadState::LevelCacheSlot& slot =
+            t_state.level_cache[(reinterpret_cast<std::uintptr_t>(site) >> 2) % PerThreadState::LEVEL_CACHE_SLOTS];
+    if (slot.site == site) {
+        return static_cast<const char*>(frame) + slot.distance;
+    }
     const HookSite key{ site };
     auto it = t_state.level_offsets.find(key);
     if (it != t_state.level_offsets.end()) {
+        slot.site = site;
+        slot.distance = it->second;
         return static_cast<const char*>(frame) + it->second;
     }
     // Smallest possible distance: the call into the frame leaves its return
@@ -490,8 +508,10 @@ const void* frame_level(const void* site, const void* frame) {
     try {
         t_state.level_offsets.emplace(key, distance);
     } catch (...) {
-        // Out of memory: not cached, measured again next time.
+        // Out of memory: not in the map, measured again on the next front-cache miss.
     }
+    slot.site = site;
+    slot.distance = distance;
     return static_cast<const char*>(frame) + distance;
 }
 
@@ -526,7 +546,7 @@ void reclaim_dead_records(std::size_t count, char how) {
 // function_base_name in frameReconcile.h).
 NO_INSTRUMENT
 bool record_has_base_name(const FrameRecord& record, const std::string& base) {
-    return !record.name_base.empty() && record.name_base == base;
+    return record.name_base != nullptr && !record.name_base->empty() && *record.name_base == base;
 }
 
 // Reclaims dead inlined records sitting ABOVE the parent of a frame that is
@@ -1046,6 +1066,25 @@ constexpr const char* EVENT_COLUMN_TERMINATE = "";
 // terminate line). Runs inside the calling function's guard, cancellation block
 // and exception barrier; the resolver and the demangler may allocate on a first
 // sight.
+// Demangled exception type names, memoized per type_info (demangling allocates
+// and costs microseconds; a program throws the same few types over and over).
+// Leaked like the resolver's caches; its own small mutex since events are rare.
+NO_INSTRUMENT
+const std::string& exception_type_name(const std::type_info* type) {
+    static const std::string unknown("<unknown type>");
+    if (type == nullptr) {
+        return unknown;
+    }
+    static std::mutex* const mutex = new std::mutex;
+    static auto* const cache = new std::unordered_map<const std::type_info*, std::string>();
+    std::lock_guard<std::mutex> lock(*mutex);
+    auto it = cache->find(type);
+    if (it == cache->end()) {
+        it = cache->emplace(type, instrumentation::demangle_symbol(type->name())).first;
+    }
+    return it->second;
+}
+
 NO_INSTRUMENT
 void write_event_line(const char* verb, const char* site_label, const char* suffix, const char* column,
                       const std::type_info* type, const char* what, const void* site) {
@@ -1057,8 +1096,7 @@ void write_event_line(const char* verb, const char* site_label, const char* suff
     if (site != nullptr) {
         instrumentation::resolve_site(const_cast<void*>(site), location);
     }
-    const std::string type_name =
-            type != nullptr ? instrumentation::demangle_symbol(type->name()) : std::string("<unknown type>");
+    const std::string& type_name = exception_type_name(type);
 
     char timestamp[utils::PRETTY_TIME_BUF_SIZE];
     utils::pretty_time_into(timestamp, sizeof(timestamp));
@@ -1229,7 +1267,7 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         const void* const hook_site = __builtin_return_address(0);
         const void* const hook_frame = __builtin_frame_address(0);
         instrumentation::FrameKey key{ callee, caller, nullptr };
-        const std::string* frame_name = nullptr;
+        const std::string* frame_base_name = nullptr;
 #endif
         // Exception barrier: a tracing hook must never inject an exception into the
         // traced program. Everything that can realistically throw (bad_alloc from
@@ -1286,8 +1324,8 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                 instrumentation::ResolvedFrameView frame;
                 if (instrumentation::resolve(callee, caller, frame)) {
 #ifdef LOG_EXCEPTIONS
-                    // Views into the leaked name cache: valid for the process lifetime.
-                    frame_name = frame.callee_function_name;
+                    // Pointer into the leaked name cache: valid for the process lifetime.
+                    frame_base_name = frame.callee_base_name;
                     // The call site names this frame's direct parent; dead inlined
                     // frames above the parent's record are reclaimed before this
                     // line's depth is fixed.
@@ -1368,9 +1406,7 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             // Null only if the barrier above was left before the level was derived
             // (then the record is an unlogged one whose level nothing will match).
             record.level = key.level;
-            record.name_base = (logged && frame_name != nullptr)
-                    ? instrumentation::function_base_name(*frame_name)
-                    : std::string_view();
+            record.name_base = logged ? frame_base_name : nullptr;
             record.uncaught_at_enter = std::uncaught_exceptions();
 #endif
 #ifdef CSLG_LINE_PATCHING

@@ -434,10 +434,11 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
         check_bfd_initialized();
         auto name_it = name_cache().find(callee_address);
         if (name_it != name_cache().end()) {
-            if (!name_it->second) {
+            if (!name_it->second.name) {
                 return false;
             }
-            out.callee_function_name = &name_it->second.value();
+            out.callee_function_name = &name_it->second.name.value();
+            out.callee_base_name = &name_it->second.base;
             have_name = true;
         }
         auto loc_it = location_cache().find(caller_address);
@@ -486,13 +487,14 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
             if (name_it == name_cache().end()) {
                 name_it = name_cache()
                                   .emplace(callee_address,
-                                           resolve_function_name(callee_address, callee_dl))
+                                           cache_name(resolve_function_name(callee_address, callee_dl)))
                                   .first;
             }
-            if (!name_it->second) {
+            if (!name_it->second.name) {
                 return false;
             }
-            out.callee_function_name = &name_it->second.value();
+            out.callee_function_name = &name_it->second.name.value();
+            out.callee_base_name = &name_it->second.base;
         }
         if (!have_location) {
             auto loc_it = location_cache().find(caller_address);
@@ -512,6 +514,15 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
     out.callee_address = std::make_optional(callee_address);
 #endif
     return true;
+}
+
+bfdResolver::CachedName bfdResolver::cache_name(std::optional<std::string> name) {
+    CachedName cached;
+    if (name) {
+        cached.base = std::string(function_base_name(*name));
+    }
+    cached.name = std::move(name);
+    return cached;
 }
 
 void bfdResolver::resolve_location(void* address, ResolvedFrameView& out) {

@@ -172,6 +172,15 @@ private:
     static std::optional<std::string> resolve_function_name(void* callee_address,
                                                             const Dl_info* dl_info);
 
+    /// One memoized callee name: the demangled name (nullopt = filtered / not
+    /// loggable) and its base name (function_base_name in frameReconcile.h,
+    /// used by the LOG_EXCEPTIONS reconciliation), computed once here so the
+    /// enter hook never parses a name on the hot path.
+    struct CachedName {
+        std::optional<std::string> name;
+        std::string base;
+    };
+
     /// One memoized call-site location: the file (or a fallback text), the line
     /// (none when unknown) and the base name of the innermost function containing
     /// the address (empty when unknown; see ResolvedFrameView::caller_function_base).
@@ -277,10 +286,14 @@ private:
     // reuses an address keeps serving the old entry — the same accepted
     // trade-off as bfds(). Protected by s_bfd_mutex.
     NO_INSTRUMENT
-    static std::unordered_map<void*, std::optional<std::string>>& name_cache() {
-        static auto* instance = new std::unordered_map<void*, std::optional<std::string>>();
+    static std::unordered_map<void*, CachedName>& name_cache() {
+        static auto* instance = new std::unordered_map<void*, CachedName>();
         return *instance;
     }
+
+    /// Wraps a freshly resolved callee name for the name cache.
+    NO_INSTRUMENT
+    static CachedName cache_name(std::optional<std::string> name);
 
     NO_INSTRUMENT
     static std::unordered_map<void*, CachedLocation>& location_cache() {
