@@ -990,11 +990,7 @@ TEST(FilteredOverflowTest, UnloggedFramesBeyondInitialCapacityKeepDepthExact) {
 // "Compiler-specific instrumentation"), so the test is compiled out there.
 // ============================================================================
 
-TEST(ExceptionUnwindTest, DepthConsistentAfterCatchOnGcc) {
-#ifndef CSLG_COMPILER_IS_GNU
-    GTEST_SKIP() << "Skipped: Clang does not emit exit hooks on the "
-                    "exception-unwind path (documented limitation).";
-#else
+TEST(ExceptionUnwindTest, DepthConsistentAfterCatch) {
     char tmp_path[] = "/tmp/cslg_exception_XXXXXX";
     int fd = mkstemp(tmp_path);
     ASSERT_GE(fd, 0) << "mkstemp failed";
@@ -1016,9 +1012,10 @@ TEST(ExceptionUnwindTest, DepthConsistentAfterCatchOnGcc) {
             << "exception_mid entry missing";
 
     // Pairing proof: after the catch, the marker must trace at the same depth
-    // as exception_catcher (both are direct children of main). If the unwound
-    // frames' exits had been skipped, the stale slots would shift the marker
-    // two levels deeper.
+    // as exception_catcher (both are direct children of main). GCC ran the exit
+    // hooks of the two unwound frames; Clang ran none, and their stale records
+    // would shift the marker two levels deeper if the reconciliation had not
+    // reclaimed them at the marker's enter.
     int catcher_depth = -1;
     int marker_depth = -1;
     for (const auto& line : lines) {
@@ -1032,11 +1029,70 @@ TEST(ExceptionUnwindTest, DepthConsistentAfterCatchOnGcc) {
     ASSERT_GE(catcher_depth, 0) << "exception_catcher line not found";
     ASSERT_GE(marker_depth, 0) << "post_catch_marker line not found";
     EXPECT_EQ(marker_depth, catcher_depth)
-            << "post_catch_marker traced at depth " << marker_depth
-            << " but exception_catcher was at depth " << catcher_depth
-            << " — exit hooks on the unwind path did not fire (GCC pairing "
-               "guarantee regressed?).";
-#endif
+            << "post_catch_marker depth " << marker_depth << " != exception_catcher depth " << catcher_depth
+            << " — the frames the exception unwound were not reclaimed. Trace:\n" << content;
+}
+
+// ============================================================================
+// longjmp() over instrumented frames: their exit hooks never run, on either
+// compiler. The reconciliation reclaims the jumped-over records at the next
+// hook, so the calls that follow a jump sit at their true depth (README,
+// "Compiler-specific instrumentation"; longjmp_traced_program.cpp).
+// ============================================================================
+
+namespace {
+
+// Depth of the first line whose function name contains `function`, or -1.
+int first_depth_of(const std::vector<std::string>& lines, const std::string& function) {
+    for (const auto& line : lines) {
+        if (line.find(function) != std::string::npos) {
+            return count_indentation_depth(line);
+        }
+    }
+    return -1;
+}
+
+} // namespace
+
+TEST(LongjmpTest, CallsAfterAJumpSitAtTheirTrueDepth) {
+    char tmp_path[] = "/tmp/cslg_longjmp_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    ASSERT_GE(fd, 0) << "mkstemp failed";
+    close(fd);
+
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(tmp_path) + "\" \""
+                    + LONGJMP_TRACED_PROGRAM_PATH + "\" > /dev/null 2>&1";
+    int ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0) << "longjmp_traced_program failed, exit=" << ret;
+
+    std::string content = read_file(tmp_path);
+    unlink(tmp_path);
+    std::vector<std::string> lines = split_lines(content);
+
+    // main -> jump_outer(1) -> jump_mid(2) -> jump_leaf(3) jumps back into
+    // jump_outer, which then calls post_jump_marker: a child of jump_outer, not
+    // of the two frames the jump skipped.
+    EXPECT_EQ(first_depth_of(lines, "jump_outer"), 1) << content;
+    EXPECT_EQ(first_depth_of(lines, "jump_mid"), 2) << content;
+    EXPECT_EQ(first_depth_of(lines, "jump_leaf"), 3) << content;
+    EXPECT_EQ(first_depth_of(lines, "post_jump_marker"), 2)
+            << "the call after the jump must sit under jump_outer:\n" << content;
+
+    // A retry loop: jump_loop(1) calls jump_loop_leaf(2) from one call site three
+    // times, each jumping back out; every re-entry and the marker after the loop
+    // sit at their true depth.
+    EXPECT_EQ(first_depth_of(lines, "jump_loop()"), 1) << content;
+    int leaf_lines = 0;
+    for (const auto& line : lines) {
+        if (line.find("jump_loop_leaf") != std::string::npos) {
+            ++leaf_lines;
+            EXPECT_EQ(count_indentation_depth(line), 2) << line;
+        }
+    }
+    EXPECT_EQ(leaf_lines, 3) << content;
+    EXPECT_EQ(first_depth_of(lines, "loop_marker"), 2) << "the call after the loop sits under jump_loop:\n"
+                                                        << content;
+    EXPECT_EQ(first_depth_of(lines, "final_marker"), 1) << content;
 }
 
 // ============================================================================

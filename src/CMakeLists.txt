@@ -95,7 +95,9 @@ if(LOG_EXCEPTIONS)
     # DWARF 4 and 5 objects mix freely in one link, and every debugger reads
     # DWARF 4. A consumer that passes -gdwarf-5 after our flag gets the
     # self-healing behavior described above. Added only with LOG_EXCEPTIONS=ON
-    # under Clang; GCC keeps its default.
+    # under Clang; GCC keeps its default, and so does a plain Clang build, whose
+    # reconciliation (on in every build) then reclaims a dead inlined frame when
+    # its host returns instead of at once.
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(callstacklogger INTERFACE -gdwarf-4)
     endif()

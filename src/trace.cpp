@@ -9,6 +9,7 @@
 
 #include "callStack.h"
 #include "format.h"
+#include "frameReconcile.h"
 #include "prettyTime.h"
 #include "traceFilePath.h"
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <climits>
 #include <cstdlib>
 #include <fcntl.h>
+#include <functional>
 #include <mutex>
 #include <pthread.h>
 #include <stdio.h>
@@ -23,6 +25,8 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <unordered_map>
+#include <unwind.h>
 #include <vector>
 
 #ifdef LOG_ELAPSED
@@ -33,12 +37,8 @@
 #ifdef LOG_EXCEPTIONS
     #include "eventFormat.h"
     #include "exceptionEvents.h"
-    #include "frameReconcile.h"
     #include <cstring>
     #include <exception>
-    #include <functional>
-    #include <unordered_map>
-    #include <unwind.h>
 #endif
 
 // In-place line patching — the second, non-O_APPEND descriptor, the per-thread
@@ -82,7 +82,6 @@ struct FrameRecord {
     // resolution succeeded). Only logged frames adjust current_stack_depth on
     // enter/exit and (with LOG_ELAPSED) get a duration patch on exit.
     bool logged;
-#ifdef LOG_EXCEPTIONS
     // The frame's identity for the reconciliation rules in frameReconcile.h: the
     // hook's two arguments and the frame's level (its canonical frame address,
     // see frame_level()). They let the exit hook find THIS frame's record instead
@@ -96,6 +95,7 @@ struct FrameRecord {
     // Compared with the base names DWARF gives for inlined functions when
     // records share a physical frame (see reclaim_dead_inlined_records_*).
     const std::string* name_base;
+#ifdef LOG_EXCEPTIONS
     // std::uncaught_exceptions() at enter. GCC runs the exit hook of a frame the
     // unwinder passes through while the exception is still in flight, so a
     // higher count at exit means the frame ended by exception; a destructor (or
@@ -200,7 +200,6 @@ struct PerThreadTraceFile {
 // guard has no lifetime end to worry about and no member-order dependency.
 static thread_local bool t_in_instrumentation = false;
 
-#ifdef LOG_EXCEPTIONS
 // Key of the per-thread level cache (see frame_level()): a hook site, i.e. the
 // return address of one call into a hook. A private key type keeps the
 // std::unordered_map instantiation unique to this TU, for the same reason
@@ -215,7 +214,6 @@ struct HookSiteHash {
         return std::hash<const void*>{}(site.address);
     }
 };
-#endif
 
 // All per-thread state bundled in one struct for readability.
 struct PerThreadState {
@@ -234,7 +232,6 @@ struct PerThreadState {
     // Cached gettid() result (0 means not yet resolved). Avoids a syscall per trace call.
     pid_t cached_tid = 0;
 
-#ifdef LOG_EXCEPTIONS
     // Extent of this thread's own stack (see StackBounds in frameReconcile.h),
     // resolved once by resolve_thread_stack_bounds() on the thread's first enter.
     instrumentation::StackBounds stack_bounds;
@@ -253,7 +250,6 @@ struct PerThreadState {
     };
     static constexpr std::size_t LEVEL_CACHE_SLOTS = 256;
     LevelCacheSlot level_cache[LEVEL_CACHE_SLOTS] = {};
-#endif
 
 #ifdef CSLG_LINE_PATCHING
     // Running byte position for this thread's trace file. Seeded from the file's
@@ -432,6 +428,16 @@ void mark_frame_end(const FrameRecord& record, char how, const char* field) {
 
 // State of the _Unwind_Backtrace walk in frame_level(): the hook site looked
 // for and the CFA of the frame that resumes there.
+#endif // LOG_EXCEPTIONS: the marks
+
+// Where the hooks found the records they reclaim. With LOG_EXCEPTIONS it decides
+// the mark the lines get: records found dead at an ENTER while an exception is in
+// flight were unwound by it (this frame runs from a destructor during the
+// unwinding, under Clang), otherwise a non-local jump skipped them; records
+// found at an EXIT were skipped by a jump (or unwound under Clang and only
+// noticed now); records found at a CATCH were unwound by that exception.
+enum class Reclaim { at_enter, at_exit, at_catch };
+
 struct LevelSearch {
     const void* site;
     std::uintptr_t cfa;
@@ -522,27 +528,40 @@ const void* frame_level(const void* site, const void* frame) {
 
 // Pops `count` records from the top of this thread's frame stack whose frames are
 // gone without having run their exit hook (see frameReconcile.h for how they are
-// recognized) and marks their lines with `how` (see mark_frame_end). A logged
-// record's frame had raised the depth on enter, and the exit hook that would have
-// lowered it never ran, so the depth comes back down here. Never allocates or
-// throws: pop_back() keeps the vector's capacity.
+// recognized). A logged record's frame had raised the depth on enter, and the
+// exit hook that would have lowered it never ran, so the depth comes back down
+// here. With LOG_EXCEPTIONS their lines are marked too (see mark_frame_end and
+// Reclaim); the runtime is asked whether an exception is in flight only when
+// there is something to mark, never on the hot path. Never allocates or throws:
+// pop_back() keeps the vector's capacity.
 NO_INSTRUMENT
-void reclaim_dead_records(std::size_t count, char how) {
-#ifdef LOG_ELAPSED
+void reclaim_dead_records(std::size_t count, Reclaim where) {
+#ifdef LOG_EXCEPTIONS
+    char how = utils::FRAME_END_JUMP;
+    if (count > 0
+        && (where == Reclaim::at_catch || (where == Reclaim::at_enter && std::uncaught_exceptions() > 0))) {
+        how = utils::FRAME_END_EXCEPTION;
+    }
+    #ifdef LOG_ELAPSED
     // No exit hook ran for these frames, so no duration exists: the placeholder
     // becomes the flagged "[  unwound ]".
     char field[utils::DURATION_FIELD_WIDTH + 1];
     std::memcpy(field, utils::DURATION_UNWOUND, sizeof(field));
     utils::set_duration_flag(field, how);
-#else
+    #else
     const char* const field = nullptr;
+    #endif
+#else
+    (void)where;
 #endif
     while (count-- > 0) {
         const FrameRecord dead = t_state.frames.back();
         t_state.frames.pop_back();
         if (dead.logged) {
             t_state.current_stack_depth--;
+#ifdef LOG_EXCEPTIONS
             mark_frame_end(dead, how, field);
+#endif
         }
     }
 }
@@ -565,7 +584,7 @@ bool record_has_base_name(const FrameRecord& record, const std::string& base) {
 // touched, when the parent's record is not found in its group.
 NO_INSTRUMENT
 void reclaim_dead_inlined_records_above_parent(const instrumentation::FrameKey& key,
-                                               const std::string* parent_base, char how) {
+                                               const std::string* parent_base, Reclaim where) {
     if (parent_base == nullptr || parent_base->empty() || t_state.frames.empty()) {
         return;
     }
@@ -581,7 +600,7 @@ void reclaim_dead_inlined_records_above_parent(const instrumentation::FrameKey& 
                                  [parent_base](const FrameRecord& record) {
                                      return record_has_base_name(record, *parent_base);
                                  }),
-                         how);
+                         where);
 }
 
 // Reclaims dead records that share the level of the frame ENTERING at `site`
@@ -598,7 +617,7 @@ void reclaim_dead_inlined_records_above_parent(const instrumentation::FrameKey& 
 //   * then, if the chain names the entering frame's inline host, every record
 //     of the group above the host's record is a dead inlined frame.
 NO_INSTRUMENT
-void reclaim_dead_inlined_records_on_enter(const instrumentation::FrameKey& key, const void* site, char how) {
+void reclaim_dead_inlined_records_on_enter(const instrumentation::FrameKey& key, const void* site, Reclaim where) {
     if (t_state.frames.empty() || t_state.frames.back().level != key.level
         || !instrumentation::on_thread_stack(t_state.stack_bounds, key.level)) {
         return;
@@ -611,7 +630,7 @@ void reclaim_dead_inlined_records_on_enter(const instrumentation::FrameKey& key,
     while (!recursive_inline && !t_state.frames.empty()
            && instrumentation::same_activation_site(t_state.frames.back(), key)
            && t_state.frames.back().level == key.level) {
-        reclaim_dead_records(1, how);
+        reclaim_dead_records(1, where);
     }
     if (chain->size() >= 2) {
         const std::string& host = (*chain)[1];
@@ -620,7 +639,7 @@ void reclaim_dead_inlined_records_on_enter(const instrumentation::FrameKey& key,
                                      [&host](const FrameRecord& record) {
                                          return record_has_base_name(record, host);
                                      }),
-                             how);
+                             where);
     }
 }
 
@@ -628,6 +647,7 @@ void reclaim_dead_inlined_records_on_enter(const instrumentation::FrameKey& key,
 // catcher's physical frame that the exception unwound. `chain` is the inline
 // chain at the catch site, whose innermost entry is the function that caught;
 // every record of the group above that function's record is dead.
+#ifdef LOG_EXCEPTIONS
 NO_INSTRUMENT
 void reclaim_dead_inlined_records_on_catch(const void* catch_level, const void* site) {
     if (t_state.frames.empty() || t_state.frames.back().level != catch_level
@@ -644,8 +664,9 @@ void reclaim_dead_inlined_records_on_catch(const void* catch_level, const void* 
                                  [&catcher](const FrameRecord& record) {
                                      return record_has_base_name(record, catcher);
                                  }),
-                         utils::FRAME_END_EXCEPTION);
+                         Reclaim::at_catch);
 }
+#endif // LOG_EXCEPTIONS: the catch-time reclaim
 
 // Resolves the extent of this thread's own stack once, with pthread_getattr_np().
 // For the main thread glibc reads /proc/self/maps to find the stack mapping, so
@@ -672,7 +693,6 @@ void resolve_thread_stack_bounds() {
     }
     pthread_attr_destroy(&attr);
 }
-#endif
 
 // Writes the "=== New trace run: <timestamp>, thread ID: <tid> ===" header framed
 // above and below by `=` lines of matching length. Called immediately after a
@@ -1287,7 +1307,7 @@ bool on_catch(const std::type_info* type, const char* what, bool dependent, cons
             reclaim_dead_records(instrumentation::dead_records_on_catch(t_state.frames.data(),
                                                                         t_state.frames.size(), stub_level + 1,
                                                                         t_state.stack_bounds),
-                                 utils::FRAME_END_EXCEPTION);
+                                 Reclaim::at_catch);
             write_event_line("terminate", "thrown across a noexcept boundary", "", EVENT_COLUMN_TERMINATE,
                              type_name, what, EventSite{});
             terminating = true;
@@ -1304,7 +1324,7 @@ bool on_catch(const std::type_info* type, const char* what, bool dependent, cons
             reclaim_dead_records(instrumentation::dead_records_on_catch(t_state.frames.data(),
                                                                         t_state.frames.size(), catch_level,
                                                                         t_state.stack_bounds),
-                                 utils::FRAME_END_EXCEPTION);
+                                 Reclaim::at_catch);
             // Frames inlined into the catcher that the exception unwound share the
             // catcher's level; the DWARF inline chain at the catch site tells them
             // apart.
@@ -1362,7 +1382,6 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 #ifdef CSLG_LINE_PATCHING
         off_t line_start = 0;
 #endif
-#ifdef LOG_EXCEPTIONS
         // This frame's identity for the reconciliation rules (frameReconcile.h). The
         // hook's return address and frame address must be read here, in the hook
         // itself; the level is derived from them inside the barrier below, since a
@@ -1371,7 +1390,6 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         const void* const hook_frame = __builtin_frame_address(0);
         instrumentation::FrameKey key{ callee, caller, nullptr };
         const std::string* frame_base_name = nullptr;
-#endif
         // Exception barrier: a tracing hook must never inject an exception into the
         // traced program. Everything that can realistically throw (bad_alloc from
         // growing the frame stack, from the std::string work in get_thread_fp's
@@ -1401,39 +1419,32 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             }
             have_slot = true;
 
-#ifdef LOG_EXCEPTIONS
             // Frames that left without an exit hook (Clang's exception-unwind path
             // runs none, longjmp runs none on either compiler) leave records behind.
             // Reclaim them BEFORE this frame is formatted, so its line lands at the
             // depth of the frames that are really alive. Rules: frameReconcile.h.
-            // A dead record found while an exception is in flight (this frame runs
-            // from a destructor during unwinding, under Clang) was unwound by that
-            // exception; otherwise a non-local jump skipped it.
             resolve_thread_stack_bounds();
             key.level = frame_level(hook_site, hook_frame);
-            const char dead_how = std::uncaught_exceptions() > 0 ? utils::FRAME_END_EXCEPTION
-                                                                 : utils::FRAME_END_JUMP;
             reclaim_dead_records(instrumentation::dead_records_on_enter(
                                          t_state.frames.data(), t_state.frames.size(), key,
                                          t_state.stack_bounds),
-                                 dead_how);
+                                 Reclaim::at_enter);
             // Records at this frame's own level (inlined activations, retry loops)
             // need the DWARF inline chain to be told apart — cold, cached per site.
-            reclaim_dead_inlined_records_on_enter(key, static_cast<const char*>(hook_site) - 1, dead_how);
-#endif
+            reclaim_dead_inlined_records_on_enter(key, static_cast<const char*>(hook_site) - 1,
+                                                  Reclaim::at_enter);
 
             FILE* fp = get_thread_fp();
             if (fp != nullptr) {
                 instrumentation::ResolvedFrameView frame;
                 if (instrumentation::resolve(callee, caller, frame)) {
-#ifdef LOG_EXCEPTIONS
                     // Pointer into the leaked name cache: valid for the process lifetime.
                     frame_base_name = frame.callee_base_name;
                     // The call site names this frame's direct parent; dead inlined
                     // frames above the parent's record are reclaimed before this
                     // line's depth is fixed.
-                    reclaim_dead_inlined_records_above_parent(key, frame.caller_function_base, dead_how);
-#endif
+                    reclaim_dead_inlined_records_above_parent(key, frame.caller_function_base,
+                                                              Reclaim::at_enter);
                     // Timestamp only for frames that are actually logged; the view
                     // points at this stack buffer for the rest of the hook.
                     char timestamp[utils::PRETTY_TIME_BUF_SIZE];
@@ -1503,13 +1514,13 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             // duration field.
             FrameRecord record{};
             record.logged = logged;
-#ifdef LOG_EXCEPTIONS
             record.callee = key.callee;
             record.caller = key.caller;
             // Null only if the barrier above was left before the level was derived
             // (then the record is an unlogged one whose level nothing will match).
             record.level = key.level;
             record.name_base = logged ? frame_base_name : nullptr;
+#ifdef LOG_EXCEPTIONS
             record.uncaught_at_enter = std::uncaught_exceptions();
 #endif
 #ifdef CSLG_LINE_PATCHING
@@ -1547,21 +1558,16 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
 
 extern "C" NO_INSTRUMENT
 void __cyg_profile_func_exit(void *callee, void *caller) {
-    // The exit hook needs neither address: pairing is positional (LIFO pop of the
-    // per-thread frame stack). The parameters exist because the compiler-emitted
-    // call passes them; silence -Wextra's unused-parameter warning.
-    (void)callee;
-    (void)caller;
     if (t_in_instrumentation) { return; }
-#if defined(LOG_ELAPSED) || defined(LOG_EXCEPTIONS)
-    // Set the re-entrancy guard because below we call std::chrono::steady_clock::now(),
-    // pwrite() and std::uncaught_exceptions() — calls that are safe in trace.cpp
-    // (compiled without instrumentation) but want protection from any exotic indirect
-    // instrumentation path. pwrite is also a cancellation point, so cancellation is
-    // blocked (see ScopedCancelDisable). Without either option the exit handler is
-    // mutex-free and I/O-free, so we keep the zero-overhead guarantee by skipping
-    // these stores entirely.
+    // The re-entrancy guard: the work below (the level lookup, whose first sight
+    // of a hook site runs the unwinder and fills a hash map; with the options the
+    // clock reads, std::uncaught_exceptions() and pwrite()) is safe in trace.cpp,
+    // which is compiled without instrumentation, but wants protection from any
+    // exotic indirect instrumentation path. Two stores.
     t_in_instrumentation = true;
+#ifdef CSLG_LINE_PATCHING
+    // pwrite() is a cancellation point, so cancellation is blocked around it (see
+    // ScopedCancelDisable); without in-place patching the exit hook has none.
     ScopedCancelDisable no_cancel;
 #endif
     // Pop a frame record for EVERY call — the exact mirror of the unconditional push
@@ -1577,7 +1583,6 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
         // counter before popping keeps the pairing exact.
         t_state.frame_overflow_count--;
     } else if (!t_state.frames.empty()) {
-#ifdef LOG_EXCEPTIONS
         // Find THIS frame's record instead of taking the top one blindly: records
         // above it belong to frames that left without an exit hook (frameReconcile.h).
         // `tail_called` tells whether the compiler turned this hook call into a jump
@@ -1590,8 +1595,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
         const bool tail_called = hook_site == caller;
         const std::size_t index = instrumentation::exiting_record_index(
                 t_state.frames.data(), t_state.frames.size(), key, tail_called, t_state.stack_bounds);
-        reclaim_dead_records(t_state.frames.size() - 1 - index, utils::FRAME_END_JUMP);
-#endif
+        reclaim_dead_records(t_state.frames.size() - 1 - index, Reclaim::at_exit);
         // Copy the record out BEFORE popping so LOG_ELAPSED patches the very line
         // the enter handler wrote for this frame. pop_back() never shrinks the
         // vector's capacity, so the hot path stays allocation-free.
@@ -1632,9 +1636,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
 #endif
         }
     }
-#if defined(LOG_ELAPSED) || defined(LOG_EXCEPTIONS)
     t_in_instrumentation = false;
-#endif
 }
 
 #else

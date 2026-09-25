@@ -391,11 +391,13 @@ near the tail identifies exactly which frames were active at the crash
 site — useful debugging signal that's hard to get otherwise. See README's
 "Per-function timing" section for an example.
 
-**Per-frame state.** With LOG_ELAPSED, `FrameRecord` (the element type of
-the per-thread `frames` stack) carries `std::chrono::steady_clock::time_point
-enter_time` next to the `logged` flag, and — shared with LOG_EXCEPTIONS under
-`CSLG_LINE_PATCHING` — the line's `off_t line_start` (-1 when the cursor was
-untrusted) and `int depth`. The record is pushed by the enter hook and copied
+**Per-frame state.** `FrameRecord` (the element type of the per-thread
+`frames` stack) always carries the `logged` flag and the frame's `callee`,
+`caller`, `level` and `name_base` for the reconciliation (40 bytes per record;
+it was one byte before the reconciliation ran in every build). With LOG_ELAPSED
+it also carries `std::chrono::steady_clock::time_point enter_time`, and —
+shared with LOG_EXCEPTIONS under `CSLG_LINE_PATCHING` — the line's `off_t
+line_start` (-1 when the cursor was untrusted) and `int depth`. The record is pushed by the enter hook and copied
 out by the exit hook's pop, so enter/exit always operate on the matching frame.
 The exit handler computes `now() - record.enter_time`, formats into a 12-byte
 buffer, and patches it at `line_start + PLACEHOLDER_OFFSET_IN_LINE` through
@@ -466,20 +468,25 @@ A `thread_local` `current_stack_depth` counter in `trace.cpp`:
 The `utils::format()` function in `format.h` uses this depth to produce tree-style indentation
 with `|  ` and `|_ ` prefixes.
 
-### Frame Reconciliation After Non-Local Exits (LOG_EXCEPTIONS)
+### Frame Reconciliation After Non-Local Exits (every build)
 
-Opt-in via `-DLOG_EXCEPTIONS=ON` (PRIVATE macro on the library, like the other
-`LOG_*` flags; the default build compiles none of it — it differs from before
-only by two pointer fields in `ResolvedFrameView` and the base name the
-resolver stores per callee, so the hooks' stack layout, not their logic, moved).
+On in every build, with no option and no macro: the level rules and the DWARF
+inline-chain rules below run in the default library. `LOG_EXCEPTIONS` adds only
+what needs the interposers or the patch descriptor: the marks on reclaimed lines,
+the reclaim at the moment of a catch, and the event lines (next section).
+Measured cost of the reconciliation: about 0.3 µs per traced call with the
+library at -O0 and under 0.1 µs at RelWithDebInfo on the reference host
+(README's cost table). It started life inside `LOG_EXCEPTIONS` and moved to every build
+once its cost was measured: the two drifts it repairs (below) had been
+documented limitations of the tracer since the beginning.
 
 The positional enter/exit pairing above breaks silently whenever a frame leaves
 WITHOUT running its exit hook: Clang emits no exit hook on the exception-unwind
 path, and `longjmp` runs none on either compiler. The stale record makes every
 later exit pop the wrong record (indentation drifts, LOG_ELAPSED patches the
-wrong lines). With the option on, every `FrameRecord` also carries the frame's
-`callee`, `caller`, `level` and `uncaught_at_enter`, and the hooks apply the
-pure rules in `include/frameReconcile.h` (templates over the record type, so
+wrong lines). Every `FrameRecord` carries the frame's `callee`, `caller`,
+`level` and `name_base` (and, with LOG_EXCEPTIONS, `uncaught_at_enter`), and
+the hooks apply the pure rules in `include/frameReconcile.h` (templates over the record type, so
 `FrameRecord` stays private to `trace.cpp`; unit-tested with synthetic records
 in `tests/unit/test_frame_reconcile.cpp`):
 
@@ -545,8 +552,9 @@ in `tests/unit/test_frame_reconcile.cpp`):
   2.46 does not walk (elfutils/llvm-symbolizer do; `-gdwarf-4` works), so
   `src/CMakeLists.txt` adds `-gdwarf-4` to the library's INTERFACE compile
   options under Clang when LOG_EXCEPTIONS is on (the test variant function
-  does the same); an override to DWARF 5 falls back to the lazy behavior
-  (reclaimed when the host exits). Pinned by `LogExceptionsInlinedTest`
+  does the same); a plain Clang build keeps DWARF 5, and so does an override
+  to it: both fall back to the lazy behavior (a dead inlined frame is reclaimed
+  when its host exits, still far better than the old permanent drift). Pinned by `LogExceptionsInlinedTest`
   (driver `inlined_traced_program.cpp`, `always_inline` frames, compiled at -O2
   unconditionally).
 - **Thread-stack confinement**: `pthread_getattr_np` bounds, resolved once per
@@ -554,10 +562,19 @@ in `tests/unit/test_frame_reconcile.cpp`):
   /proc/self/maps). Records off the thread stack (fibers, sigaltstack) are
   never compared and a frame running off it gets the positional behavior —
   fibers stay exactly as (un)supported as before.
-- `reclaim_dead_records(count, how)` pops the dead records, lowers the depth for
-  the logged ones and marks their lines (below); the exit hook sets the
-  re-entrancy guard and blocks cancellation under this option too
-  (`std::uncaught_exceptions()`, hash lookups, pwrite).
+- `reclaim_dead_records(count, where)` pops the dead records and lowers the
+  depth for the logged ones; `where` (`Reclaim::at_enter` / `at_exit` /
+  `at_catch`) tells LOG_EXCEPTIONS which mark their lines get (below), and the
+  `std::uncaught_exceptions()` read that decides between `!` and `~` at an
+  enter runs only when there is something to mark, never on the hot path.
+- `frame_level()` accepts a measured level distance only when the unwinder's
+  CFA lies above the hook's frame AND on the thread's own stack; otherwise the
+  site keeps the minimum distance (24 bytes), which underestimates the level
+  and can only keep a dead record longer, never pop a live one.
+- The exit hook sets the re-entrancy guard in every build (the level lookup's
+  first sight of a hook site runs the unwinder and fills a hash map) and blocks
+  cancellation only with in-place patching (`pwrite` is a cancellation point;
+  the reconciliation itself has none).
 
 **In-place markers.** The LOG_ELAPSED patch machinery (second non-O_APPEND
 descriptor reopened through `/proc/self/fd`, per-thread byte cursor,
@@ -582,7 +599,10 @@ for a measured exceptional exit, `[! unwound ]` / `[~ unwound ]`
 lines have no glyph and are marked through the field only. Two pwrites per
 abnormal exit (field + glyph); normal exits are unchanged.
 
-Pinned by `LogExceptionsTest` (driver `exceptions_traced_program.cpp`, all
+Pinned in the default build by `ExceptionUnwindTest` (the marker after a catch
+sits at the catcher's depth, on both compilers) and `LongjmpTest` (a jump over
+two frames and a retry loop, driver `longjmp_traced_program.cpp`), and with
+the option by `LogExceptionsTest` (driver `exceptions_traced_program.cpp`, all
 scenario functions `noinline` so frames stay physical at every -O level) on
 both compilers, including -O2 and the sanitizer builds.
 
@@ -717,16 +737,17 @@ the bridge between the two files is the internal `include/exceptionEvents.h`).
   cached site resolution, a memoized type name (`exception_type_name()`, a
   small leaked map with its own mutex: `__cxa_demangle` allocates and costs
   microseconds) and a line write, on top of the unwinder's own microseconds;
-  the first catch resolves the five give-up code ranges once. The
-  reconciliation's per-call work is kept off the -O0 hot path deliberately: the
-  callee's base name is computed once into the name cache (`CachedName`, handed
-  to the hook as `ResolvedFrameView::callee_base_name`; parsing it per call with
-  `std::string_view` at -O0 cost about a microsecond), and `frame_level()`
-  consults a 256-slot direct-mapped front cache before the per-site hash map.
-  Measured through an external CMake consumer on the reference host (hpet VM,
-  trace to /dev/null): the option adds about 0.35 µs to a traced call with the
-  library at -O0 and a throw+catch pair costs about 7 µs more than untraced,
-  mostly the two event lines (README's cost table has the numbers).
+  the first catch resolves the five give-up code ranges once. The option adds
+  nothing measurable per traced call: the reconciliation it once carried runs
+  in every build, and its per-call work is kept off the -O0 hot path
+  deliberately (the callee's base name is computed once into the name cache,
+  `CachedName`, handed to the hook as `ResolvedFrameView::callee_base_name` —
+  parsing it per call with `std::string_view` at -O0 cost about a microsecond —
+  and `frame_level()` consults a 256-slot direct-mapped front cache before the
+  per-site hash map). Measured through an external CMake consumer on the
+  reference host (hpet VM, trace to /dev/null): a throw+catch pair costs about
+  6 µs more with the option than without, mostly the two event lines (README's
+  cost table has the numbers).
 
 ### Output Format
 
@@ -809,7 +830,8 @@ call-stack-logger/
 |       |-- overflow_depth_program.cpp # Instrumented; recursion past the frame stack's initial capacity
 |       |-- filtered_overflow_lib.cpp  # Instrumented shared lib, stripped post-build; its file-local helper is never logged
 |       |-- filtered_overflow_program.cpp # Instrumented; same recursion with an unlogged frame at every level
-|       |-- exception_traced_program.cpp # Instrumented; throw/catch through instrumented frames (GCC pairing)
+|       |-- exception_traced_program.cpp # Instrumented; throw/catch through instrumented frames (both compilers)
+|       |-- longjmp_traced_program.cpp # Instrumented; longjmp over two frames and out of a retry loop (reconciliation)
 |       |-- exceptions_traced_program.cpp # Instrumented LOG_EXCEPTIONS driver: every kind of non-local exit + markers
 |       |-- throwing_lib.cpp      # Shared lib built without instrumentation whose only function throws
 |       |-- uncaught_traced_program.cpp # Instrumented, LOG_EXCEPTIONS + LOG_ELAPSED; every path to std::terminate, one per mode (terminate line)
@@ -1034,7 +1056,7 @@ make run                                    # Build and run (generates trace.out
 |--------|--------|
 | `LOG_ADDR` | Include function addresses in trace output |
 | `LOG_ELAPSED` | Record per-function duration via in-place pwrite() patching of a 12-byte placeholder spliced after the timestamp. See "Per-function timing" below. |
-| `LOG_EXCEPTIONS` | Trace throw/rethrow/catch/terminate as event lines, mark the frames an exception left, key frame records by stack level and reclaim frames that left without an exit hook (Clang exception unwinding, longjmp). Needs the shared libstdc++. See "Frame Reconciliation After Non-Local Exits" and "Exception Events" above. |
+| `LOG_EXCEPTIONS` | Trace throw/rethrow/catch/terminate as event lines and mark the lines of the frames an exception or a longjmp left (the frame reconciliation that keeps the tree exact runs in every build). Needs the shared libstdc++. See "Frame Reconciliation After Non-Local Exits" and "Exception Events" above. |
 | `DISABLE_INSTRUMENTATION` | Compile without any instrumentation hooks |
 
 
@@ -1178,7 +1200,8 @@ Test pure/deterministic functions from the include headers:
   unnameable and hence never logged) with `cslg_filtered_overflow_program`
   (instrumented; the same recursion calling into that helper at every level),
   `cslg_exception_traced_program` (instrumented; throws and catches through
-  instrumented frames), `cslg_global_dtor_traced_program` (instrumented; a global
+  instrumented frames), `cslg_longjmp_traced_program` (instrumented; `longjmp`s
+  over two frames and out of a retry loop), `cslg_global_dtor_traced_program` (instrumented; a global
   object's destructor calls traced code during exit() — both its ctor window,
   pre-trace_begin, and its dtor window, post-trace_shutdown, must be silent no-ops),
   `cslg_dlopen_plugin` (instrumented shared library, not linked) with
@@ -1211,13 +1234,20 @@ Test pure/deterministic functions from the include headers:
   (`marker_a`/`marker_b` level with the first recursion frame, `marker_b_child` one
   deeper) — the regression that a fixed-size stack with a logged-or-not guess for deep
   frames cannot pass.
-- `ExceptionUnwindTest.DepthConsistentAfterCatchOnGcc` — runs
+- `ExceptionUnwindTest.DepthConsistentAfterCatch` — runs
   `cslg_exception_traced_program` (throw through two instrumented frames, catch one
-  level up, then a marker call). On GCC the exit hooks fire on the unwind path,
-  so the marker must trace at the same depth as the catcher — pins the
-  empirically-verified GCC enter/exit pairing guarantee. Skipped under Clang
-  (via the `CSLG_COMPILER_IS_GNU` compile definition), where unwound frames'
-  exit hooks are silently skipped (documented limitation).
+  level up, then a marker call). The marker must trace at the same depth as the
+  catcher on both compilers: on GCC the exit hooks fire on the unwind path, on
+  Clang they do not and the reconciliation reclaims the two stale records at the
+  marker's enter (it used to be skipped under Clang, where the drift was a
+  documented limitation).
+- `LongjmpTest.CallsAfterAJumpSitAtTheirTrueDepth` — runs
+  `cslg_longjmp_traced_program`: a `longjmp` over two instrumented frames followed
+  by a call at the jumper's level, and a retry loop whose leaf jumps out three times
+  from one call site. Asserts the depths of every frame and marker: the jumped-over
+  records are reclaimed at the next hook on both compilers, in the default build.
+  (`CSLG_COMPILER_IS_GNU` still exists for the LOG_EXCEPTIONS tests that expect
+  GCC's measured, marked durations on unwound frames.)
 - `CallStackApiTest.GetCallStackResolvesAncestors` — runs `cslg_callstack_api_program`,
   captures stdout, verifies the on-demand stack contains the expected ancestor
   functions (`print_stack_from_leaf → callstack_mid → callstack_top → main`) in
@@ -1567,10 +1597,11 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    the enter hook formats from pointers into the caches (`ResolvedFrameView`) into
    stack buffers (`pretty_time_into`, `format_into`). Measured on a Fedora 44 VM with
    the `hpet` clocksource (GCC 16, library at -O0, trace written to `/dev/null`): about
-   2.5 µs per warm traced call and 349 `malloc` calls for 200,000 traced calls — all of
-   them from the cold path — down from about 4.4 µs and three `malloc`s per call before
-   the unwinder removal and the view-based hook. On a `tsc` clocksource the
-   `clock_gettime`-bound parts shrink by another microsecond or so.
+   2.7 µs per warm traced call, of which the frame reconciliation is about 0.3 µs
+   (under 0.1 µs at RelWithDebInfo), and a few hundred `malloc` calls for 200,000 traced
+   calls — all of them from the cold path — down from about 4.4 µs and three `malloc`s
+   per call before the unwinder removal and the view-based hook. On a `tsc`
+   clocksource the `clock_gettime`-bound parts shrink by another microsecond or so.
 7. **Header-only utilities:** `format.h`, `prettyTime.h`, `durationFormat.h`,
    `traceFilePath.h`, `stdSymbolFilter.h` contain inline implementations in headers
    (definitions in headers, not just declarations).
@@ -1587,27 +1618,25 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    overhead when `LOG_ELAPSED=OFF` — all code is `#ifdef`-guarded, the binary
    is byte-identical to a build without the option. See "Per-Function Timing
    (LOG_ELAPSED)" in the Architecture section above.
-9. **Exceptions under Clang (known limitation):** Clang's `-finstrument-functions`
-   does not emit `__cyg_profile_func_exit` on the exception-unwind path — frames
-   unwound by a throw never run their exit hook. GCC emits the exit call on the
-   exceptional path too (like a cleanup), so enter/exit stay paired (verified
-   empirically with a minimal probe at -O0 and -O2 on both compilers). Under
-   Clang, a caught exception that unwinds through instrumented frames leaves one
-   stale entry per unwound frame on the per-thread frame stack:
-   `current_stack_depth` and tree indentation drift deeper for the rest of the
-   thread, and with `LOG_ELAPSED` subsequent exits pop the stale slots, so
-   durations get patched onto the wrong (already-unwound) lines while the frames
-   that keep running stay `[  pending ]`. Documented in README's
-   "Compiler-specific instrumentation" section; prefer GCC for tracing
-   exception-heavy code. A code-level self-heal (recording the callee address
-   per slot and popping stale entries on mismatch) was considered and rejected
-   for now: it cannot disambiguate recursive frames (same callee address at
-   several depths). `longjmp`/`setjmp` causes the same drift on BOTH compilers —
-   `longjmp` runs no cleanups, so jumped-over frames' exit hooks never fire
-   (documented in README next to the Clang exception limitation). Both drifts are
-   repaired by the opt-in `LOG_EXCEPTIONS` build (see "Frame Reconciliation After
-   Non-Local Exits"): records keyed by stack LEVEL disambiguate recursive frames,
-   which is what the rejected callee-address self-heal could not do.
+9. **Exceptions under Clang and `longjmp` (both repaired in every build):** Clang's
+   `-finstrument-functions` does not emit `__cyg_profile_func_exit` on the
+   exception-unwind path — frames unwound by a throw never run their exit hook. GCC
+   emits the exit call on the exceptional path too (like a cleanup), so its enter/exit
+   stay paired (verified empirically with a minimal probe at -O0 and -O2 on both
+   compilers). `longjmp`/`setjmp` runs no cleanups at all, so jumped-over frames' exit
+   hooks never fire on either compiler. Both used to leave one stale entry per skipped
+   frame on the per-thread frame stack: `current_stack_depth` and tree indentation
+   drifted deeper for the rest of the thread, and with `LOG_ELAPSED` subsequent exits
+   popped the stale slots, patching durations onto the wrong (already-unwound) lines
+   while the frames that kept running stayed `[  pending ]`. The frame reconciliation
+   (see "Frame Reconciliation After Non-Local Exits") repairs both: records keyed by
+   stack LEVEL disambiguate recursive frames — which is what an earlier idea, a
+   callee-address self-heal, could not do, and why it was rejected — and the dead
+   records are reclaimed at the next hook. What stays compiler-specific is what the
+   unwound frames' own lines show: GCC's exit hooks ran (measured durations under
+   `LOG_ELAPSED`), Clang's did not (`[  pending ]`, or `[~ unwound ]` with
+   `LOG_EXCEPTIONS`). Documented in README's "Compiler-specific instrumentation";
+   pinned by `ExceptionUnwindTest` on both compilers and by `LongjmpTest`.
 10. **The hooks are opaque to `pthread_cancel`:** both hooks that contain cancellation
    points (the enter hook: `fwrite`, the lazy `open`, BFD's reads; the LOG_ELAPSED exit
    hook: `pwrite`) run with cancellation disabled via `pthread_setcancelstate`. This is
@@ -1671,3 +1700,7 @@ The project evolved through these milestones (earliest first):
     `CSLG_OUTPUT_FILE` is anchored to the startup directory; the Clang std filter handles
     ref-qualified members; the warm hook path is allocation-free; test targets carry a
     `cslg_` prefix and the `LOG_*` macros are private to the library
+12. Exceptions in the trace tree (`LOG_EXCEPTIONS`: throw/rethrow/catch/terminate lines,
+    in-place marks on the frames they left) and the level-keyed frame reconciliation,
+    which started inside the option and then moved to every build once its cost was
+    measured, retiring the Clang-exception and longjmp drifts as documented limitations

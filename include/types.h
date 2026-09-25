@@ -63,15 +63,15 @@ struct ResolvedFrameView {
     std::optional<void*> callee_address;
     const std::string* callee_function_name = nullptr;
     // Base name of the callee (see function_base_name in frameReconcile.h),
-    // cached with the name; used only by LOG_EXCEPTIONS.
+    // cached with the name; used by the frame reconciliation in trace.cpp.
     const std::string* callee_base_name = nullptr;
     const std::string* caller_filename = nullptr;
     std::optional<unsigned int> caller_line_number;
     // Base name (see function_base_name in frameReconcile.h) of the innermost
     // function containing the call site — the frame's direct parent, even when
     // that parent is an inlined copy. Empty when unknown. Cached with the
-    // location, so the enter hook reads it without another lookup; used only by
-    // LOG_EXCEPTIONS.
+    // location, so the enter hook reads it without another lookup; used by the
+    // frame reconciliation in trace.cpp.
     const std::string* caller_function_base = nullptr;
 };
 

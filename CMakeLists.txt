@@ -29,14 +29,14 @@ option(DISABLE_INSTRUMENTATION "Compile without any instrumentation hooks" OFF)
 # "Per-function timing" section in README.md for details.
 option(LOG_ELAPSED "Record and display per-function duration in trace output" OFF)
 
-# Opt-in exception awareness. When ON, every frame record carries the frame's
-# stack address, and the hooks use it to reclaim records of frames that left
-# WITHOUT running their exit hook — Clang's exception-unwind path emits none,
-# longjmp() runs none on either compiler — instead of letting those stale
-# records shift every later line of the thread's tree. When OFF (default), zero
-# runtime or code-size cost: all of it is inside #ifdef LOG_EXCEPTIONS blocks.
-# See the "Exceptions in the trace tree" section in README.md.
-option(LOG_EXCEPTIONS "Repair the call tree after exceptions and longjmp, trace exception events" OFF)
+# Opt-in exception awareness. When ON, every throw, rethrow, catch and terminate
+# becomes a line in the tree and the lines of frames that an exception or a
+# longjmp() left are marked in place. (The tree itself stays exact after such
+# exits in every build: the hooks key frame records by stack level and reclaim
+# the records of frames that left without their exit hook — see "Repairing the
+# tree after non-local exits" in README.md.) When OFF (default), the event and
+# marking code is not compiled: it is inside #ifdef LOG_EXCEPTIONS blocks.
+option(LOG_EXCEPTIONS "Trace exception events and mark the frames they left in the call tree" OFF)
 
 # LOG_EXCEPTIONS interposes the C++ runtime's throw/catch entry points: the
 # tracer defines __cxa_throw & co. in the executable and forwards every call to

@@ -54,7 +54,7 @@ cmake -DCMAKE_CXX_COMPILER=clang++ ..
 cmake -DLOG_ELAPSED=ON ..
 # or to include each callee's address in the output
 cmake -DLOG_ADDR=ON ..
-# or to keep the tree exact across exceptions and longjmp (see "Exceptions in the trace tree")
+# or to see every throw, rethrow, catch and terminate in the tree (see "Exceptions in the trace tree")
 cmake -DLOG_EXCEPTIONS=ON ..
 # or to compile your application with disabled instrumentation (no logging)
 cmake -DDISABLE_INSTRUMENTATION=ON ..
@@ -81,7 +81,7 @@ attribute). Standard library exclusion differs by compiler:
 |                                    | GCC                                                       | Clang                                                      |
 | ---------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------- |
 | **Std library exclusion**          | Compile-time (`-finstrument-functions-exclude-file-list`) | Runtime (mangled name filter in `resolve_function_name()`) |
-| **Exit hooks on exception unwind** | Emitted — enter/exit stay paired                          | **Not emitted** (known limitation, see below)              |
+| **Exit hooks on exception unwind** | Emitted — the unwound frames' exits are traced            | **Not emitted** — the tracer reclaims the unwound frames at the next hook (see below) |
 
 GCC auto-discovers std library header paths and excludes them at compile time. Clang does
 not support the exclude-file-list flag, so std library functions are filtered at runtime by
@@ -99,28 +99,21 @@ ordinary user code but can differ at the edges:
   compiler's system include paths, and `/usr/include` is one of them — so GCC never
   instruments it. Clang instruments it and, because the names are not `std::`, traces it.
 
-**Known Clang limitation — exceptions.** Clang's `-finstrument-functions` does not call
-`__cyg_profile_func_exit` for frames unwound by a thrown exception, while GCC emits the
-exit call on the exceptional path too (like a cleanup), keeping enter/exit paired. In a
-Clang build, a caught exception that unwinds through instrumented frames leaves one
-unmatched enter per unwound frame: tree indentation drifts one level deeper for the rest
-of that thread's trace, and with `LOG_ELAPSED` later exits can patch durations onto the
-wrong lines while the unwound frames' own lines keep `[  pending ]`. Building with
-`-DLOG_EXCEPTIONS=ON` removes the drift: the tracer recognizes the unwound frames by
-their stack level and reclaims them (see
-[Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions)).
-Without it, if the code you trace throws exceptions across instrumented frames, prefer
-GCC.
-
-**Known limitation — `longjmp` / `setjmp` (both compilers).** `longjmp` restores the
-stack without running any cleanups, so the exit hooks of the jumped-over instrumented
-frames never fire — on GCC too, since no unwinder is involved. The effect is the same
-as the Clang exception case above: tree indentation drifts one level deeper per
-skipped frame for the rest of that thread's trace, and with `LOG_ELAPSED` later exits
-patch durations onto the wrong lines. `-DLOG_EXCEPTIONS=ON` repairs this case too
-(same mechanism, see the section linked above). Without it, avoid tracing code that
-`longjmp`s across instrumented frames (or keep such code in a translation unit
-compiled without `-finstrument-functions`).
+**Exceptions under Clang, `longjmp` on both compilers — repaired.** Clang's
+`-finstrument-functions` does not call `__cyg_profile_func_exit` for frames unwound by a
+thrown exception, while GCC emits the exit call on the exceptional path too (like a
+cleanup). `longjmp` restores the stack without running any cleanups, so the exit hooks of
+the jumped-over instrumented frames never fire on either compiler. Both used to leave one
+unmatched enter per skipped frame: tree indentation drifted one level deeper for the rest
+of that thread's trace, and with `LOG_ELAPSED` later exits patched durations onto the
+wrong lines. The tracer now keys every frame record by its stack level and reclaims the
+records of frames that are gone at the next hook, in every build, so the calls that follow
+a catch or a jump sit at their true depth; the mechanism is described under
+[Repairing the tree after non-local exits](#repairing-the-tree-after-non-local-exits).
+What the unwound frames' own lines show still differs by compiler: on GCC their exit hooks
+ran, so with `LOG_ELAPSED` they carry measured durations, while on Clang they keep
+`[  pending ]`. `LOG_EXCEPTIONS` marks such lines on both compilers (`!_`, `~_`,
+`[! unwound ]`, `[~ unwound ]`, see the section linked above).
 
 ### What is not traced ###
 
@@ -320,7 +313,7 @@ from the wrong file.
 | ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `LOG_ADDR`                | `OFF`   | Include function addresses in trace output                                                                                                  |
 | `LOG_ELAPSED`             | `OFF`   | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed).                        |
-| `LOG_EXCEPTIONS`          | `OFF`   | Trace every throw, rethrow, catch and terminate in the call tree, mark the frames an exception left, and keep the tree exact when frames leave without an exit hook (exceptions under Clang, `longjmp` on both compilers). Needs the shared libstdc++. See [Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions). |
+| `LOG_EXCEPTIONS`          | `OFF`   | Trace every throw, rethrow, catch and terminate in the call tree and mark the lines of the frames an exception or a `longjmp` left. Needs the shared libstdc++. See [Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions). |
 | `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks                                                                                                   |
 | `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test). Honored only when Call Stack Logger is the top-level project, never when consumed via `add_subdirectory` / FetchContent. |
 | `COVERAGE`                | `OFF`   | Enable code coverage via GCC `--coverage` flag                                                                                              |
@@ -457,8 +450,9 @@ the file size on start.)
 ## :boom: Exceptions in the trace tree (`LOG_EXCEPTIONS`) ##
 
 Build with `-DLOG_EXCEPTIONS=ON` to see every exception in the call tree, at the
-point where it was thrown, rethrown and caught, and to keep the tree exact when
-frames leave without running their exit hook.
+point where it was thrown, rethrown and caught, and to mark the lines of the
+frames it left. The tree itself stays exact after exceptions and `longjmp` in
+every build; the option adds the events and the marks.
 
 ```bash
 cmake -B build -DLOG_EXCEPTIONS=ON
@@ -557,17 +551,19 @@ frames that returned normally keep `|_`.
 
 ### Repairing the tree after non-local exits ###
 
+This part is on in every build; `LOG_EXCEPTIONS` only adds the marks below.
+
 The tracer pairs enters and exits positionally: every enter pushes a record on a
 per-thread stack, every exit pops one. Two things break that pairing silently.
 Clang emits no exit hook for frames an exception unwinds through, and `longjmp`
 skips the exit hooks of every frame it jumps over on both compilers. A stale
-record then makes each later exit pop the wrong record: the tree drifts one
-level deeper per skipped frame for the rest of the thread, and with
-`LOG_ELAPSED` durations land on the wrong lines.
+record would then make each later exit pop the wrong record: the tree would
+drift one level deeper per skipped frame for the rest of the thread, and with
+`LOG_ELAPSED` durations would land on the wrong lines.
 
-With `LOG_EXCEPTIONS` every record also carries the frame's **level**, its
-canonical frame address: the stack pointer's value just before the call that
-created the frame. Stacks grow downward, so a frame deeper than the one running
+So every record also carries the frame's **level**, its canonical frame
+address: the stack pointer's value just before the call that created the
+frame. Stacks grow downward, so a frame deeper than the one running
 now always has a lower level, and a deeper frame cannot still be alive under a
 running shallower one. The hooks use that to reclaim what is gone:
 
@@ -602,14 +598,16 @@ line is written. The chains are resolved once per site and cached. Clang emits
 DWARF 5 by default, and BFD does not walk Clang's DWARF 5 inline chains
 (elfutils and llvm-symbolizer do), so with `LOG_EXCEPTIONS` the
 `callstacklogger::instrumented` target compiles your code with `-gdwarf-4`
-under Clang; that changes only the debug-info format of your objects, and a
-build that overrides it with `-gdwarf-5` degrades to reclaiming such frames when
-their host returns.
+under Clang; that changes only the debug-info format of your objects. A Clang
+build without the option keeps DWARF 5, and so does one that overrides the flag
+with `-gdwarf-5`: both degrade to reclaiming such frames when their host
+returns, with one extra indentation level meanwhile.
 
 ### Marking the frames that did not return ###
 
-A reclaimed frame does not just disappear from the bookkeeping: its line is
-patched in place, the same way `LOG_ELAPSED` patches durations. The `|` of the
+With `LOG_EXCEPTIONS`, a reclaimed frame does not just disappear from the
+bookkeeping: its line is patched in place, the same way `LOG_ELAPSED` patches
+durations. The `|` of the
 line's `|_ ` glyph becomes a marker, so the tree keeps its shape and its
 alignment while telling you how each frame ended:
 
@@ -651,23 +649,24 @@ frames up, including those two calls.
 
 | Build type     | Options                       | Traced call | Throw + catch |
 | -------------- | ----------------------------- | ----------- | ------------- |
-| default (-O0)  | none                          | 2.45 µs     | 6.4 µs        |
-| default (-O0)  | `LOG_EXCEPTIONS`              | 2.79 µs     | 13.3 µs       |
-| default (-O0)  | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 6.1 µs   | 20.2 µs       |
-| RelWithDebInfo | none                          | 2.01 µs     | 5.3 µs        |
-| RelWithDebInfo | `LOG_EXCEPTIONS`              | 2.07 µs     | 10.5 µs       |
-| RelWithDebInfo | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 5.4 µs   | 17.3 µs       |
+| default (-O0)  | none                          | 2.72 µs     | 7.0 µs        |
+| default (-O0)  | `LOG_EXCEPTIONS`              | 2.76 µs     | 13.2 µs       |
+| default (-O0)  | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 6.0 µs   | 20.1 µs       |
+| RelWithDebInfo | none                          | 2.02 µs     | 5.4 µs        |
+| RelWithDebInfo | `LOG_EXCEPTIONS`              | 2.06 µs     | 10.4 µs       |
+| RelWithDebInfo | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 5.3 µs   | 17.0 µs       |
 
-Per traced call the option adds one level lookup in each hook (a direct-mapped
-cache in front of a per-thread hash map), one `std::uncaught_exceptions()` read
-on exit and a handful of compares; the first hook at each call site also pays
-one two-frame unwind to measure that site's level distance. A throw or catch
-adds the event line itself: a memoized site resolution, a memoized type name,
-the formatting and the write. The `LOG_ELAPSED` rows carry that option's own
-cost (two clock reads and a `pwrite()` per call, expensive on an `hpet` clock).
-With the option off nothing of this runs: the hooks contain no code for it.
-The default build differs from before only by two pointer fields in the
-resolver's frame view and one short base name the resolver stores per callee.
+The repair of the tree after non-local exits runs in every build and is what
+the "none" rows pay for it: one level lookup in each hook (a direct-mapped
+cache in front of a per-thread hash map) and a handful of compares, about
+0.3 µs per traced call with the library at -O0 and under 0.1 µs at
+RelWithDebInfo on this host (2.44 µs and 1.98 µs before it); the first hook at each call site also pays one two-frame unwind
+to measure that site's level distance. The option adds nothing measurable per
+call. A throw or catch adds the event line itself: a memoized site resolution,
+a memoized type name, the formatting and the write, plus a
+`std::uncaught_exceptions()` read at each exit an exception passes through.
+The `LOG_ELAPSED` rows carry that option's own cost (two clock reads and a
+`pwrite()` per call, expensive on an `hpet` clock).
 
 What this does not cover, and what happens instead:
 
@@ -679,7 +678,7 @@ What this does not cover, and what happens instead:
   frame containing the loop returns, with one extra indentation level per
   iteration meanwhile.
 - **Fibers and stackful coroutines** switch stacks within one thread. The
-  tracer's frame stack interleaves their frames today, and `LOG_EXCEPTIONS`
+  tracer's frame stack interleaves their frames today, and the reconciliation
   leaves them exactly as they are: the level rules only ever compare frames on
   the thread's own stack (found with `pthread_getattr_np`).
 - Code compiled **without unwind tables** cannot be measured by the unwinder;

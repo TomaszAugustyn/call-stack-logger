@@ -18,7 +18,7 @@
     #define NO_INSTRUMENT __attribute__((no_instrument_function))
 #endif
 
-// Frame-stack reconciliation for LOG_EXCEPTIONS (pure logic, unit-tested).
+// Frame-stack reconciliation, on in every build (pure logic, unit-tested).
 //
 // The hooks keep one record per instrumented frame on a per-thread stack: every
 // enter pushes, every exit pops. That pairing is positional, so it silently
@@ -35,8 +35,8 @@
 // running always has a LOWER level, and a deeper frame cannot still be alive
 // under a running shallower one. A record whose level lies below the running
 // frame's therefore belongs to a frame that left without its exit hook: it is
-// dead, and the tracer pops it (and marks its line) instead of letting it
-// corrupt the pairing. The level is the CFA and not the hook's own frame
+// dead, and the tracer pops it (and, with LOG_EXCEPTIONS, marks its line)
+// instead of letting it corrupt the pairing. The level is the CFA and not the hook's own frame
 // address on purpose: the latter also depends on the callee's frame size, so
 // two different functions called from the same place would not compare equal.
 // trace.cpp derives the CFA from the hook's frame address with a per-hook-site

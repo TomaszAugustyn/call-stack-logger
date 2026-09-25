@@ -174,8 +174,8 @@ private:
 
     /// One memoized callee name: the demangled name (nullopt = filtered / not
     /// loggable) and its base name (function_base_name in frameReconcile.h,
-    /// used by the LOG_EXCEPTIONS reconciliation), computed once here so the
-    /// enter hook never parses a name on the hot path.
+    /// used by the frame reconciliation), computed once here so the enter hook
+    /// never parses a name on the hot path.
     struct CachedName {
         std::optional<std::string> name;
         std::string base;
@@ -302,9 +302,9 @@ private:
     }
 
     /// Inline chains per address (resolve_inline_chain). Consulted only when
-    /// the LOG_EXCEPTIONS reconciliation meets records at the current frame's
-    /// own level (inlined activations, catches), so it stays small. Leaked and
-    /// protected by s_bfd_mutex like the other caches.
+    /// the frame reconciliation meets records at the current frame's own level
+    /// (inlined activations, catches), so it stays small. Leaked and protected
+    /// by s_bfd_mutex like the other caches.
     NO_INSTRUMENT
     static std::unordered_map<void*, std::vector<std::string>>& inline_chain_cache() {
         static auto* instance = new std::unordered_map<void*, std::vector<std::string>>();
@@ -362,7 +362,7 @@ NO_INSTRUMENT
 std::string demangle_symbol(const char* mangled);
 
 /// The inline chain at `address` (see bfdResolver::resolve_inline_chain), for
-/// the LOG_EXCEPTIONS reconciliation of frames that share a physical frame.
+/// the frame reconciliation of frames that share a physical frame.
 NO_INSTRUMENT
 const std::vector<std::string>* inline_chain_at(void* address);
 

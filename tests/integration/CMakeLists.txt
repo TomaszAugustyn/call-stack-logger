@@ -148,13 +148,22 @@ target_compile_features(cslg_filtered_overflow_program PRIVATE cxx_std_17)
 target_link_libraries(cslg_filtered_overflow_program PRIVATE callstacklogger_instrumented cslg_filtered_overflow_lib)
 cslg_apply_sanitizers(cslg_filtered_overflow_program)
 
-# Exception-unwind driver: throws through instrumented frames. Only GCC emits
-# exit hooks on the unwind path, so the matching test asserts under GCC only
-# (see ExceptionUnwindTest and the CSLG_COMPILER_IS_GNU definition below).
+# Exception-unwind driver: throws through instrumented frames. GCC runs the exit
+# hooks of the unwound frames, Clang runs none; the frame reconciliation reclaims
+# their records either way, so the matching test asserts on both compilers (see
+# ExceptionUnwindTest).
 add_executable(cslg_exception_traced_program exception_traced_program.cpp)
 target_compile_features(cslg_exception_traced_program PRIVATE cxx_std_17)
 target_link_libraries(cslg_exception_traced_program PRIVATE callstacklogger_instrumented)
 cslg_apply_sanitizers(cslg_exception_traced_program)
+
+# longjmp driver: jumps over instrumented frames, whose exit hooks then never run
+# on either compiler, and calls at the jumper's level afterwards; the frame
+# reconciliation puts those calls at their true depth (see LongjmpTest).
+add_executable(cslg_longjmp_traced_program longjmp_traced_program.cpp)
+target_compile_features(cslg_longjmp_traced_program PRIVATE cxx_std_17)
+target_link_libraries(cslg_longjmp_traced_program PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(cslg_longjmp_traced_program)
 
 # Throwing-library fixture for the LOG_EXCEPTIONS driver: a shared library built
 # WITHOUT instrumentation whose only function throws. The exception is born in
@@ -337,6 +346,7 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     OVERFLOW_DEPTH_PROGRAM_PATH="$<TARGET_FILE:cslg_overflow_depth_program>"
     FILTERED_OVERFLOW_PROGRAM_PATH="$<TARGET_FILE:cslg_filtered_overflow_program>"
     EXCEPTION_TRACED_PROGRAM_PATH="$<TARGET_FILE:cslg_exception_traced_program>"
+    LONGJMP_TRACED_PROGRAM_PATH="$<TARGET_FILE:cslg_longjmp_traced_program>"
     GLOBAL_DTOR_PROGRAM_PATH="$<TARGET_FILE:cslg_global_dtor_traced_program>"
     CANCEL_TRACED_PROGRAM_PATH="$<TARGET_FILE:cslg_cancel_traced_program>"
     CANCEL_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:cslg_cancel_traced_program_log_elapsed>"
@@ -360,8 +370,10 @@ target_compile_definitions(cslg_integration_tests PRIVATE
 if(LOG_ADDR)
     target_compile_definitions(cslg_integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_ADDR)
 endif()
-# GCC emits __cyg_profile_func_exit on the exception-unwind path; Clang does not
-# (documented limitation). ExceptionUnwindTest asserts only when this is set.
+# GCC runs the exit hooks of the frames an exception unwinds through (so their
+# lines get a measured, marked duration); Clang runs none, and the reconciliation
+# reclaims their records at the catch instead. The LOG_EXCEPTIONS tests expect
+# the marks that follow from that difference.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_definitions(cslg_integration_tests PRIVATE CSLG_COMPILER_IS_GNU)
 endif()
