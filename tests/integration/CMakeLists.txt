@@ -273,6 +273,17 @@ cslg_apply_sanitizers(cslg_cancel_traced_program_log_elapsed)
 cslg_add_flag_variant(log_exceptions exceptions_traced_program.cpp LOG_EXCEPTIONS)
 target_link_libraries(cslg_traced_test_program_log_exceptions PRIVATE Threads::Threads cslg_throwing_lib)
 
+# The same driver with LOG_ELAPSED: the end-of-frame markers then also flag the
+# duration field ("[!  1.234ms]", "[~ unwound ]"), and every dead frame's
+# placeholder must end up patched, never left "[  pending ]".
+cslg_add_flag_variant(log_exceptions_elapsed exceptions_traced_program.cpp LOG_EXCEPTIONS LOG_ELAPSED)
+target_link_libraries(cslg_traced_test_program_log_exceptions_elapsed PRIVATE Threads::Threads cslg_throwing_lib)
+
+# ... and with every output-content macro on: the glyph offset must account for
+# both the duration column and the address column.
+cslg_add_flag_variant(log_exceptions_all exceptions_traced_program.cpp LOG_EXCEPTIONS LOG_ELAPSED LOG_ADDR)
+target_link_libraries(cslg_traced_test_program_log_exceptions_all PRIVATE Threads::Threads cslg_throwing_lib)
+
 # Combined-flags variant: both output-content macros defined simultaneously.
 # Exercises LOG_ELAPSED's byte-offset math under the line-layout changes
 # introduced by LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the
@@ -311,6 +322,8 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     THREADED_TRACED_PROGRAM_LOG_ELAPSED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_elapsed_threaded>"
     TRACED_PROGRAM_LOG_ELAPSED_COMBINED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_elapsed_addr>"
     TRACED_PROGRAM_LOG_EXCEPTIONS_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions>"
+    TRACED_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_elapsed>"
+    TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_all>"
 )
 
 # When the user passes -DLOG_ADDR=ON or -DLOG_ELAPSED=ON globally, the

@@ -32,10 +32,28 @@
 
 #ifdef LOG_EXCEPTIONS
     #include "frameReconcile.h"
+    #include <cstring>
     #include <exception>
     #include <functional>
     #include <unordered_map>
     #include <unwind.h>
+#endif
+
+// In-place line patching — the second, non-O_APPEND descriptor, the per-thread
+// byte cursor and the fixed line layout it relies on — serves two options:
+// LOG_ELAPSED rewrites the duration placeholder on exit, LOG_EXCEPTIONS marks the
+// lines of frames that did not return normally. Either one switches it on.
+#if defined(LOG_ELAPSED) || defined(LOG_EXCEPTIONS)
+    #define CSLG_LINE_PATCHING 1
+#endif
+
+// The fixed-width duration placeholder spliced after the timestamp of every line
+// (LOG_ELAPSED; see include/durationFormat.h for the width invariant). A macro so
+// the default build passes the very same literal it always did.
+#ifdef LOG_ELAPSED
+    #define CSLG_DURATION_SPLICE "[  pending ] "
+#else
+    #define CSLG_DURATION_SPLICE ""
 #endif
 
 // clang-format off
@@ -45,11 +63,11 @@
 // stack is a std::vector that doubles whenever it fills up, so depth accounting stays
 // exact at any call depth and the hot path is allocation-free once the current
 // capacity covers the program's deepest call chain. A FrameRecord is 1 byte in the
-// default build, 24 bytes with LOG_ELAPSED (flag + time_point + off_t, padded) and 32
-// bytes more with LOG_EXCEPTIONS (callee, caller, level, uncaught count), so
-// the first reservation costs a tracing thread between 2 KB and 112 KB of heap.
-// Growth can only fail under OOM — see frame_overflow_count for how that fallback
-// keeps enter/exit pairing exact.
+// default build and up to 56 bytes with every option on (the frame's site identity
+// and level, the enter timestamp, the line offset and depth), so the first
+// reservation costs a tracing thread between 2 KB and 112 KB of heap. Growth can
+// only fail under OOM — see frame_overflow_count for how that fallback keeps
+// enter/exit pairing exact.
 static constexpr std::size_t INITIAL_FRAME_CAPACITY = 2048;
 
 // One record per instrumented frame currently on a thread's stack, pushed by every
@@ -81,11 +99,17 @@ struct FrameRecord {
 #ifdef LOG_ELAPSED
     // Enter timestamp, used to compute the elapsed duration on exit.
     std::chrono::steady_clock::time_point enter_time;
-    // Byte offset (into this thread's trace file) of the "[  pending ]"
-    // placeholder for this frame; -1 when the cursor was untrustworthy at enter
-    // time (then the exit hook skips its pwrite). On exit we pwrite the formatted
-    // duration at this offset. off_t keeps its signedness explicit at the use site.
-    off_t placeholder_offset;
+#endif
+#ifdef CSLG_LINE_PATCHING
+    // Byte offset (into this thread's trace file) of the first byte of this
+    // frame's line; -1 when the cursor was untrustworthy at enter time (then no
+    // patch is ever written for the frame). Every patch offset — the duration
+    // field's (LOG_ELAPSED) and the tree glyph's (LOG_EXCEPTIONS) — derives from
+    // it and the fixed line layout (see LINE_PREFIX_EXTRA and
+    // utils::tree_glyph_offset). off_t keeps its signedness explicit at the use site.
+    off_t line_start;
+    // Depth the line was written at, which places its tree glyph.
+    int depth;
 #endif
 };
 
@@ -133,15 +157,17 @@ struct PerThreadTraceFile {
     bool open_attempted = false;   // avoid retry after open failure
     bool registered = false;       // set true once added to g_trace().open_files
 
-#ifdef LOG_ELAPSED
+#ifdef CSLG_LINE_PATCHING
     // Second file descriptor to the same trace file, opened WITHOUT O_APPEND so
-    // pwrite() can patch the fixed-width duration placeholder at explicit byte
-    // offsets. fp (above) still uses O_APPEND for sequential line writes —
-    // the two fds share the kernel inode; writes never overlap in byte range
-    // (fp writes NEW bytes beyond EOF, patch_fd rewrites EXISTING placeholder
-    // bytes). Atomic for consistency with fp: all accesses are owner-thread or
-    // mutex-ordered (trace_shutdown deliberately never touches patch_fd), so the
-    // atomic is formal belt-and-suspenders, not a contention point.
+    // pwrite() can patch fixed-width fields of lines already written at explicit
+    // byte offsets: the duration placeholder (LOG_ELAPSED) and the tree glyph and
+    // duration flag of frames that ended abnormally (LOG_EXCEPTIONS). fp (above)
+    // still uses O_APPEND for sequential line writes — the two fds share the
+    // kernel inode; writes never overlap in byte range (fp writes NEW bytes
+    // beyond EOF, patch_fd rewrites EXISTING bytes). Atomic for consistency with
+    // fp: all accesses are owner-thread or mutex-ordered (trace_shutdown
+    // deliberately never touches patch_fd), so the atomic is formal
+    // belt-and-suspenders, not a contention point.
     std::atomic<int> patch_fd{-1};
 #endif
 
@@ -212,12 +238,12 @@ struct PerThreadState {
     std::unordered_map<HookSite, std::ptrdiff_t, HookSiteHash> level_offsets;
 #endif
 
-#ifdef LOG_ELAPSED
+#ifdef CSLG_LINE_PATCHING
     // Running byte position for this thread's trace file. Seeded from the file's
     // end position when the file is opened (handles multi-run append where
     // earlier runs already wrote content + separator headers). Advanced by
     // exactly the number of bytes we wrote for every line — lets us compute
-    // placeholder offsets without calling ftello() on the hot path.
+    // patch offsets without calling ftello() on the hot path.
     off_t cursor = 0;
 
     // True while `cursor` provably matches the file's real end position. Cleared
@@ -320,7 +346,73 @@ pid_t current_tid() {
     return t_state.cached_tid;
 }
 
+#ifdef LOG_ELAPSED
+// Offset of the duration placeholder within a line: right after "[<timestamp>] ".
+static constexpr std::size_t PLACEHOLDER_OFFSET_IN_LINE = utils::PRETTY_TIME_LENGTH + 3;
+#endif
+
+#ifdef CSLG_LINE_PATCHING
+// Rewrites `count` bytes at `offset_in_line` of the line that starts at
+// `line_start` through the patch descriptor. pwrite is atomic for these few
+// bytes (well under PIPE_BUF) and honors the explicit offset because patch_fd
+// was opened WITHOUT O_APPEND. A -1 line_start (untrusted cursor) or a missing
+// patch descriptor leaves the line as the enter hook wrote it. Return value
+// intentionally unchecked: the only failure modes are racing shutdown closing
+// pfd (EBADF, no recovery possible) or a disk-I/O hardware error — in either
+// case the line keeps what was written, the documented degraded-but-readable
+// mode.
+NO_INSTRUMENT
+void patch_line_bytes(off_t line_start, std::size_t offset_in_line, const char* bytes,
+                      std::size_t count) {
+    const int pfd = t_state.trace_file.patch_fd.load(std::memory_order_relaxed);
+    if (pfd < 0 || line_start < 0) {
+        return;
+    }
+    (void)pwrite(pfd, bytes, count, line_start + static_cast<off_t>(offset_in_line));
+}
+#endif
+
 #ifdef LOG_EXCEPTIONS
+// Bytes between "[<timestamp>] " and the tree on every line of this build: the
+// duration column (LOG_ELAPSED) and the address column (LOG_ADDR). Both are
+// fixed-width, which is what makes the glyph offset derivable from a line's
+// start and its depth alone.
+static constexpr std::size_t LINE_PREFIX_EXTRA = 0
+#ifdef LOG_ELAPSED
+        + utils::DURATION_FIELD_WIDTH + 1
+#endif
+#ifdef LOG_ADDR
+        + utils::ADDR_COLUMN_WIDTH
+#endif
+        ;
+
+// Marks a logged frame's line as ended abnormally, `how` being
+// utils::FRAME_END_EXCEPTION (an exception left the frame) or FRAME_END_JUMP (a
+// non-local jump skipped its exit hook): the '|' of the line's "|_ " glyph is
+// rewritten to that character, and with LOG_ELAPSED the duration field is
+// rewritten to `field` — the flagged "[  unwound ]" for frames whose exit hook
+// never ran, or nullptr when the exit hook has just written the measured,
+// flagged duration itself. Lines at depth 0 have no glyph, so only the field
+// can carry the mark there.
+NO_INSTRUMENT
+void mark_frame_end(const FrameRecord& record, char how, const char* field) {
+    if (!record.logged || record.line_start < 0) {
+        return;
+    }
+#ifdef LOG_ELAPSED
+    if (field != nullptr) {
+        patch_line_bytes(record.line_start, PLACEHOLDER_OFFSET_IN_LINE, field,
+                         utils::DURATION_FIELD_WIDTH);
+    }
+#else
+    (void)field;
+#endif
+    if (record.depth >= 1) {
+        patch_line_bytes(record.line_start, utils::tree_glyph_offset(record.depth, LINE_PREFIX_EXTRA),
+                         &how, 1);
+    }
+}
+
 // State of the _Unwind_Backtrace walk in frame_level(): the hook site looked
 // for and the CFA of the frame that resumes there.
 struct LevelSearch {
@@ -397,16 +489,27 @@ const void* frame_level(const void* site, const void* frame) {
 
 // Pops `count` records from the top of this thread's frame stack whose frames are
 // gone without having run their exit hook (see frameReconcile.h for how they are
-// recognized). A logged record's frame had raised the depth on enter, and the exit
-// hook that would have lowered it never ran, so the depth comes back down here.
-// Never allocates or throws: pop_back() keeps the vector's capacity.
+// recognized) and marks their lines with `how` (see mark_frame_end). A logged
+// record's frame had raised the depth on enter, and the exit hook that would have
+// lowered it never ran, so the depth comes back down here. Never allocates or
+// throws: pop_back() keeps the vector's capacity.
 NO_INSTRUMENT
-void reclaim_dead_records(std::size_t count) {
+void reclaim_dead_records(std::size_t count, char how) {
+#ifdef LOG_ELAPSED
+    // No exit hook ran for these frames, so no duration exists: the placeholder
+    // becomes the flagged "[  unwound ]".
+    char field[utils::DURATION_FIELD_WIDTH + 1];
+    std::memcpy(field, utils::DURATION_UNWOUND, sizeof(field));
+    utils::set_duration_flag(field, how);
+#else
+    const char* const field = nullptr;
+#endif
     while (count-- > 0) {
         const FrameRecord dead = t_state.frames.back();
         t_state.frames.pop_back();
         if (dead.logged) {
             t_state.current_stack_depth--;
+            mark_frame_end(dead, how, field);
         }
     }
 }
@@ -488,11 +591,13 @@ void open_this_thread_file(PerThreadState& self) {
         return;
     }
 
-#ifdef LOG_ELAPSED
+#ifdef CSLG_LINE_PATCHING
     // Second fd to the same file, WITHOUT O_APPEND, reserved for pwrite()-patching
-    // the fixed-width "[  pending ]" placeholders with real durations on exit. A
-    // single O_APPEND fd would force every pwrite to EOF on Linux (documented in
-    // pwrite(2)), so we need this separate handle. dup() can't provide it either:
+    // fixed-width fields of lines already written: the "[  pending ]" placeholder
+    // with the real duration on exit (LOG_ELAPSED), the tree glyph and duration
+    // flag of frames that ended abnormally (LOG_EXCEPTIONS). A single O_APPEND fd
+    // would force every pwrite to EOF on Linux (documented in pwrite(2)), so we
+    // need this separate handle. dup() can't provide it either:
     // duplicated descriptors share one open file description, so clearing
     // O_APPEND via fcntl would clear it for fp too.
     //
@@ -513,15 +618,16 @@ void open_this_thread_file(PerThreadState& self) {
     int pfd = open(fd_path, O_WRONLY | O_CLOEXEC);
     if (pfd < 0) {
         // Degrade rather than disable: the trace itself is still valuable without
-        // durations. Keep tracing through fp; with pfd == -1 and cursor_valid
-        // false, every frame records the -1 offset sentinel, the exit handler
-        // skips its pwrite, and each line keeps the "[  pending ]" placeholder —
-        // the same documented degraded mode as a mid-run write failure.
-        // Realistic triggers: /proc not mounted (minimal chroot/container), fd
-        // limit exhaustion.
+        // durations or markers. Keep tracing through fp; with pfd == -1 and
+        // cursor_valid false, every frame records the -1 line-start sentinel, no
+        // patch is ever written, and each line keeps what the enter hook wrote
+        // ("[  pending ]", plain "|_ ") — the same documented degraded mode as a
+        // mid-run write failure. Realistic triggers: /proc not mounted (minimal
+        // chroot/container), fd limit exhaustion.
         fprintf(stderr,
-                "[call-stack-logger] WARNING: Could not reopen %s for duration patching "
-                "— tracing continues, durations stay \"[  pending ]\"\n",
+                "[call-stack-logger] WARNING: Could not reopen %s for in-place patching "
+                "— tracing continues, but durations stay \"[  pending ]\" and no exit "
+                "markers are written\n",
                 path.c_str());
     }
 #endif
@@ -530,13 +636,13 @@ void open_this_thread_file(PerThreadState& self) {
     // without per-call fflush overhead.
     setvbuf(fp, NULL, _IOLBF, 0);
     self.trace_file.fp.store(fp, std::memory_order_relaxed);
-#ifdef LOG_ELAPSED
+#ifdef CSLG_LINE_PATCHING
     self.trace_file.patch_fd.store(pfd, std::memory_order_relaxed);
 #endif
 
     write_run_separator_header(fp, tid);
 
-#ifdef LOG_ELAPSED
+#ifdef CSLG_LINE_PATCHING
     if (pfd >= 0) {
         // Seed the per-thread byte cursor to the current EOF, which now reflects
         // everything written by prior runs (multi-run append) AND the separator
@@ -569,7 +675,7 @@ void open_this_thread_file(PerThreadState& self) {
         if (g.shutdown_complete.load(std::memory_order_relaxed)) {
             fclose(fp);
             self.trace_file.fp.store(nullptr, std::memory_order_relaxed);
-#ifdef LOG_ELAPSED
+#ifdef CSLG_LINE_PATCHING
             if (pfd >= 0) {
                 close(pfd);
             }
@@ -708,7 +814,7 @@ PerThreadTraceFile::~PerThreadTraceFile() {
     std::lock_guard<std::mutex> lock(g.open_files_mutex);
 
     FILE* old = fp.exchange(nullptr, std::memory_order_relaxed);
-#ifdef LOG_ELAPSED
+#ifdef CSLG_LINE_PATCHING
     int old_pfd = patch_fd.exchange(-1, std::memory_order_relaxed);
 #endif
     if (old == nullptr) {
@@ -716,7 +822,7 @@ PerThreadTraceFile::~PerThreadTraceFile() {
     }
 
     fclose(old);
-#ifdef LOG_ELAPSED
+#ifdef CSLG_LINE_PATCHING
     if (old_pfd != -1) {
         close(old_pfd);
     }
@@ -740,9 +846,9 @@ NO_INSTRUMENT
 void trace_begin() {
     t_in_instrumentation = true;
 
-#ifdef LOG_ELAPSED
-    // Belt-and-suspenders: the LOG_ELAPSED byte-offset derivation assumes
-    // pretty_time() returns exactly PRETTY_TIME_LENGTH characters. If someone
+#ifdef CSLG_LINE_PATCHING
+    // Belt-and-suspenders: the in-place patch offsets (LOG_ELAPSED, LOG_EXCEPTIONS)
+    // assume pretty_time() returns exactly PRETTY_TIME_LENGTH characters. If someone
     // changes LOGGER_PRETTY_TIME_FORMAT / LOGGER_PRETTY_MS_FORMAT without also
     // updating PRETTY_TIME_LENGTH, the unit test catches it — this runtime
     // check is a second line of defense for downstream consumers who might
@@ -754,8 +860,8 @@ void trace_begin() {
     if (utils::pretty_time().size() != utils::PRETTY_TIME_LENGTH) {
         fprintf(stderr,
                 "[call-stack-logger] FATAL: pretty_time() length differs from "
-                "PRETTY_TIME_LENGTH — update include/prettyTime.h (LOG_ELAPSED "
-                "byte offsets would corrupt the trace file)\n");
+                "PRETTY_TIME_LENGTH — update include/prettyTime.h (in-place patch "
+                "offsets would corrupt the trace file)\n");
         abort();
     }
 #endif
@@ -834,7 +940,7 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         bool logged = false;
         // True once `frames` is guaranteed to have room for this frame's record.
         bool have_slot = false;
-#ifdef LOG_ELAPSED
+#ifdef CSLG_LINE_PATCHING
         off_t line_start = 0;
 #endif
 #ifdef LOG_EXCEPTIONS
@@ -883,7 +989,9 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             resolve_thread_stack_bounds();
             key.level = frame_level(hook_site, hook_frame);
             reclaim_dead_records(instrumentation::dead_records_on_enter(
-                    t_state.frames.data(), t_state.frames.size(), key, t_state.stack_bounds));
+                                         t_state.frames.data(), t_state.frames.size(), key,
+                                         t_state.stack_bounds),
+                                 utils::FRAME_END_JUMP);
 #endif
 
             FILE* fp = get_thread_fp();
@@ -896,21 +1004,22 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                     utils::pretty_time_into(timestamp, sizeof(timestamp));
                     frame.timestamp = timestamp;
                     char line[utils::FORMAT_BUF_SIZE];
-#ifdef LOG_ELAPSED
-                    // Splice a fixed-width "[  pending ] " placeholder right after the
-                    // timestamp. See include/durationFormat.h for the width invariant.
                     // Formatted with the prospective depth; the actual increment
                     // follows in the no-throw zone. The '\n' lands in the same
-                    // stack buffer, so the line is ready to write as-is.
+                    // stack buffer, so the line is ready to write as-is. With
+                    // LOG_ELAPSED the fixed-width "[  pending ] " placeholder is
+                    // spliced right after the timestamp (see include/durationFormat.h
+                    // for the width invariant).
                     const std::size_t line_size =
                             utils::format_into(line, sizeof(line), frame,
                                                t_state.current_stack_depth + 1,
-                                               "[  pending ] ", /*append_newline=*/true);
+                                               CSLG_DURATION_SPLICE, /*append_newline=*/true);
                     // ---- no-throw zone ----
                     t_state.current_stack_depth++;
                     logged = true;
-                    // Remember where this line starts: the placeholder offset for the
-                    // per-frame slot is recorded after the push below.
+#ifdef CSLG_LINE_PATCHING
+                    // Remember where this line starts: every patch offset of the
+                    // frame's record derives from it (recorded after the push below).
                     line_start = t_state.cursor;
                     // No mutex: this FILE* is private to this thread. One fwrite of the
                     // newline-terminated line — a single stdio call (one FILE-lock
@@ -927,19 +1036,9 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
                         t_state.cursor_valid = false;
                     }
 #else
-                    // Formatted with the prospective depth; the actual increment
-                    // follows in the no-throw zone. The '\n' lands in the same
-                    // stack buffer, so the line is ready to write as-is.
-                    const std::size_t line_size =
-                            utils::format_into(line, sizeof(line), frame,
-                                               t_state.current_stack_depth + 1,
-                                               "", /*append_newline=*/true);
-                    // ---- no-throw zone ----
-                    t_state.current_stack_depth++;
-                    logged = true;
                     // No mutex: this FILE* is private to this thread. One fwrite of
                     // the newline-terminated line — a single stdio call with no
-                    // per-line format-string parsing, mirroring the LOG_ELAPSED
+                    // per-line format-string parsing, mirroring the patching
                     // branch minus its cursor bookkeeping.
                     (void)fwrite(line, 1, line_size, fp);
 #endif
@@ -976,20 +1075,20 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             record.level = key.level;
             record.uncaught_at_enter = std::uncaught_exceptions();
 #endif
-#ifdef LOG_ELAPSED
-            record.placeholder_offset = -1;
-            if (logged) {
-                // Placeholder sits at "[<timestamp>] " offset = 1 + PRETTY_TIME_LENGTH + 2.
+#ifdef CSLG_LINE_PATCHING
+            record.line_start = -1;
+            record.depth = 0;
+            if (logged && t_state.cursor_valid) {
                 // Only when the cursor is still trustworthy (this line's write
                 // included — a failure in it invalidated the cursor above); with
-                // an untrusted cursor, keep the -1 sentinel so the exit handler
-                // skips the pwrite and the placeholder stays "[  pending ]".
-                static constexpr std::size_t PLACEHOLDER_OFFSET_IN_LINE =
-                        utils::PRETTY_TIME_LENGTH + 3;
-                if (t_state.cursor_valid) {
-                    record.placeholder_offset =
-                            line_start + static_cast<off_t>(PLACEHOLDER_OFFSET_IN_LINE);
-                }
+                // an untrusted cursor, keep the -1 sentinel so no patch is ever
+                // written for this frame (its placeholder stays "[  pending ]").
+                record.line_start = line_start;
+                record.depth = t_state.current_stack_depth;
+            }
+#endif
+#ifdef LOG_ELAPSED
+            if (logged) {
                 // Read the clock as the hook's LAST step for this frame, mirrored
                 // by the exit hook reading it FIRST (before its own format +
                 // pwrite work): the frame's reported span covers the function
@@ -1054,7 +1153,7 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
         const bool tail_called = hook_site == caller;
         const std::size_t index = instrumentation::exiting_record_index(
                 t_state.frames.data(), t_state.frames.size(), key, tail_called, t_state.stack_bounds);
-        reclaim_dead_records(t_state.frames.size() - 1 - index);
+        reclaim_dead_records(t_state.frames.size() - 1 - index, utils::FRAME_END_JUMP);
 #endif
         // Copy the record out BEFORE popping so LOG_ELAPSED patches the very line
         // the enter handler wrote for this frame. pop_back() never shrinks the
@@ -1063,6 +1162,11 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
         t_state.frames.pop_back();
         if (record.logged) {
             t_state.current_stack_depth--;
+#ifdef LOG_EXCEPTIONS
+            // An exception is leaving this frame when more exceptions are in flight
+            // now than when it was entered (see FrameRecord::uncaught_at_enter).
+            const bool by_exception = std::uncaught_exceptions() > record.uncaught_at_enter;
+#endif
 #ifdef LOG_ELAPSED
             // Compute elapsed and patch the matching line's placeholder.
             const auto exit_time = std::chrono::steady_clock::now();
@@ -1075,16 +1179,18 @@ void __cyg_profile_func_exit(void *callee, void *caller) {
                     static_cast<std::uint64_t>(elapsed);
             char buf[utils::DURATION_FIELD_WIDTH + 1];
             utils::format_duration_12chars(ns, buf);
-            const int pfd = t_state.trace_file.patch_fd.load(std::memory_order_relaxed);
-            if (pfd >= 0 && record.placeholder_offset >= 0) {
-                // pwrite is atomic for our 12 bytes (well under PIPE_BUF) and
-                // honors the explicit offset because patch_fd was opened WITHOUT
-                // O_APPEND. Return value intentionally unchecked: the only
-                // failure modes are racing shutdown closing pfd (EBADF, no
-                // recovery possible) or a disk-I/O hardware error — in either
-                // case the placeholder stays visible in the trace, which is
-                // the documented degraded-but-readable mode.
-                (void)pwrite(pfd, buf, utils::DURATION_FIELD_WIDTH, record.placeholder_offset);
+#ifdef LOG_EXCEPTIONS
+            if (by_exception) {
+                utils::set_duration_flag(buf, utils::FRAME_END_EXCEPTION);
+            }
+#endif
+            patch_line_bytes(record.line_start, PLACEHOLDER_OFFSET_IN_LINE, buf,
+                             utils::DURATION_FIELD_WIDTH);
+#endif
+#ifdef LOG_EXCEPTIONS
+            if (by_exception) {
+                // The duration (if any) is already in place; only the glyph is left.
+                mark_frame_end(record, utils::FRAME_END_EXCEPTION, nullptr);
             }
 #endif
         }

@@ -15,6 +15,7 @@
  * correctly end-to-end.
  */
 
+#include "prettyTime.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -91,6 +92,12 @@
 #ifndef TRACED_PROGRAM_LOG_EXCEPTIONS_PATH
     #error "TRACED_PROGRAM_LOG_EXCEPTIONS_PATH must be defined by CMake"
 #endif
+#ifndef TRACED_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH
+    #error "TRACED_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH must be defined by CMake"
+#endif
+#ifndef TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH
+    #error "TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH must be defined by CMake"
+#endif
 
 namespace {
 
@@ -113,33 +120,51 @@ std::vector<std::string> split_lines(const std::string& content) {
     return lines;
 }
 
+// True when the three characters at `pos` are one tree element: an inner "|  "
+// or the final glyph "|_ ", whose '|' LOG_EXCEPTIONS may have patched to '!'
+// (left by an exception) or '~' (skipped by a non-local jump).
+bool is_tree_element(const std::string& line, size_t pos) {
+    if (pos + 2 >= line.size()) return false;
+    if (line.compare(pos, 3, "|  ") == 0) return true;
+    const char glyph = line[pos];
+    return (glyph == '|' || glyph == '!' || glyph == '~') && line[pos + 1] == '_' && line[pos + 2] == ' ';
+}
+
 // Count leading indentation characters ("|  " and "|_ " patterns) in a trace line.
 // Returns the nesting depth based on the tree prefix.
 //
-// Scans forward to the FIRST "|  " or "|_ " occurrence rather than stopping at
-// the first "] ", so the helper tolerates any number of bracketed prefixes
-// between the timestamp and the tree — specifically: the LOG_ELAPSED duration
-// field ("[  pending ]" or a patched duration) and the LOG_ADDR field
+// Scans forward to the FIRST tree element rather than stopping at the first
+// "] ", so the helper tolerates any number of bracketed prefixes between the
+// timestamp and the tree — specifically: the LOG_ELAPSED duration field
+// ("[  pending ]" or a patched duration) and the LOG_ADDR field
 // ("addr: [0x...]"). The tree characters are unambiguous on a valid trace line
 // because none of the prefix content ever contains those exact 3-char sequences.
 int count_indentation_depth(const std::string& line) {
     size_t pos = 0;
-    while (pos + 2 < line.size()) {
-        if (line.compare(pos, 3, "|  ") == 0 || line.compare(pos, 3, "|_ ") == 0) {
-            break;
-        }
+    while (pos + 2 < line.size() && !is_tree_element(line, pos)) {
         ++pos;
     }
     int depth = 0;
-    while (pos + 2 < line.size()) {
-        if (line.compare(pos, 3, "|  ") == 0 || line.compare(pos, 3, "|_ ") == 0) {
-            ++depth;
-            pos += 3;
-        } else {
-            break;
-        }
+    while (is_tree_element(line, pos)) {
+        ++depth;
+        pos += 3;
     }
     return depth;
+}
+
+// The character of the line's tree glyph: '|' for a frame that returned normally,
+// '!' or '~' once LOG_EXCEPTIONS marked it (see utils::FRAME_END_* in format.h),
+// '\0' for a line without a glyph (depth 0).
+char tree_glyph_of(const std::string& line) {
+    size_t pos = 0;
+    while (pos + 2 < line.size() && !is_tree_element(line, pos)) {
+        ++pos;
+    }
+    while (is_tree_element(line, pos)) {
+        if (line[pos + 1] == '_') return line[pos];
+        pos += 3;
+    }
+    return '\0';
 }
 
 } // namespace
@@ -2010,7 +2035,8 @@ TEST(ChdirTest, RelativeOutputPathIsAnchoredToStartupDirectory) {
 }
 
 // ============================================================================
-// LOG_EXCEPTIONS — frame-stack reconciliation after non-local exits.
+// LOG_EXCEPTIONS — frame-stack reconciliation after non-local exits, and the
+// markers on the lines of frames that did not return normally.
 //
 // exceptions_traced_program.cpp makes instrumented frames leave without their
 // exit hook in every way the tracer knows (exceptions caught above them, which
@@ -2022,10 +2048,11 @@ TEST(ChdirTest, RelativeOutputPathIsAnchoredToStartupDirectory) {
 
 namespace {
 
-// Runs the LOG_EXCEPTIONS driver in a fresh directory (it spawns a worker
-// thread, so a second trace file appears), captures its stdout and parses the
-// "<TAG>=<line>" pairs the driver prints for its throw and catch sites.
-class LogExceptionsTest : public ::testing::Test {
+// Runs one of the LOG_EXCEPTIONS variants of the driver in a fresh directory
+// (it spawns a worker thread, so a second trace file appears), captures its
+// stdout and parses the "<TAG>=<line>" pairs the driver prints for its throw
+// and catch sites.
+class LogExceptionsRunner : public ::testing::Test {
 protected:
     std::string dir;
     std::string trace_content;
@@ -2034,7 +2061,7 @@ protected:
     std::vector<std::string> worker_lines;
     std::map<std::string, int> site_lines;
 
-    void SetUp() override {
+    void run_driver(const char* program_path) {
         char dir_tmpl[] = "/tmp/cslg_exceptions_XXXXXX";
         char* d = mkdtemp(dir_tmpl);
         ASSERT_NE(d, nullptr) << "mkdtemp failed";
@@ -2042,8 +2069,8 @@ protected:
         const std::string trace_path = dir + "/trace.out";
         const std::string stdout_path = dir + "/stdout.txt";
 
-        std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_path + "\" \""
-                        + TRACED_PROGRAM_LOG_EXCEPTIONS_PATH + "\" > \"" + stdout_path + "\" 2>&1";
+        std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_path + "\" \"" + program_path
+                        + "\" > \"" + stdout_path + "\" 2>&1";
         int ret = system(cmd.c_str());
         ASSERT_EQ(ret, 0) << "exceptions driver failed, exit=" << ret << "\n" << read_file(stdout_path);
 
@@ -2091,6 +2118,56 @@ protected:
         }
         return depths;
     }
+
+    // Every entry line naming `function`, in file order.
+    static std::vector<std::string> lines_of(const std::vector<std::string>& lines, const std::string& function) {
+        std::vector<std::string> found;
+        for (const auto& line : lines) {
+            if (line.find(function) != std::string::npos && line.find("(called from:") != std::string::npos) {
+                found.push_back(line);
+            }
+        }
+        return found;
+    }
+
+    // Tree glyph of the unique entry line naming `function` ('?' when missing).
+    static char glyph_of(const std::vector<std::string>& lines, const std::string& function) {
+        const std::string line = find_unique_line(lines, function);
+        return line.empty() ? '?' : tree_glyph_of(line);
+    }
+
+    // The 12-byte field after the timestamp (empty when the line is too short).
+    static std::string field_of(const std::string& line) {
+        const size_t start = utils::PRETTY_TIME_LENGTH + 3;
+        return line.size() >= start + 12 ? line.substr(start, 12) : std::string();
+    }
+};
+
+class LogExceptionsTest : public LogExceptionsRunner {
+protected:
+    void SetUp() override { run_driver(TRACED_PROGRAM_LOG_EXCEPTIONS_PATH); }
+};
+
+class LogExceptionsElapsedTest : public LogExceptionsRunner {
+protected:
+    void SetUp() override { run_driver(TRACED_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH); }
+};
+
+class LogExceptionsAllFlagsTest : public LogExceptionsRunner {
+protected:
+    void SetUp() override { run_driver(TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH); }
+};
+
+// Frames the driver leaves by exception, each named exactly once in the trace.
+const std::vector<std::string> kFramesLeftByException = { "exc_thrower()", "exc_mid()" };
+// Frames the driver leaves by longjmp: the two of scenario H (one leaf, one mid).
+const std::vector<std::string> kFramesSkippedByLongjmp = { "exc_jump_mid()" };
+// Frames that return normally although an exception or a longjmp passed nearby.
+const std::vector<std::string> kFramesReturningNormally = {
+    "exc_catcher()", "ExcGuard::~ExcGuard()", "exc_helper()", "exc_marker_a()", "exc_rec_catcher()",
+    "exc_marker_b()", "exc_lib_throw()", "exc_so_throw()", "exc_rethrow_stmt()", "exc_rethrow_ptr()",
+    "exc_nested_in_handler()", "exc_jump_root()", "exc_jump_after()", "exc_marker_h()",
+    "exc_loop_jump()", "exc_loop_marker()", "exc_messages()", "exc_final_marker()",
 };
 
 } // namespace
@@ -2142,4 +2219,164 @@ TEST_F(LogExceptionsTest, WorkerThreadFileIsReconciledIndependently) {
     EXPECT_EQ(depth_of(worker_lines, "exc_thread_body"), 1) << worker_content;
     EXPECT_EQ(depth_of(worker_lines, "exc_thread_thrower"), 2) << worker_content;
     EXPECT_EQ(depth_of(worker_lines, "exc_thread_marker"), 1) << worker_content;
+}
+
+// A frame an exception leaves gets its tree glyph patched in place. GCC runs the
+// exit hook of every unwound frame while the exception is in flight, so the
+// mark is '!' (left by an exception). Clang runs no exit hook for them: they are
+// found dead when the catcher returns, marked '~' (left without an exit hook).
+TEST_F(LogExceptionsTest, FramesLeftByAnExceptionAreMarked) {
+    for (const auto& function : kFramesLeftByException) {
+        const char glyph = glyph_of(trace_lines, function);
+        EXPECT_NE(glyph, '|') << function << " kept a plain glyph:\n" << trace_content;
+#ifdef CSLG_COMPILER_IS_GNU
+        EXPECT_EQ(glyph, '!') << function << ":\n" << trace_content;
+#else
+        EXPECT_EQ(glyph, '~') << function << ":\n" << trace_content;
+#endif
+    }
+    for (const auto& line : lines_of(trace_lines, "exc_rec(")) {
+        EXPECT_NE(tree_glyph_of(line), '|') << line;
+    }
+    ASSERT_FALSE(worker_lines.empty());
+    EXPECT_NE(glyph_of(worker_lines, "exc_thread_thrower()"), '|') << worker_content;
+}
+
+// Frames a longjmp skipped are found dead by the next hook and marked '~' on
+// both compilers: the leaf that jumps and the frame between it and setjmp.
+TEST_F(LogExceptionsTest, FramesSkippedByLongjmpAreMarked) {
+    for (const auto& function : kFramesSkippedByLongjmp) {
+        EXPECT_EQ(glyph_of(trace_lines, function), '~') << function << ":\n" << trace_content;
+    }
+    // exc_jump_leaf is entered four times (scenario H once, scenario I thrice);
+    // every one of those frames longjmp'ed out.
+    const auto leaves = lines_of(trace_lines, "exc_jump_leaf()");
+    ASSERT_EQ(leaves.size(), 4u) << trace_content;
+    for (const auto& line : leaves) {
+        EXPECT_EQ(tree_glyph_of(line), '~') << line;
+    }
+}
+
+// Frames that returned normally keep their plain glyph even when an exception
+// or a longjmp passed right next to them (the catcher, the cleanup helper, the
+// setjmp frame, the markers).
+TEST_F(LogExceptionsTest, FramesThatReturnedNormallyAreNotMarked) {
+    for (const auto& function : kFramesReturningNormally) {
+        EXPECT_EQ(glyph_of(trace_lines, function), '|') << function << ":\n" << trace_content;
+    }
+    for (const auto& line : lines_of(trace_lines, "exc_void_rec")) {
+        EXPECT_EQ(tree_glyph_of(line), '|') << line;
+    }
+}
+
+// With LOG_ELAPSED every dead frame's placeholder is patched too: no
+// "[  pending ]" may survive a clean exit in either per-thread file.
+TEST_F(LogExceptionsElapsedTest, NoPendingLeftovers) {
+    EXPECT_EQ(trace_content.find("[  pending ]"), std::string::npos) << trace_content;
+    ASSERT_FALSE(worker_lines.empty());
+    EXPECT_EQ(worker_content.find("[  pending ]"), std::string::npos) << worker_content;
+}
+
+// The duration field of a frame left by an exception carries the '!' flag in
+// its otherwise always-blank byte 1. On GCC the exit hook measured a real
+// duration ("[!  1.234ms]"); on Clang no exit hook ran, so the field reads
+// "[~ unwound ]" — the frame was found dead when the catcher returned.
+TEST_F(LogExceptionsElapsedTest, ExceptionExitsCarryFlaggedFields) {
+    for (const auto& function : kFramesLeftByException) {
+        const std::string line = find_unique_line(trace_lines, function);
+        ASSERT_FALSE(line.empty()) << function;
+        const std::string field = field_of(line);
+        ASSERT_EQ(field.size(), 12u) << line;
+#ifdef CSLG_COMPILER_IS_GNU
+        EXPECT_EQ(field[1], '!') << line;
+        std::string unflagged = field;
+        unflagged[1] = ' ';
+        EXPECT_TRUE(std::regex_match(unflagged, duration_field_regex())) << "no measured duration: " << line;
+#else
+        EXPECT_EQ(field, "[~ unwound ]") << line;
+#endif
+    }
+}
+
+// Frames skipped by longjmp never ran an exit hook, so no duration exists for
+// them: the placeholder becomes the flagged "[~ unwound ]" on both compilers.
+TEST_F(LogExceptionsElapsedTest, LongjmpFramesReadUnwound) {
+    for (const auto& function : kFramesSkippedByLongjmp) {
+        const std::string line = find_unique_line(trace_lines, function);
+        ASSERT_FALSE(line.empty()) << function;
+        EXPECT_EQ(field_of(line), "[~ unwound ]") << line;
+        EXPECT_EQ(tree_glyph_of(line), '~') << line;
+    }
+    for (const auto& line : lines_of(trace_lines, "exc_jump_leaf()")) {
+        EXPECT_EQ(field_of(line), "[~ unwound ]") << line;
+    }
+}
+
+// Frames that returned normally keep an unflagged, measured duration.
+TEST_F(LogExceptionsElapsedTest, NormalExitsKeepPlainDurations) {
+    for (const auto& function : kFramesReturningNormally) {
+        const std::string line = find_unique_line(trace_lines, function);
+        ASSERT_FALSE(line.empty()) << function;
+        EXPECT_TRUE(std::regex_match(field_of(line), duration_field_regex())) << line;
+        EXPECT_EQ(tree_glyph_of(line), '|') << line;
+    }
+}
+
+// On GCC the unwound frames' durations are real measurements nested inside the
+// catcher's: catcher >= mid >= thrower, as for any parent/child pair.
+TEST_F(LogExceptionsElapsedTest, ExceptionalDurationsNestInsideTheCatcher) {
+#ifndef CSLG_COMPILER_IS_GNU
+    GTEST_SKIP() << "Clang runs no exit hook for unwound frames; their fields read unwound.";
+#else
+    auto ns_of = [&](const std::string& function) {
+        std::string field = field_of(find_unique_line(trace_lines, function));
+        if (field.size() == 12) field[1] = ' ';
+        return parse_duration_ns(field);
+    };
+    const long long catcher = ns_of("exc_catcher()");
+    const long long mid = ns_of("exc_mid()");
+    const long long thrower = ns_of("exc_thrower()");
+    ASSERT_GE(thrower, 0) << trace_content;
+    EXPECT_GE(mid, thrower) << trace_content;
+    EXPECT_GE(catcher, mid) << trace_content;
+#endif
+}
+
+// Every entry line still parses as "[ts] [<12-byte field>] <tree> name  (called from: ...)":
+// the flag byte and the "unwound" word stay inside the 12-byte field.
+TEST_F(LogExceptionsElapsedTest, EveryLineKeepsTheFixedLayout) {
+    const std::regex full(
+            R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] \[[ !~]( *\d+\.\d{3}(ns|us|ms|s )| unwound |  >999\.9s )\] .*\(called from: .+:.+\)$)");
+    int entries = 0;
+    for (const auto& line : trace_lines) {
+        if (line.find("(called from:") == std::string::npos) continue;
+        ++entries;
+        EXPECT_TRUE(std::regex_match(line, full)) << line;
+    }
+    EXPECT_GT(entries, 30) << trace_content;
+}
+
+// With LOG_ADDR too, the glyph offset must skip both the duration column and the
+// address column: the marks land on the glyph, and the address stays intact.
+TEST_F(LogExceptionsAllFlagsTest, MarksLandOnTheGlyphBesideTheAddressColumn) {
+    const std::regex marked(
+            R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] \[~ unwound \] addr: \[0x[0-9a-f]{16}\] \|  ~_ exc_jump_mid\(\)  \(called from: )");
+    const std::string mid = find_unique_line(trace_lines, "exc_jump_mid()");
+    EXPECT_TRUE(std::regex_search(mid, marked)) << mid;
+
+    const std::regex plain(
+            R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] \[ *\d+\.\d{3}(ns|us|ms|s )\] addr: \[0x[0-9a-f]{16}\] \|  \|_ exc_jump_after\(\)  \(called from: )");
+    const std::string after = find_unique_line(trace_lines, "exc_jump_after()");
+    EXPECT_TRUE(std::regex_search(after, plain)) << after;
+}
+
+// Marked and unmarked lines at the same depth keep their glyphs in the same
+// column, so the tree still reads as a tree.
+TEST_F(LogExceptionsAllFlagsTest, TreeColumnsStillAlign) {
+    const std::string mid = find_unique_line(trace_lines, "exc_jump_mid()");
+    const std::string after = find_unique_line(trace_lines, "exc_jump_after()");
+    ASSERT_FALSE(mid.empty());
+    ASSERT_FALSE(after.empty());
+    EXPECT_EQ(mid.find("~_ "), after.find("|_ ")) << mid << "\n" << after;
+    EXPECT_EQ(count_indentation_depth(mid), count_indentation_depth(after));
 }

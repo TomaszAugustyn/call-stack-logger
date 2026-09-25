@@ -231,3 +231,39 @@ TEST(DurationFormatTest, DoesNotOverflowBuffer) {
         EXPECT_EQ(static_cast<unsigned char>(buf[i]), 0xABu) << "Buffer overrun at index " << i;
     }
 }
+
+// -------- flag byte (LOG_EXCEPTIONS) --------
+
+// Every rendering the formatter can produce keeps a space in byte 1: the whole
+// part has at most three digits in a four-wide column. LOG_EXCEPTIONS relies on
+// that byte being free to flag how the frame ended, so pin it for every unit
+// boundary and every constant field.
+TEST(DurationFormatTest, FlagByteIsASpaceInEveryRendering) {
+    const std::uint64_t values[] = { 0, 1, 999, 1'000, 999'999, 1'000'000, 999'999'999ULL,
+                                     1'000'000'000ULL, 999'999'999'999ULL, 1'000'000'000'000ULL,
+                                     std::numeric_limits<std::uint64_t>::max() };
+    for (std::uint64_t ns : values) {
+        EXPECT_EQ(format_and_check(ns)[1], ' ') << "value " << ns;
+    }
+    EXPECT_EQ(utils::DURATION_PLACEHOLDER[1], ' ');
+    EXPECT_EQ(utils::DURATION_SATURATION[1], ' ');
+    EXPECT_EQ(utils::DURATION_UNWOUND[1], ' ');
+}
+
+TEST(DurationFormatTest, UnwoundFieldHasCorrectWidth) {
+    EXPECT_EQ(std::strlen(utils::DURATION_UNWOUND), utils::DURATION_FIELD_WIDTH);
+    EXPECT_STREQ(utils::DURATION_UNWOUND, "[  unwound ]");
+}
+
+TEST(DurationFormatTest, SetDurationFlagTouchesOnlyByteOne) {
+    char field[utils::DURATION_FIELD_WIDTH + 1] = {};
+    utils::format_duration_12chars(1'234'000, field);
+    ASSERT_STREQ(field, "[   1.234ms]");
+    utils::set_duration_flag(field, '!');
+    EXPECT_STREQ(field, "[!  1.234ms]");
+    EXPECT_EQ(std::strlen(field), utils::DURATION_FIELD_WIDTH);
+
+    std::memcpy(field, utils::DURATION_UNWOUND, utils::DURATION_FIELD_WIDTH + 1);
+    utils::set_duration_flag(field, '~');
+    EXPECT_STREQ(field, "[~ unwound ]");
+}

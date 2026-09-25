@@ -38,6 +38,25 @@ inline constexpr const char* DURATION_SATURATION = "[  >999.9s ]";
 static_assert(sizeof("[  >999.9s ]") - 1 == DURATION_FIELD_WIDTH,
               "DURATION_SATURATION must be exactly DURATION_FIELD_WIDTH chars");
 
+// Field patched onto the placeholder of a frame found to have ended WITHOUT its
+// exit hook (LOG_EXCEPTIONS): no duration was ever measured for it. Exactly
+// DURATION_FIELD_WIDTH chars.
+inline constexpr const char* DURATION_UNWOUND = "[  unwound ]";
+static_assert(sizeof("[  unwound ]") - 1 == DURATION_FIELD_WIDTH,
+              "DURATION_UNWOUND must be exactly DURATION_FIELD_WIDTH chars");
+
+// Byte 1 of every field is a space: format_duration_12chars() prints a whole
+// part of at most three digits in a four-wide column, and the placeholder, the
+// saturation sentinel and DURATION_UNWOUND keep a space there too. That byte is
+// therefore free to carry a one-character flag saying how the frame ended
+// (LOG_EXCEPTIONS: utils::FRAME_END_EXCEPTION or FRAME_END_JUMP), without
+// changing the field's width or the rest of its text. `field` must hold
+// DURATION_FIELD_WIDTH + 1 bytes.
+NO_INSTRUMENT
+inline void set_duration_flag(char field[DURATION_FIELD_WIDTH + 1], char flag) {
+    field[1] = flag;
+}
+
 // Formats a nanosecond duration into a fixed-width 12-char field with auto-scaled
 // SI units. Writes exactly DURATION_FIELD_WIDTH chars + NUL terminator into `out`.
 // `out` MUST point to a buffer of at least DURATION_FIELD_WIDTH + 1 (13) bytes.

@@ -387,7 +387,9 @@ Combined with `LOG_ADDR=ON` the address column simply follows the duration:
 | `≥ 1000 s` | `[  >999.9s ]` | saturation sentinel                       |
 
 Auto-scales to keep the output readable. The placeholder while a function is
-still executing is `[  pending ]`.
+still executing is `[  pending ]`. The second byte of the field is blank in
+every rendering; with `LOG_EXCEPTIONS` it carries a flag telling how the frame
+ended (see [Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions)).
 
 ### Crash diagnostics via `[  pending ]` ###
 
@@ -494,13 +496,47 @@ is a constant of each hook call site, measured once per site with a two-frame
 unwind and cached per thread; afterwards each hook pays one hash lookup and an
 addition.
 
+### Marking the frames that did not return ###
+
+A reclaimed frame does not just disappear from the bookkeeping: its line is
+patched in place, the same way `LOG_ELAPSED` patches durations. The `|` of the
+line's `|_ ` glyph becomes a marker, so the tree keeps its shape and its
+alignment while telling you how each frame ended:
+
+| Glyph | Meaning                                                                                           |
+| ----- | ------------------------------------------------------------------------------------------------- |
+| `\|_` | Returned normally                                                                                 |
+| `!_`  | An exception left the frame (GCC runs the exit hook while the exception is in flight and sees it) |
+| `~_`  | The frame left without running its exit hook: `longjmp` on both compilers, an exception on Clang  |
+
+```
+[25-09-2026 10:41:07.118] |_ exc_jump_root()  (called from: main.cpp:236)
+[25-09-2026 10:41:07.118] |  ~_ exc_jump_mid()  (called from: main.cpp:160)
+[25-09-2026 10:41:07.118] |  |  ~_ exc_jump_leaf()  (called from: main.cpp:151)
+[25-09-2026 10:41:07.118] |  |_ exc_jump_after()  (called from: main.cpp:162)
+```
+
+With `LOG_ELAPSED` the duration field carries the same mark in its second byte,
+which every rendering of the field leaves blank otherwise, so the field keeps
+its width and its columns:
+
+| Field          | Meaning                                                                          |
+| -------------- | -------------------------------------------------------------------------------- |
+| `[   1.234ms]` | Returned normally after 1.234 ms                                                 |
+| `[!  1.234ms]` | Left by an exception after 1.234 ms (GCC measured it on the unwind path)         |
+| `[! unwound ]` | Left by an exception; no exit hook ran, so no duration exists (Clang)            |
+| `[~ unwound ]` | Skipped by `longjmp`; no exit hook ran, so no duration exists                    |
+| `[  pending ]` | Still running: the program crashed, called `exit()`, or the line was never patched |
+
+A line at depth 0 has no glyph, so only its duration field can carry the mark.
+
 What this does not cover, and what happens instead:
 
 - A frame that `longjmp`s out and is then called again **from the very same call
   site** at the same level looks like a recursive inlined copy of itself and is
   kept until the frame that contains the loop returns; calls made inside that
   loop meanwhile are indented one level deeper per iteration. The pairing itself
-  stays correct.
+  stays correct, and the frames are marked when they are reclaimed.
 - **Fibers and stackful coroutines** switch stacks within one thread. The
   tracer's frame stack interleaves their frames today, and `LOG_EXCEPTIONS`
   leaves them exactly as they are: the level rules only ever compare frames on

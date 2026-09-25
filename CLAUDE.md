@@ -392,12 +392,14 @@ site — useful debugging signal that's hard to get otherwise. See README's
 "Per-function timing" section for an example.
 
 **Per-frame state.** With LOG_ELAPSED, `FrameRecord` (the element type of
-the per-thread `frames` stack) carries two extra fields next to the `logged`
-flag: `std::chrono::steady_clock::time_point enter_time` and
-`off_t placeholder_offset`. The record is pushed by the enter hook and copied
+the per-thread `frames` stack) carries `std::chrono::steady_clock::time_point
+enter_time` next to the `logged` flag, and — shared with LOG_EXCEPTIONS under
+`CSLG_LINE_PATCHING` — the line's `off_t line_start` (-1 when the cursor was
+untrusted) and `int depth`. The record is pushed by the enter hook and copied
 out by the exit hook's pop, so enter/exit always operate on the matching frame.
 The exit handler computes `now() - record.enter_time`, formats into a 12-byte
-buffer, and `pwrite(patch_fd, buf, 12, record.placeholder_offset)`.
+buffer, and patches it at `line_start + PLACEHOLDER_OFFSET_IN_LINE` through
+`patch_line_bytes()`.
 
 **What the span measures.** `FrameRecord::enter_time` is filled as the enter
 hook's LAST step for the frame (after resolve, format, and the line
@@ -515,9 +517,33 @@ in `tests/unit/test_frame_reconcile.cpp`):
   /proc/self/maps). Records off the thread stack (fibers, sigaltstack) are
   never compared and a frame running off it gets the positional behavior —
   fibers stay exactly as (un)supported as before.
-- `reclaim_dead_records()` pops the dead records and lowers the depth for the
-  logged ones; the exit hook sets the re-entrancy guard and blocks cancellation
-  under this option too (`std::uncaught_exceptions()`, hash lookups).
+- `reclaim_dead_records(count, how)` pops the dead records, lowers the depth for
+  the logged ones and marks their lines (below); the exit hook sets the
+  re-entrancy guard and blocks cancellation under this option too
+  (`std::uncaught_exceptions()`, hash lookups, pwrite).
+
+**In-place markers.** The LOG_ELAPSED patch machinery (second non-O_APPEND
+descriptor reopened through `/proc/self/fd`, per-thread byte cursor,
+`cursor_valid`, fixed line layout) is shared: `CSLG_LINE_PATCHING` is defined
+in `trace.cpp` when either option is on, and `FrameRecord` stores `line_start`
+(-1 when the cursor was untrusted) plus the `depth` the line was written at
+instead of a precomputed placeholder offset; `patch_line_bytes(line_start,
+offset_in_line, bytes, count)` is the one pwrite site. A frame that ended
+abnormally gets its tree glyph patched by `mark_frame_end()`: the `|` of `|_ `
+becomes `utils::FRAME_END_EXCEPTION` (`!`, the exit hook saw
+`std::uncaught_exceptions()` rise: GCC's unwind path) or `FRAME_END_JUMP` (`~`,
+reclaimed at an enter or exit hook: longjmp on both compilers, exceptions on
+Clang). The glyph offset is `utils::tree_glyph_offset(depth, LINE_PREFIX_EXTRA)`
+with `LINE_PREFIX_EXTRA` = duration column (13) + address column
+(`utils::ADDR_COLUMN_WIDTH`, 27 on 64-bit) as compiled in; `FormatTest.
+TreeGlyphOffsetMatchesFormattedLines` pins it for every depth and column
+combination. With LOG_ELAPSED the duration field gets the same character in
+byte 1 (`utils::set_duration_flag`; byte 1 is a space in every rendering,
+pinned by `DurationFormatTest.FlagByteIsASpaceInEveryRendering`): `[!  1.234ms]`
+for a measured exceptional exit, `[! unwound ]` / `[~ unwound ]`
+(`utils::DURATION_UNWOUND` + flag) for frames whose exit hook never ran. Depth-0
+lines have no glyph and are marked through the field only. Two pwrites per
+abnormal exit (field + glyph); normal exits are unchanged.
 
 Pinned by `LogExceptionsTest` (driver `exceptions_traced_program.cpp`, all
 scenario functions `noinline` so frames stay physical at every -O level) on
@@ -873,7 +899,11 @@ Test is fetched via FetchContent (downloaded once, cached for offline use).
 Test pure/deterministic functions from the include headers:
 - `test_format.cpp` — tree indentation, address formatting, line numbers, buffer handling;
   `OversizedLineIsTruncatedSafely` exercises the 2048-byte buffer clamp with a
-  3000-char function name (result exactly buffer-size − 1 bytes, prefix intact)
+  3000-char function name (result exactly buffer-size − 1 bytes, prefix intact);
+  `TreeGlyphOffsetMatchesFormattedLines` and `PrefixWidthConstantsMatchOutput` pin the
+  in-place patch layout (`tree_glyph_offset`, `TIMESTAMP_PREFIX_WIDTH`,
+  `ADDR_COLUMN_WIDTH`) against real `format()` output for depths 1–5 with and without
+  the duration splice and the address column
 - `test_pretty_time.cpp` — timestamp format, length, milliseconds, `to_ms()` conversion;
   `LengthMatchesConstant` enforces `pretty_time().size() == utils::PRETTY_TIME_LENGTH`
   (LOG_ELAPSED depends on this for byte-offset derivation);
@@ -891,7 +921,9 @@ Test pure/deterministic functions from the include headers:
   small and LONG_MAX TIDs)
 - `test_duration_format.cpp` — exhaustive coverage of `utils::format_duration_12chars()`:
   zero, ns / us / ms / s ranges and boundaries, saturation at 1000s and UINT64_MAX,
-  framing characters, fixed 12-byte width invariant, buffer-overflow canary
+  framing characters, fixed 12-byte width invariant, buffer-overflow canary; the free
+  flag byte (`FlagByteIsASpaceInEveryRendering`), `DURATION_UNWOUND`'s width and
+  `set_duration_flag()` touching only byte 1
 - `test_frame_reconcile.cpp` — every rule in `frameReconcile.h` against synthetic
   records: deeper records reclaimed at enter, reused slot (equal level, different
   caller) reclaimed, equal level with equal caller kept (inline host / same-site
@@ -1087,8 +1119,18 @@ Test pure/deterministic functions from the include headers:
   and an exception caught inside a worker thread — and calls a marker after each. The
   tests assert every marker's exact depth on both compilers, the depths of the unwound
   frames and of the cleanup helper, level-by-level pairing of the recursive frames, and
-  the worker thread's own file. All driver functions are `noinline`; the driver prints
-  `<TAG>=<line>` for its throw and catch statements for later exact-site assertions.
+  the worker thread's own file; and the in-place marks: frames left by an exception
+  carry `!_` (GCC) or `~_` (Clang, found dead when the catcher returns), frames skipped
+  by longjmp carry `~_` on both, frames that returned normally keep `|_`. All driver
+  functions are `noinline`; the driver prints `<TAG>=<line>` for its throw and catch
+  statements for later exact-site assertions. The same driver runs as
+  `cslg_traced_test_program_log_exceptions_elapsed` (`LogExceptionsElapsedTest`, 6
+  tests: no `[  pending ]` survives, `[!  1.234ms]` on GCC / `[~ unwound ]` on Clang
+  for exception exits, `[~ unwound ]` for longjmp frames, plain durations for normal
+  exits, catcher ≥ mid ≥ thrower on GCC, every line still matches the fixed layout)
+  and as `cslg_traced_test_program_log_exceptions_all` with LOG_ADDR too
+  (`LogExceptionsAllFlagsTest`, 2 tests: the mark lands on the glyph beside an intact
+  address column, marked and unmarked lines at one depth stay aligned).
 - `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the both-flags
   variant `cslg_traced_test_program_log_elapsed_addr`. Asserts the
   ordering "timestamp → duration → addr" via regex, the tree column stays

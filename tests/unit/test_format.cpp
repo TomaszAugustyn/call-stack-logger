@@ -228,3 +228,48 @@ TEST(FormatTest, AfterTimestampPrecedesAddressColumn) {
             << " — should be AFTER the placeholder (which ends at "
             << (EXPECTED_OFFSET + 12) << "). LOG_ELAPSED layout has regressed.";
 }
+
+// -------- in-place patch layout (LOG_EXCEPTIONS markers) --------
+
+// The tree glyph of a line must sit exactly where tree_glyph_offset() says, for
+// every depth and every combination of the fixed-width columns that can precede
+// the tree: the LOG_ELAPSED duration splice and the LOG_ADDR address column.
+// The exit markers are pwritten at that offset, so a drift here would corrupt
+// trace files instead of marking them.
+TEST(FormatTest, TreeGlyphOffsetMatchesFormattedLines) {
+    for (int with_addr = 0; with_addr <= 1; ++with_addr) {
+        for (int with_duration = 0; with_duration <= 1; ++with_duration) {
+            auto frame = make_frame("glyph_probe");
+            if (with_addr) {
+                frame.callee_address = reinterpret_cast<void*>(0x7fff12345678);
+            }
+            const char* splice = with_duration ? "[  pending ] " : "";
+            const std::size_t extra = (with_duration ? 13u : 0u) + (with_addr ? utils::ADDR_COLUMN_WIDTH : 0u);
+            for (int depth = 1; depth <= 5; ++depth) {
+                const std::string line = utils::format(frame, depth, splice);
+                const std::size_t offset = utils::tree_glyph_offset(depth, extra);
+                ASSERT_LT(offset + 2, line.size()) << line;
+                EXPECT_EQ(line.substr(offset, 3), "|_ ")
+                        << "depth " << depth << " addr " << with_addr << " duration " << with_duration
+                        << " offset " << offset << " line:\n" << line;
+                // Everything after the glyph is the function name.
+                EXPECT_EQ(line.substr(offset + 3, 11), "glyph_probe") << line;
+            }
+        }
+    }
+}
+
+// The prefix width constants must describe what format() really writes.
+TEST(FormatTest, PrefixWidthConstantsMatchOutput) {
+    auto frame = make_frame("width_probe");
+    const std::string plain = utils::format(frame, 0);
+    EXPECT_EQ(plain.substr(0, utils::TIMESTAMP_PREFIX_WIDTH), "[01-01-2025 12:00:00.000] ");
+    EXPECT_EQ(plain.substr(utils::TIMESTAMP_PREFIX_WIDTH, 11), "width_probe");
+
+    frame.callee_address = reinterpret_cast<void*>(0x1234);
+    const std::string with_addr = utils::format(frame, 0);
+    const std::string column = with_addr.substr(utils::TIMESTAMP_PREFIX_WIDTH, utils::ADDR_COLUMN_WIDTH);
+    EXPECT_EQ(column.substr(0, 9), "addr: [0x");
+    EXPECT_EQ(column.substr(column.size() - 2), "] ");
+    EXPECT_EQ(with_addr.substr(utils::TIMESTAMP_PREFIX_WIDTH + utils::ADDR_COLUMN_WIDTH, 11), "width_probe");
+}

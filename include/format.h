@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include "prettyTime.h"
 #include "types.h"
 #include <cinttypes>
 #include <cstdio>
@@ -25,6 +26,31 @@ namespace utils {
 // are clamped (never overflow): the tail snprintf truncates and the result
 // fills the buffer to capacity - 1 bytes (+ 1 for the optional newline).
 inline constexpr std::size_t FORMAT_BUF_SIZE = 2048;
+
+// Fixed widths of the prefix pieces that precede the tree on every line, for
+// code that patches a line in place after it was written (LOG_ELAPSED,
+// LOG_EXCEPTIONS): "[<timestamp>] " and the optional "addr: [0x<hex>] " column
+// (9 characters, sizeof(void*) * 2 hex digits, "] ").
+inline constexpr std::size_t TIMESTAMP_PREFIX_WIDTH = PRETTY_TIME_LENGTH + 3;
+inline constexpr std::size_t ADDR_COLUMN_WIDTH = 9 + sizeof(void*) * 2 + 2;
+
+// Markers the tree glyph of a frame's line is patched to once the frame is
+// known to have ended abnormally (LOG_EXCEPTIONS): the '|' of its "|_ " becomes
+// '!' when an exception left the frame, '~' when a non-local jump skipped its
+// exit hook. With LOG_ELAPSED the same characters flag the duration field.
+inline constexpr char FRAME_END_EXCEPTION = '!';
+inline constexpr char FRAME_END_JUMP = '~';
+
+// Byte offset, within a formatted line, of the '|' of the "|_ " glyph that ends
+// the tree prefix of a line written at `depth` (>= 1: depth-0 lines carry no
+// glyph). `extra_prefix` is the width of everything the caller put between the
+// timestamp and the tree: the duration column (DURATION_FIELD_WIDTH + 1 with
+// LOG_ELAPSED) and the address column (ADDR_COLUMN_WIDTH with LOG_ADDR). Each
+// depth above 1 adds one "|  " before the glyph.
+NO_INSTRUMENT
+inline std::size_t tree_glyph_offset(int depth, std::size_t extra_prefix) {
+    return TIMESTAMP_PREFIX_WIDTH + extra_prefix + 3 * static_cast<std::size_t>(depth - 1);
+}
 
 // Formats a resolved frame into a trace log line with timestamp, optional address,
 // tree indentation, function name, and caller location, written into `buf`
