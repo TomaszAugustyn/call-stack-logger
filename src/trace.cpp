@@ -502,7 +502,12 @@ const void* frame_level(const void* site, const void* frame) {
     LevelSearch search{ site, 0, false, false };
     _Unwind_Backtrace(level_search_step, &search);
     const std::uintptr_t frame_address = reinterpret_cast<std::uintptr_t>(frame);
-    if (search.found && search.cfa > frame_address) {
+    // A CFA below the hook's own frame or off this thread's stack is unwind
+    // information gone wrong (hand-written assembly with bad directives, say):
+    // keep the minimum distance instead. It underestimates the level, which at
+    // worst keeps a dead record a little longer and never pops a live one.
+    if (search.found && search.cfa > frame_address
+        && instrumentation::on_thread_stack(t_state.stack_bounds, reinterpret_cast<const void*>(search.cfa))) {
         distance = static_cast<std::ptrdiff_t>(search.cfa - frame_address);
     }
     try {
