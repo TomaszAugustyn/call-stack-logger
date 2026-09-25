@@ -549,6 +549,102 @@ Pinned by `LogExceptionsTest` (driver `exceptions_traced_program.cpp`, all
 scenario functions `noinline` so frames stay physical at every -O level) on
 both compilers, including -O2 and the sanitizer builds.
 
+### Exception Events (LOG_EXCEPTIONS)
+
+`src/exceptions.cpp` interposes the C++ runtime's entry points and
+`trace.cpp` turns each event into a line (`include/eventFormat.h`, pure and
+unit-tested: `utils::EventLine`, `format_event_into`, `sanitize_what_into`;
+the bridge between the two files is the internal `src/exceptionEvents.h`).
+
+- **Interposition.** `cslg_cxa_throw`, `cslg_cxa_rethrow`,
+  `cslg_cxa_begin_catch` and `cslg_rethrow_exception` are ordinary functions;
+  the public names `__cxa_throw`, `__cxa_rethrow`, `__cxa_begin_catch` and
+  `std::rethrow_exception` are WEAK ALIASES of them. The executable that links
+  the library therefore defines those names, the dynamic linker resolves every
+  call — from the program, from `libstdc++.so` itself, from any `.so` — to
+  them first, and each forwards to the runtime's own implementation found once
+  with `dlsym(RTLD_NEXT)`. Weak so that a program defining its own
+  `__cxa_throw` still links (its strong definition wins; the alias is what
+  lets `verify_interposers()` notice: the active definition is then not
+  `cslg_cxa_throw`) — except in an ASan build (`__SANITIZE_ADDRESS__` /
+  `__has_feature(address_sanitizer)`, `CSLG_ALIAS_LINKAGE`): Clang links its
+  static ASan runtime first, that runtime defines `__cxa_throw` as a weak alias
+  of its interceptor, and between two weak definitions the linker keeps the
+  first, so ours would lose and no throw would be traced; sanitized builds use
+  strong aliases (a program with its own `__cxa_throw` then fails to link,
+  loudly). The three ABI aliases are declared inside `namespace
+  __cxxabiv1`, where `<cxxabi.h>` declares them: GCC declares `__cxa_throw`
+  itself at global scope (with a `void*` type_info parameter) as soon as any
+  included header contains a throw expression, and Clang checks C-linkage
+  declarations across namespaces, so only a declaration matching
+  `<cxxabi.h>`'s own in scope and type satisfies both. The file must contain
+  no throw/catch of its own and never allocates: an exception raised inside
+  the `__cxa_throw` wrapper would replace the program's exception.
+- **What the interposers report.** `__cxa_throw`: the type_info argument and
+  the `what()` of the thrown object (`typeid(std::exception).__do_catch(type,
+  &object, 1)` — libstdc++'s own handler-matching virtual — adjusts the pointer
+  to the `std::exception` subobject correctly under multiple inheritance, then
+  `what()`, which is `noexcept`), sanitized into a stack buffer. `__cxa_rethrow`:
+  `abi::__cxa_current_exception_type()`, no text. `std::rethrow_exception`:
+  `exception_ptr::__cxa_exception_type()`, no text (the object is private to
+  `exception_ptr`), suffix "via std::rethrow_exception". `__cxa_begin_catch`:
+  forwards FIRST, then `__cxa_current_exception_type()`; for a native PRIMARY
+  exception the thrown object follows the `_Unwind_Exception` header (Itanium
+  ABI 2.4.2), so its `what()` is read the same way; a dependent exception (from
+  `std::rethrow_exception`) gets the type only. The exception class is compared
+  as the 64-bit INTEGER libstdc++ builds from "GNUCC++" + 0 / 1 — its bytes are
+  reversed in memory on little-endian machines, a byte comparison never matches
+  (the first attempt's bug). The site passed to trace.cpp is the interposer's
+  return address minus one, resolved by the new `instrumentation::resolve_site()`
+  (the location half of `resolve_no_unwind`, same caches, same lock order) and
+  the type name by `instrumentation::demangle_symbol()`.
+- **Terminate.** When the unwinder finds no handler, libstdc++'s `__cxa_throw`
+  calls `__cxa_begin_catch` itself and then `std::terminate()`; a `noexcept`
+  boundary does the same through `__cxa_call_terminate`. The catch interposer
+  recognizes both by the caller's address lying inside those two runtime
+  functions (code ranges from `dladdr1(..., RTLD_DL_SYMENT)` on libstdc++'s OWN
+  definitions — looked up in the library that defines the RTLD_NEXT
+  `__cxa_begin_catch`, which no sanitizer intercepts; under GCC ASan the
+  RTLD_NEXT `__cxa_throw` is libasan's interceptor, whose range would never
+  match — resolved once) and reports `on_terminate` instead of a catch:
+  `!! terminate <type> "<what>"  (no handler found)`, column `[ terminate]`,
+  no site, no address. It then sets the per-thread `t_terminating` flag so the
+  default terminate handler's own rethrow and catch (to print its message) are
+  not traced. The frames active at that point keep `[  pending ]`.
+- **trace.cpp side.** `events::on_throw` / `on_catch` / `on_terminate` run with
+  the re-entrancy guard set, cancellation blocked and an exception barrier
+  (like the hooks) and write the line through `write_event_line()` at depth
+  `current_stack_depth + 1`, advancing the byte cursor like a call line.
+  `on_catch` first derives the catcher's level from the interposer's return
+  and frame addresses (`frame_level()`, same cache as the hooks) and reclaims
+  every record below it (`dead_records_on_catch`) marked `!` — this is where
+  Clang's unwound frames are reclaimed and marked, at the moment of the catch.
+  The enter hook likewise marks records it reclaims with `!` when
+  `std::uncaught_exceptions() > 0` (a destructor running during unwinding
+  reclaims the frames the exception already left) and `~` otherwise.
+  `inside_tracer()` exposes the guard so the interposers forward silently for
+  the tracer's own exceptions and handlers (the hooks' barriers,
+  `get_call_stack()`'s throw).
+- **Startup check.** `trace_begin()` calls `events::verify_interposers()`:
+  for each of the four names, if `dlsym(RTLD_DEFAULT)` is not our function →
+  one stderr WARNING (events through that name are not traced); else if
+  `dlsym(RTLD_NEXT)` finds nothing → `cannot_forward()`: FATAL + abort, which
+  is the `-static-libstdc++` / fully static case (no runtime definition to
+  forward to, the program would otherwise die unexplained at its first throw).
+  The root CMakeLists warns at configure time when the global flags contain
+  `-static-libstdc++` or `-static` with LOG_EXCEPTIONS on.
+- **Sanitizers.** GCC's `libasan.so` and Clang's static ASan runtime both
+  define WEAK interceptors of `__cxa_throw` (and `_Unwind_RaiseException`)
+  whose only job is `__asan_handle_no_return()`; TSan/UBSan define none. Our
+  definition wins in both cases. GCC: RTLD_NEXT from the executable reaches the
+  interceptor in libasan.so, chain intact. Clang: the interceptor is inside the
+  executable and RTLD_NEXT skips it, so every throw wrapper calls
+  `__asan_handle_no_return` itself through a weak reference. The full suite
+  passes under GCC and Clang ASan+UBSan and TSan.
+- **Cost.** Zero on the hot path (no per-call work): a throw pays one cached
+  site resolution plus a line write on top of the unwinder's own microseconds;
+  the first catch resolves the two terminate code ranges once.
+
 ### Output Format
 
 Each line in `trace.out` follows this pattern:
@@ -595,7 +691,8 @@ call-stack-logger/
 |-- .gitignore                  # Ignores build artifacts, IDE files, *.out
 |-- include/
 |   |-- callStack.h             # bfdResolver struct, get_call_stack(), resolve() API
-|   |-- durationFormat.h        # utils::format_duration_12chars (LOG_ELAPSED helper)
+|   |-- durationFormat.h        # utils::format_duration_12chars (LOG_ELAPSED helper), flag byte, event words
+|   |-- eventFormat.h           # LOG_EXCEPTIONS: exception event lines (throw/rethrow/catch/terminate), what() sanitizer
 |   |-- format.h                # utils::format() - formats ResolvedFrame into string
 |   |-- frameReconcile.h        # LOG_EXCEPTIONS: pure frame-stack reconciliation rules (levels)
 |   |-- prettyTime.h            # utils::pretty_time() + PRETTY_TIME_LENGTH constant
@@ -605,13 +702,16 @@ call-stack-logger/
 |-- src/
 |   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, library + executable)
 |   |-- callStack.cpp           # Core implementation: BFD loading, symbol resolution
-|   |-- trace.cpp               # __cyg_profile_func_enter/exit, trace file I/O
+|   |-- exceptionEvents.h       # Internal bridge: interposers (exceptions.cpp) -> trace state (trace.cpp)
+|   |-- exceptions.cpp          # LOG_EXCEPTIONS: __cxa_throw/__cxa_rethrow/__cxa_begin_catch/std::rethrow_exception interposers
+|   |-- trace.cpp               # __cyg_profile_func_enter/exit, trace file I/O, exception event lines
 |   |-- main.cpp                # Demo program exercising various C++ features
 |-- tests/                      # Unit and integration tests (BUILD_TESTS=ON, top-level builds only)
 |   |-- CMakeLists.txt          # FetchContent for Google Test, add subdirs
 |   |-- unit/
 |   |   |-- CMakeLists.txt      # Unit test executable (no instrumentation)
 |   |   |-- test_duration_format.cpp # Tests for utils::format_duration_12chars()
+|   |   |-- test_event_format.cpp # Tests for the exception event line formatter and what() sanitizer
 |   |   |-- test_format.cpp     # Tests for utils::format()
 |   |   |-- test_frame_reconcile.cpp # Tests for the LOG_EXCEPTIONS reconciliation rules
 |   |   |-- test_pretty_time.cpp # Tests for utils::pretty_time() and to_ms()
@@ -629,6 +729,7 @@ call-stack-logger/
 |       |-- exception_traced_program.cpp # Instrumented; throw/catch through instrumented frames (GCC pairing)
 |       |-- exceptions_traced_program.cpp # Instrumented LOG_EXCEPTIONS driver: every kind of non-local exit + markers
 |       |-- throwing_lib.cpp      # Shared lib built without instrumentation whose only function throws
+|       |-- uncaught_traced_program.cpp # Instrumented, LOG_EXCEPTIONS + LOG_ELAPSED; throws and never catches (terminate line)
 |       |-- crash_traced_program.cpp # Instrumented, LOG_ELAPSED; abort()s mid-chain (pending-placeholder crash diagnostics)
 |       |-- global_dtor_traced_program.cpp # Instrumented; global object dtor calls traced code during exit()
 |       |-- cancel_traced_program.cpp # Instrumented; worker thread is pthread_cancel()ed while tracing
@@ -777,6 +878,18 @@ The core implementation. Key functions:
   `mapped_object_path()` (`/proc/self/maps`, immune to a relative `dlopen` path + later
   `chdir`), else `dli_fname`
 - `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames)
+- `resolve_site()` / `bfdResolver::resolve_location()` - Location-only lookup of an
+  instruction address (a throw or catch site) through the location cache; `demangle_symbol()`
+  - the public demangler (LOG_EXCEPTIONS event lines)
+
+### `src/exceptions.cpp`
+The LOG_EXCEPTIONS interposers (`cslg_cxa_throw`, `cslg_cxa_rethrow`,
+`cslg_cxa_begin_catch`, `cslg_rethrow_exception` with the public names as weak
+aliases), the `what()` extraction, the terminate detection and
+`events::verify_interposers()`; compiles to nothing without the option or with
+`DISABLE_INSTRUMENTATION`. Talks to `trace.cpp` only through `src/exceptionEvents.h`
+(`events::on_throw` / `on_catch` / `on_terminate` / `inside_tracer`). See "Exception
+Events (LOG_EXCEPTIONS)" in the Architecture section.
 
 ### `src/trace.cpp`
 The instrumentation entry points:
@@ -832,7 +945,7 @@ make run                                    # Build and run (generates trace.out
 |--------|--------|
 | `LOG_ADDR` | Include function addresses in trace output |
 | `LOG_ELAPSED` | Record per-function duration via in-place pwrite() patching of a 12-byte placeholder spliced after the timestamp. See "Per-function timing" below. |
-| `LOG_EXCEPTIONS` | Key frame records by stack level and reclaim frames that left without an exit hook (Clang exception unwinding, longjmp). See "Frame Reconciliation After Non-Local Exits" above. |
+| `LOG_EXCEPTIONS` | Trace throw/rethrow/catch/terminate as event lines, mark the frames an exception left, key frame records by stack level and reclaim frames that left without an exit hook (Clang exception unwinding, longjmp). Needs the shared libstdc++. See "Frame Reconciliation After Non-Local Exits" and "Exception Events" above. |
 | `DISABLE_INSTRUMENTATION` | Compile without any instrumentation hooks |
 
 
@@ -924,6 +1037,12 @@ Test pure/deterministic functions from the include headers:
   framing characters, fixed 12-byte width invariant, buffer-overflow canary; the free
   flag byte (`FlagByteIsASpaceInEveryRendering`), `DURATION_UNWOUND`'s width and
   `set_duration_flag()` touching only byte 1
+- `test_event_format.cpp` — `sanitize_what_into()` (plain copy, control characters to
+  spaces, cut with `...` at the capacity, null and tiny buffers) and
+  `format_event_into()` (throw line layout, depth 0/1/2 prefixes, catch without
+  `what()`, rethrow suffix, `???` fallbacks, the terminate line without a site, the
+  column order with the LOG_ELAPSED word and the LOG_ADDR site address, newline and
+  clamping like call lines)
 - `test_frame_reconcile.cpp` — every rule in `frameReconcile.h` against synthetic
   records: deeper records reclaimed at enter, reused slot (equal level, different
   caller) reclaimed, equal level with equal caller kept (inline host / same-site
@@ -1129,8 +1248,21 @@ Test pure/deterministic functions from the include headers:
   for exception exits, `[~ unwound ]` for longjmp frames, plain durations for normal
   exits, catcher ≥ mid ≥ thrower on GCC, every line still matches the fixed layout)
   and as `cslg_traced_test_program_log_exceptions_all` with LOG_ADDR too
-  (`LogExceptionsAllFlagsTest`, 2 tests: the mark lands on the glyph beside an intact
-  address column, marked and unmarked lines at one depth stay aligned).
+  (`LogExceptionsAllFlagsTest`, 3 tests: the mark lands on the glyph beside an intact
+  address column, marked and unmarked lines at one depth stay aligned, event lines
+  carry the site address). The event tests in `LogExceptionsTest` assert, against the
+  `<TAG>=<line>` numbers the driver prints, the exact throw lines (type, `what()`,
+  file:line, depth under the thrower), throws seen from inside libstdc++ and from the
+  non-instrumented shared library, both rethrow forms, every catch clause's line, the
+  sanitized messages (control characters, a 300-byte text cut to 127, `throw 42`),
+  the order of events along the flow (throw, cleanup helper, catch, marker; a throw
+  inside a handler), and the worker thread's own events; `LogExceptionsElapsedTest`
+  adds the event column words. `LogExceptionsUncaughtTest` drives
+  `cslg_uncaught_traced_program_log_exceptions_elapsed`: the process must die, the
+  last line is the `terminate` line at the thrower's depth + 1, the throw line
+  precedes it with the exact site, no rethrow/catch of the terminate handler leaks,
+  the active frames keep `[  pending ]` and the completed helper has its duration.
+  The driver sets stdout unbuffered, since the abort would discard its reported line.
 - `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the both-flags
   variant `cslg_traced_test_program_log_elapsed_addr`. Asserts the
   ordering "timestamp → duration → addr" via regex, the tree column stays

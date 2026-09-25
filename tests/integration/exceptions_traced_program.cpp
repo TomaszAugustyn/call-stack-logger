@@ -136,8 +136,7 @@ NOINLINE void exc_rethrow_ptr() {
 NOINLINE void exc_nested_in_handler() {
     try {
         REPORT_LINE("THROW_G1"); throw std::runtime_error("outer");
-    } catch (const std::exception&) {
-        REPORT_LINE("CATCH_G1");
+    } catch (const std::exception&) { REPORT_LINE("CATCH_G1");
         try {
             REPORT_LINE("THROW_G2"); throw std::logic_error("inner");
         } catch (...) { REPORT_LINE("CATCH_G2"); std::puts("G caught both"); }

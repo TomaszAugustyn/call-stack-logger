@@ -13,6 +13,7 @@
 
 add_executable(cslg_unit_tests
     test_duration_format.cpp
+    test_event_format.cpp
     test_format.cpp
     test_frame_reconcile.cpp
     test_pretty_time.cpp

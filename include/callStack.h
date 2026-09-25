@@ -133,9 +133,18 @@ public:
     /// Non-owning form of resolve_no_unwind(): the memoized (or, on first
     /// sight, freshly resolved) callee name and caller location are returned as
     /// pointers into the caches. This is the only function that touches the
-    /// caches, so s_bfd_mutex is held exactly here and nowhere up the stack.
+    /// caches together with resolve_location() below, so s_bfd_mutex is held
+    /// exactly there and nowhere up the stack.
     NO_INSTRUMENT
     static bool resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out);
+
+    /// The location half of resolve_no_unwind() on its own: fills
+    /// `out.caller_filename` / `out.caller_line_number` for `address` (an
+    /// instruction address taken verbatim, e.g. a throw site) through the same
+    /// memoized lookup call sites use, including its fallback texts. The other
+    /// fields of `out` are left untouched.
+    NO_INSTRUMENT
+    static void resolve_location(void* address, ResolvedFrameView& out);
 
 private:
     /// Walks the object's section list to find the section containing `address`
@@ -295,5 +304,17 @@ std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address)
 /// instruction happens inside.
 NO_INSTRUMENT
 bool resolve(void* callee_address, void* caller_address, ResolvedFrameView& out);
+
+/// Resolves the source location of `address` — an instruction address taken
+/// verbatim, such as the site of a throw — into `out.caller_filename` /
+/// `out.caller_line_number`, exactly as call sites are resolved (memoized,
+/// with the same fallback texts). Used for the LOG_EXCEPTIONS event lines.
+NO_INSTRUMENT
+void resolve_site(void* address, ResolvedFrameView& out);
+
+/// Demangles an Itanium C++ ABI symbol (a type_info name, a function symbol);
+/// returns the input unchanged when it is not a mangled name.
+NO_INSTRUMENT
+std::string demangle_symbol(const char* mangled);
 
 } // namespace instrumentation

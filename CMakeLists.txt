@@ -38,6 +38,26 @@ option(LOG_ELAPSED "Record and display per-function duration in trace output" OF
 # See the "Exceptions in the trace tree" section in README.md.
 option(LOG_EXCEPTIONS "Repair the call tree after exceptions and longjmp, trace exception events" OFF)
 
+# LOG_EXCEPTIONS interposes the C++ runtime's throw/catch entry points: the
+# tracer defines __cxa_throw & co. in the executable and forwards every call to
+# the runtime's own implementation, found with dlsym(RTLD_NEXT). With
+# -static-libstdc++ (or -static) the runtime is inside the executable, so there
+# is nothing to forward to; the program then stops at startup with a FATAL
+# message (trace_begin's verify_interposers). Only the global flags are visible
+# here — a per-target link option cannot be checked — so this is a courtesy,
+# the startup check is the real guard.
+if(LOG_EXCEPTIONS)
+    set(CSLG_ALL_LINK_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_SHARED_LINKER_FLAGS}")
+    if(CSLG_ALL_LINK_FLAGS MATCHES "-static-libstdc\\+\\+" OR CSLG_ALL_LINK_FLAGS MATCHES "(^|[ \t])-static([ \t]|$)")
+        message(WARNING "LOG_EXCEPTIONS needs the shared libstdc++. The tracer defines its own "
+                "__cxa_throw and forwards every throw to the C++ runtime's implementation found with "
+                "RTLD_NEXT; with -static-libstdc++ (or -static) that implementation is inside the "
+                "executable, so there is nothing to forward to and the program stops at startup with "
+                "a FATAL message. Link the shared runtime (the default) or configure without "
+                "LOG_EXCEPTIONS.")
+    endif()
+endif()
+
 # Sanitizers: opt-in, for debugging / CI runs. Flags are applied PRIVATE to every
 # cslg target (library + demo + tests) so external users who link callstacklogger
 # never inherit sanitizer flags — they link a clean library regardless.

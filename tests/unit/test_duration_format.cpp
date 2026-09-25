@@ -267,3 +267,14 @@ TEST(DurationFormatTest, SetDurationFlagTouchesOnlyByteOne) {
     utils::set_duration_flag(field, '~');
     EXPECT_STREQ(field, "[~ unwound ]");
 }
+
+TEST(DurationFormatTest, EventColumnWordsHaveCorrectWidth) {
+    EXPECT_EQ(std::strlen(utils::DURATION_EVENT_THROW), utils::DURATION_FIELD_WIDTH);
+    EXPECT_EQ(std::strlen(utils::DURATION_EVENT_RETHROW), utils::DURATION_FIELD_WIDTH);
+    EXPECT_EQ(std::strlen(utils::DURATION_EVENT_CATCH), utils::DURATION_FIELD_WIDTH);
+    EXPECT_STREQ(utils::DURATION_EVENT_THROW, "[  throw   ]");
+    EXPECT_STREQ(utils::DURATION_EVENT_RETHROW, "[ rethrow  ]");
+    EXPECT_STREQ(utils::DURATION_EVENT_CATCH, "[  catch   ]");
+    EXPECT_EQ(std::strlen(utils::DURATION_EVENT_TERMINATE), utils::DURATION_FIELD_WIDTH);
+    EXPECT_STREQ(utils::DURATION_EVENT_TERMINATE, "[ terminate]");
+}

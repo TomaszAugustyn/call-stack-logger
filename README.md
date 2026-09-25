@@ -145,7 +145,8 @@ running: from the library's own startup constructor (`trace_begin`, which runs b
   lines keep `[  pending ]` exactly as they would after a crash (see
   [Crash diagnostics](#crash-diagnostics-via---pending-)) — a `[  pending ]` on `main` means
   the program left through `exit()`, `_exit()`, `abort()` or a signal, not through
-  `return`.
+  `return`. With `LOG_EXCEPTIONS`, an exception that nobody caught leaves a `terminate`
+  line naming it as the last line of the trace.
 
 ## :jigsaw: Integrating into your own project ##
 
@@ -319,7 +320,7 @@ from the wrong file.
 | ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `LOG_ADDR`                | `OFF`   | Include function addresses in trace output                                                                                                  |
 | `LOG_ELAPSED`             | `OFF`   | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed).                        |
-| `LOG_EXCEPTIONS`          | `OFF`   | Keep the call tree exact when frames leave without an exit hook (exceptions under Clang, `longjmp` on both compilers). See [Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions). |
+| `LOG_EXCEPTIONS`          | `OFF`   | Trace every throw, rethrow, catch and terminate in the call tree, mark the frames an exception left, and keep the tree exact when frames leave without an exit hook (exceptions under Clang, `longjmp` on both compilers). Needs the shared libstdc++. See [Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions). |
 | `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks                                                                                                   |
 | `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test). Honored only when Call Stack Logger is the top-level project, never when consumed via `add_subdirectory` / FetchContent. |
 | `COVERAGE`                | `OFF`   | Enable code coverage via GCC `--coverage` flag                                                                                              |
@@ -455,14 +456,88 @@ the file size on start.)
 
 ## :boom: Exceptions in the trace tree (`LOG_EXCEPTIONS`) ##
 
-Build with `-DLOG_EXCEPTIONS=ON` to keep the call tree exact when frames leave
-without running their exit hook.
+Build with `-DLOG_EXCEPTIONS=ON` to see every exception in the call tree, at the
+point where it was thrown, rethrown and caught, and to keep the tree exact when
+frames leave without running their exit hook.
 
 ```bash
 cmake -B build -DLOG_EXCEPTIONS=ON
 cmake --build build
 ./build/runDemo
 ```
+
+### Throw, rethrow and catch in the tree ###
+
+Every `throw`, every `throw;`, every `std::rethrow_exception()` and every
+`catch` in the process becomes a line in the tree, as a child of the innermost
+traced frame at that moment, ending in the `!! ` glyph instead of `|_ `:
+
+```
+[25-09-2026 04:07:02.325] |_ exc_catcher()  (called from: main.cpp:233)
+[25-09-2026 04:07:02.325] |  !_ exc_mid()  (called from: main.cpp:71)
+[25-09-2026 04:07:02.325] |  |  !_ exc_thrower()  (called from: main.cpp:66)
+[25-09-2026 04:07:02.325] |  |  |  !! throw std::runtime_error "bad header"  (thrown at: main.cpp:61)
+[25-09-2026 04:07:02.325] |  |  |_ ExcGuard::~ExcGuard()  (called from: main.cpp:67)
+[25-09-2026 04:07:02.325] |  |  |  |_ exc_helper()  (called from: main.cpp:57)
+[25-09-2026 04:07:02.325] |  !! catch std::runtime_error "bad header"  (caught at: main.cpp:72)
+[25-09-2026 04:07:02.325] |_ exc_marker_a()  (called from: main.cpp:234)
+```
+
+Read it top down: `exc_thrower` threw, the exception left `exc_thrower` and
+`exc_mid` (their glyphs are patched to `!_`, see below), a destructor ran a
+traced helper on the way out, and `exc_catcher` caught it on its line 72. The
+frames that returned normally keep `|_`.
+
+- **Type and message.** The line names the dynamic type of the thrown object
+  and, when that type derives from `std::exception`, its `what()` text. Control
+  characters in the text become spaces and a text longer than 127 bytes is cut
+  with `...`, so one event stays on one line. A `throw 42;` shows `throw int`
+  with no text.
+- **Site.** `thrown at`, `rethrown at` and `caught at` are resolved exactly like
+  `called from`: file and line of the statement (the `catch` clause's line for a
+  catch). A throw born inside libstdc++ (`vector::at`, `new` failing) or inside a
+  library you did not instrument is seen too; its site resolves as far as that
+  object's debug info allows, with the same fallbacks as call sites.
+- **Rethrows.** `throw;` gives `!! rethrow std::logic_error  (rethrown at: ...)`.
+  `std::rethrow_exception()`, the mechanism behind futures, coroutines and
+  stored exception pointers, gives the same line with `via
+  std::rethrow_exception` appended and the exact statement that rethrew.
+- **An exception nobody catches.** The runtime finds no handler, so it calls
+  the catch entry point itself and terminates. The tracer turns that into a
+  `terminate` line, the last line of the trace, and leaves every active frame
+  `[  pending ]`:
+
+  ```
+  [25-09-2026 04:07:02.325] [  pending ] |_ uncaught_outer()  (called from: main.cpp:58)
+  [25-09-2026 04:07:02.325] [  pending ] |  |_ uncaught_leaf()  (called from: main.cpp:47)
+  [25-09-2026 04:07:02.325] [  throw   ] |  |  !! throw std::logic_error "nobody catches this"  (thrown at: main.cpp:42)
+  [25-09-2026 04:07:02.325] [ terminate] |  |  !! terminate std::logic_error "nobody catches this"  (no handler found)
+  ```
+
+  The same line appears when an exception hits a `noexcept` boundary. The
+  default terminate handler's own rethrow and catch, which it does to print its
+  message, are not traced.
+- **With `LOG_ELAPSED`** the duration column of an event line holds a word
+  instead of a duration: `[  throw   ]`, `[ rethrow  ]`, `[  catch   ]`,
+  `[ terminate]`. **With `LOG_ADDR`** the address column holds the event's site
+  (the terminate line has none).
+- **How it works.** The tracer defines `__cxa_throw`, `__cxa_rethrow`,
+  `__cxa_begin_catch` and `std::rethrow_exception` in your executable and
+  forwards every call to the C++ runtime's own implementation, found with
+  `dlsym(RTLD_NEXT)`. The dynamic linker resolves those names to the executable
+  first, so the tracer sees throws from your code, from `libstdc++.so` itself
+  and from every shared library. The definitions are weak: a program that
+  defines its own `__cxa_throw` (some backtrace-on-throw helpers do) still links,
+  its definition wins, and the tracer prints one warning at startup saying which
+  events it will not see. The one exception is an AddressSanitizer build, where
+  the definitions are strong so they beat the sanitizer runtime's own weak
+  `__cxa_throw`; such a program then fails to link with `LOG_EXCEPTIONS`, with a
+  duplicate-definition error. `-static-libstdc++` and fully static executables are
+  not supported with this option: there is no runtime definition to forward to,
+  so CMake warns at configure time and the program stops at startup with a FATAL
+  message instead of failing at its first throw. Exceptions thrown and caught
+  inside the tracer itself are never traced. AddressSanitizer's own interception
+  of `__cxa_throw` keeps working with either compiler.
 
 ### Repairing the tree after non-local exits ###
 
@@ -507,7 +582,7 @@ alignment while telling you how each frame ended:
 | ----- | ------------------------------------------------------------------------------------------------- |
 | `\|_` | Returned normally                                                                                 |
 | `!_`  | An exception left the frame (GCC runs the exit hook while the exception is in flight and sees it) |
-| `~_`  | The frame left without running its exit hook: `longjmp` on both compilers, an exception on Clang  |
+| `~_`  | The frame left without running its exit hook and no exception was in flight: `longjmp`           |
 
 ```
 [25-09-2026 10:41:07.118] |_ exc_jump_root()  (called from: main.cpp:236)
@@ -524,9 +599,10 @@ its width and its columns:
 | -------------- | -------------------------------------------------------------------------------- |
 | `[   1.234ms]` | Returned normally after 1.234 ms                                                 |
 | `[!  1.234ms]` | Left by an exception after 1.234 ms (GCC measured it on the unwind path)         |
-| `[! unwound ]` | Left by an exception; no exit hook ran, so no duration exists (Clang)            |
+| `[! unwound ]` | Left by an exception; no exit hook ran, so no duration exists (Clang, reclaimed at the catch) |
 | `[~ unwound ]` | Skipped by `longjmp`; no exit hook ran, so no duration exists                    |
 | `[  pending ]` | Still running: the program crashed, called `exit()`, or the line was never patched |
+| `[  throw   ]` `[ rethrow  ]` `[  catch   ]` `[ terminate]` | An event line, see above                            |
 
 A line at depth 0 has no glyph, so only its duration field can carry the mark.
 

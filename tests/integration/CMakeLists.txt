@@ -211,7 +211,8 @@ cslg_apply_sanitizers(cslg_chdir_traced_program)
 function(cslg_add_flag_variant variant driver)
     add_library(callstacklogger_${variant} STATIC
         ${PROJECT_SOURCE_DIR}/src/callStack.cpp
-        ${PROJECT_SOURCE_DIR}/src/trace.cpp)
+        ${PROJECT_SOURCE_DIR}/src/trace.cpp
+        ${PROJECT_SOURCE_DIR}/src/exceptions.cpp)
     target_include_directories(callstacklogger_${variant} PUBLIC
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
     target_compile_definitions(callstacklogger_${variant} PRIVATE ${ARGN})
@@ -254,6 +255,17 @@ target_compile_features(cslg_crash_traced_program_log_elapsed PRIVATE cxx_std_17
 target_compile_options(cslg_crash_traced_program_log_elapsed PRIVATE ${INSTRUMENT_FLAGS})
 target_link_libraries(cslg_crash_traced_program_log_elapsed PRIVATE callstacklogger_log_elapsed)
 cslg_apply_sanitizers(cslg_crash_traced_program_log_elapsed)
+
+# Uncaught-exception driver against the LOG_EXCEPTIONS + LOG_ELAPSED variant
+# library: throws from the bottom of a chain and never catches, so std::terminate
+# aborts the process. The throw line must be the last line of the trace and every
+# frame active at that point must keep its "[  pending ]" placeholder (see
+# LogExceptionsUncaughtTest).
+add_executable(cslg_uncaught_traced_program_log_exceptions_elapsed uncaught_traced_program.cpp)
+target_compile_features(cslg_uncaught_traced_program_log_exceptions_elapsed PRIVATE cxx_std_17)
+target_compile_options(cslg_uncaught_traced_program_log_exceptions_elapsed PRIVATE ${INSTRUMENT_FLAGS})
+target_link_libraries(cslg_uncaught_traced_program_log_exceptions_elapsed PRIVATE callstacklogger_log_exceptions_elapsed)
+cslg_apply_sanitizers(cslg_uncaught_traced_program_log_exceptions_elapsed)
 
 # The cancel driver against the LOG_ELAPSED variant: the exit hook's pwrite and the
 # thread-exit close() of the patch descriptor are cancellation points of their own
@@ -324,6 +336,7 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     TRACED_PROGRAM_LOG_EXCEPTIONS_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions>"
     TRACED_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_elapsed>"
     TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_all>"
+    UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH="$<TARGET_FILE:cslg_uncaught_traced_program_log_exceptions_elapsed>"
 )
 
 # When the user passes -DLOG_ADDR=ON or -DLOG_ELAPSED=ON globally, the

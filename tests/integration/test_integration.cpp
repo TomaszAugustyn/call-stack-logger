@@ -15,6 +15,7 @@
  * correctly end-to-end.
  */
 
+#include "eventFormat.h"
 #include "prettyTime.h"
 #include <array>
 #include <cstdio>
@@ -98,6 +99,9 @@
 #ifndef TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH
     #error "TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH must be defined by CMake"
 #endif
+#ifndef UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH
+    #error "UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH must be defined by CMake"
+#endif
 
 namespace {
 
@@ -126,6 +130,7 @@ std::vector<std::string> split_lines(const std::string& content) {
 bool is_tree_element(const std::string& line, size_t pos) {
     if (pos + 2 >= line.size()) return false;
     if (line.compare(pos, 3, "|  ") == 0) return true;
+    if (line.compare(pos, 3, "!! ") == 0) return true; // an exception event line's glyph
     const char glyph = line[pos];
     return (glyph == '|' || glyph == '!' || glyph == '~') && line[pos + 1] == '_' && line[pos + 2] == ' ';
 }
@@ -161,7 +166,7 @@ char tree_glyph_of(const std::string& line) {
         ++pos;
     }
     while (is_tree_element(line, pos)) {
-        if (line[pos + 1] == '_') return line[pos];
+        if (line[pos + 1] == '_' || line[pos + 1] == '!') return line[pos];
         pos += 3;
     }
     return '\0';
@@ -2221,25 +2226,19 @@ TEST_F(LogExceptionsTest, WorkerThreadFileIsReconciledIndependently) {
     EXPECT_EQ(depth_of(worker_lines, "exc_thread_marker"), 1) << worker_content;
 }
 
-// A frame an exception leaves gets its tree glyph patched in place. GCC runs the
-// exit hook of every unwound frame while the exception is in flight, so the
-// mark is '!' (left by an exception). Clang runs no exit hook for them: they are
-// found dead when the catcher returns, marked '~' (left without an exit hook).
+// A frame an exception leaves gets its tree glyph patched to '!' in place. GCC
+// runs the exit hook of every unwound frame while the exception is in flight
+// and marks it there; Clang runs no exit hook for them, so the catch interposer
+// reclaims and marks them the moment the exception is caught.
 TEST_F(LogExceptionsTest, FramesLeftByAnExceptionAreMarked) {
     for (const auto& function : kFramesLeftByException) {
-        const char glyph = glyph_of(trace_lines, function);
-        EXPECT_NE(glyph, '|') << function << " kept a plain glyph:\n" << trace_content;
-#ifdef CSLG_COMPILER_IS_GNU
-        EXPECT_EQ(glyph, '!') << function << ":\n" << trace_content;
-#else
-        EXPECT_EQ(glyph, '~') << function << ":\n" << trace_content;
-#endif
+        EXPECT_EQ(glyph_of(trace_lines, function), '!') << function << ":\n" << trace_content;
     }
     for (const auto& line : lines_of(trace_lines, "exc_rec(")) {
-        EXPECT_NE(tree_glyph_of(line), '|') << line;
+        EXPECT_EQ(tree_glyph_of(line), '!') << line;
     }
     ASSERT_FALSE(worker_lines.empty());
-    EXPECT_NE(glyph_of(worker_lines, "exc_thread_thrower()"), '|') << worker_content;
+    EXPECT_EQ(glyph_of(worker_lines, "exc_thread_thrower()"), '!') << worker_content;
 }
 
 // Frames a longjmp skipped are found dead by the next hook and marked '~' on
@@ -2280,7 +2279,7 @@ TEST_F(LogExceptionsElapsedTest, NoPendingLeftovers) {
 // The duration field of a frame left by an exception carries the '!' flag in
 // its otherwise always-blank byte 1. On GCC the exit hook measured a real
 // duration ("[!  1.234ms]"); on Clang no exit hook ran, so the field reads
-// "[~ unwound ]" — the frame was found dead when the catcher returned.
+// "[! unwound ]" — the frame was reclaimed at the catch.
 TEST_F(LogExceptionsElapsedTest, ExceptionExitsCarryFlaggedFields) {
     for (const auto& function : kFramesLeftByException) {
         const std::string line = find_unique_line(trace_lines, function);
@@ -2293,7 +2292,7 @@ TEST_F(LogExceptionsElapsedTest, ExceptionExitsCarryFlaggedFields) {
         unflagged[1] = ' ';
         EXPECT_TRUE(std::regex_match(unflagged, duration_field_regex())) << "no measured duration: " << line;
 #else
-        EXPECT_EQ(field, "[~ unwound ]") << line;
+        EXPECT_EQ(field, "[! unwound ]") << line;
 #endif
     }
 }
@@ -2347,13 +2346,21 @@ TEST_F(LogExceptionsElapsedTest, ExceptionalDurationsNestInsideTheCatcher) {
 TEST_F(LogExceptionsElapsedTest, EveryLineKeepsTheFixedLayout) {
     const std::regex full(
             R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] \[[ !~]( *\d+\.\d{3}(ns|us|ms|s )| unwound |  >999\.9s )\] .*\(called from: .+:.+\)$)");
+    const std::regex event(
+            R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] \[(  throw   | rethrow  |  catch   | terminate)\] (\|  )*!! (throw|rethrow|catch|terminate) .*\(((thrown|rethrown|caught) at: .+|no handler found)\)$)");
     int entries = 0;
+    int events = 0;
     for (const auto& line : trace_lines) {
-        if (line.find("(called from:") == std::string::npos) continue;
-        ++entries;
-        EXPECT_TRUE(std::regex_match(line, full)) << line;
+        if (line.find("(called from:") != std::string::npos) {
+            ++entries;
+            EXPECT_TRUE(std::regex_match(line, full)) << line;
+        } else if (line.find("!! ") != std::string::npos) {
+            ++events;
+            EXPECT_TRUE(std::regex_match(line, event)) << line;
+        }
     }
     EXPECT_GT(entries, 30) << trace_content;
+    EXPECT_GT(events, 20) << trace_content;
 }
 
 // With LOG_ADDR too, the glyph offset must skip both the duration column and the
@@ -2379,4 +2386,304 @@ TEST_F(LogExceptionsAllFlagsTest, TreeColumnsStillAlign) {
     ASSERT_FALSE(after.empty());
     EXPECT_EQ(mid.find("~_ "), after.find("|_ ")) << mid << "\n" << after;
     EXPECT_EQ(count_indentation_depth(mid), count_indentation_depth(after));
+}
+
+// ============================================================================
+// LOG_EXCEPTIONS — the exception events themselves: throw, rethrow and catch
+// lines with the exception's type, its what() text and the exact source line.
+// ============================================================================
+
+namespace {
+
+// Every line of `lines` that carries the event glyph and `verb`, in file order.
+std::vector<std::string> event_lines(const std::vector<std::string>& lines, const std::string& verb) {
+    std::vector<std::string> found;
+    for (const auto& line : lines) {
+        if (line.find("!! " + verb + " ") != std::string::npos) {
+            found.push_back(line);
+        }
+    }
+    return found;
+}
+
+// The unique event line containing `needle`, or "".
+std::string unique_event_line(const std::vector<std::string>& lines, const std::string& needle) {
+    std::string found;
+    int matches = 0;
+    for (const auto& line : lines) {
+        if (line.find("!! ") != std::string::npos && line.find(needle) != std::string::npos) {
+            found = line;
+            ++matches;
+        }
+    }
+    return matches == 1 ? found : "";
+}
+
+// The 12-byte field after the timestamp (empty when the line is too short).
+std::string field_of_line(const std::string& line) {
+    const size_t start = utils::PRETTY_TIME_LENGTH + 3;
+    return line.size() >= start + 12 ? line.substr(start, 12) : std::string();
+}
+
+// Index of the first line containing `needle` (-1 when absent).
+long index_of(const std::vector<std::string>& lines, const std::string& needle) {
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find(needle) != std::string::npos) return static_cast<long>(i);
+    }
+    return -1;
+}
+
+} // namespace
+
+// A `throw` becomes a line under the throwing frame, naming the type, the
+// what() text and the exact line of the throw statement (the driver printed it).
+TEST_F(LogExceptionsTest, ThrowLinesNameTypeMessageAndExactSite) {
+    ASSERT_TRUE(site_lines.count("THROW_A")) << "driver did not report THROW_A";
+    const std::string a = unique_event_line(trace_lines, "!! throw std::runtime_error \"bad header\"");
+    ASSERT_FALSE(a.empty()) << trace_content;
+    EXPECT_NE(a.find("!! throw std::runtime_error \"bad header\"  (thrown at: "), std::string::npos) << a;
+    EXPECT_NE(a.find("exceptions_traced_program.cpp:" + std::to_string(site_lines["THROW_A"]) + ")"),
+              std::string::npos) << a;
+    // A child of exc_thrower (depth 3).
+    EXPECT_EQ(count_indentation_depth(a), 4) << a;
+
+    const std::string b = unique_event_line(trace_lines, "!! throw std::logic_error \"deep\"");
+    ASSERT_FALSE(b.empty()) << trace_content;
+    EXPECT_NE(b.find("!! throw std::logic_error \"deep\"  (thrown at: "), std::string::npos) << b;
+    EXPECT_NE(b.find(":" + std::to_string(site_lines["THROW_B"]) + ")"), std::string::npos) << b;
+    EXPECT_EQ(count_indentation_depth(b), 6) << "a child of the deepest exc_rec:\n" << b;
+}
+
+// Throws born outside the program's own code are seen too: inside libstdc++
+// (vector::at) and inside a shared library built without instrumentation.
+TEST_F(LogExceptionsTest, ThrowsFromTheRuntimeAndFromForeignLibrariesAreSeen) {
+    const std::string lib = unique_event_line(trace_lines, "!! throw std::out_of_range");
+    ASSERT_FALSE(lib.empty()) << trace_content;
+    EXPECT_NE(lib.find("\"vector::_M_range_check"), std::string::npos) << lib;
+    EXPECT_NE(lib.find("(thrown at: "), std::string::npos) << lib;
+    EXPECT_EQ(count_indentation_depth(lib), 2) << "a child of exc_lib_throw:\n" << lib;
+
+    const std::string so = unique_event_line(trace_lines, "!! throw std::invalid_argument");
+    ASSERT_FALSE(so.empty()) << trace_content;
+    EXPECT_NE(so.find("\"from a library built without instrumentation\""), std::string::npos) << so;
+    EXPECT_EQ(count_indentation_depth(so), 2) << "a child of exc_so_throw:\n" << so;
+}
+
+// `throw;` and std::rethrow_exception both produce a rethrow line at the exact
+// statement, the latter saying how it was rethrown.
+TEST_F(LogExceptionsTest, RethrowLinesNameTheStatementAndTheMechanism) {
+    const std::string stmt = unique_event_line(trace_lines, "!! rethrow std::logic_error");
+    ASSERT_FALSE(stmt.empty()) << trace_content;
+    EXPECT_NE(stmt.find("(rethrown at: "), std::string::npos) << stmt;
+    EXPECT_NE(stmt.find(":" + std::to_string(site_lines["RETHROW_E"]) + ")"), std::string::npos) << stmt;
+    EXPECT_EQ(stmt.find("via std::rethrow_exception"), std::string::npos) << stmt;
+
+    const std::string ptr = unique_event_line(trace_lines, "!! rethrow std::out_of_range");
+    ASSERT_FALSE(ptr.empty()) << trace_content;
+    EXPECT_NE(ptr.find(":" + std::to_string(site_lines["RETHROW_F"]) + " via std::rethrow_exception)"),
+              std::string::npos) << ptr;
+}
+
+// A catch becomes a line under the catching frame with the type, the what()
+// text and the exact line of the catch clause.
+TEST_F(LogExceptionsTest, CatchLinesNameTypeMessageAndExactSite) {
+    const std::string a = unique_event_line(trace_lines, "!! catch std::runtime_error \"bad header\"");
+    ASSERT_FALSE(a.empty()) << trace_content;
+    EXPECT_NE(a.find("(caught at: "), std::string::npos) << a;
+    EXPECT_NE(a.find("exceptions_traced_program.cpp:" + std::to_string(site_lines["CATCH_A"]) + ")"),
+              std::string::npos) << a;
+    EXPECT_EQ(count_indentation_depth(a), 2) << "a child of exc_catcher:\n" << a;
+
+    const std::string b = unique_event_line(trace_lines, "!! catch std::logic_error \"deep\"");
+    ASSERT_FALSE(b.empty()) << trace_content;
+    EXPECT_NE(b.find(":" + std::to_string(site_lines["CATCH_B"]) + ")"), std::string::npos) << b;
+    EXPECT_EQ(count_indentation_depth(b), 2) << "a child of exc_rec_catcher:\n" << b;
+
+    // Every catch clause of the driver reported its line; each must appear.
+    for (const char* tag : { "CATCH_C", "CATCH_D", "CATCH_E", "CATCH_F", "CATCH_G1", "CATCH_G2",
+                             "CATCH_K1", "CATCH_K2", "CATCH_K3" }) {
+        ASSERT_TRUE(site_lines.count(tag)) << tag;
+        const std::string needle = "(caught at: ";
+        bool found = false;
+        for (const auto& line : event_lines(trace_lines, "catch")) {
+            if (line.find(":" + std::to_string(site_lines[tag]) + ")") != std::string::npos
+                && line.find(needle) != std::string::npos) {
+                found = true;
+            }
+        }
+        EXPECT_TRUE(found) << tag << " line " << site_lines[tag] << " has no catch event:\n" << trace_content;
+    }
+}
+
+// what() texts are shown on one line and cut to a sane length; a non-std type
+// has no text and no quotes.
+TEST_F(LogExceptionsTest, MessagesAreSanitizedForOneLine) {
+    const std::string k1 = unique_event_line(trace_lines, "!! throw std::runtime_error \"line one");
+    ASSERT_FALSE(k1.empty()) << trace_content;
+    EXPECT_NE(k1.find("\"line one line two tabbed\""), std::string::npos) << k1;
+
+    const std::string k2 = unique_event_line(trace_lines, "!! throw std::runtime_error \"xxxx");
+    ASSERT_FALSE(k2.empty()) << trace_content;
+    const std::string cut(utils::WHAT_TEXT_CAPACITY - 4, 'x');
+    EXPECT_NE(k2.find("\"" + cut + "...\""), std::string::npos) << k2;
+    EXPECT_EQ(k2.find(std::string(utils::WHAT_TEXT_CAPACITY, 'x')), std::string::npos) << k2;
+
+    const std::string k3 = unique_event_line(trace_lines, "!! throw int  (thrown at: ");
+    ASSERT_FALSE(k3.empty()) << trace_content;
+    EXPECT_EQ(k3.find('"'), std::string::npos) << k3;
+    const std::string k3c = unique_event_line(trace_lines, "!! catch int  (caught at: ");
+    ASSERT_FALSE(k3c.empty()) << trace_content;
+}
+
+// The events sit in the flow where they happened: the throw after the thrower's
+// entry, the cleanup helper between the throw and the catch, the catch before
+// the marker that follows the scenario. A new exception thrown inside a catch
+// handler nests under the handler's frame.
+TEST_F(LogExceptionsTest, EventsFollowTheFlowOfExecution) {
+    const long thrower = index_of(trace_lines, "exc_thrower()  (called from:");
+    const long throw_a = index_of(trace_lines, "!! throw std::runtime_error \"bad header\"");
+    const long helper = index_of(trace_lines, "exc_helper()");
+    const long catch_a = index_of(trace_lines, "!! catch std::runtime_error \"bad header\"");
+    const long marker_a = index_of(trace_lines, "exc_marker_a()");
+    ASSERT_GE(thrower, 0);
+    EXPECT_LT(thrower, throw_a);
+    EXPECT_LT(throw_a, helper);
+    EXPECT_LT(helper, catch_a);
+    EXPECT_LT(catch_a, marker_a);
+
+    const std::string outer = unique_event_line(trace_lines, "!! throw std::runtime_error \"outer\"");
+    ASSERT_FALSE(outer.empty()) << trace_content;
+    EXPECT_EQ(count_indentation_depth(outer), 2) << outer;
+    const long catch_g1 = index_of(trace_lines, ":" + std::to_string(site_lines["CATCH_G1"]) + ")");
+    const long throw_g2 = index_of(trace_lines, ":" + std::to_string(site_lines["THROW_G2"]) + ")");
+    const long catch_g2 = index_of(trace_lines, ":" + std::to_string(site_lines["CATCH_G2"]) + ")");
+    ASSERT_GE(catch_g1, 0) << trace_content;
+    EXPECT_LT(catch_g1, throw_g2);
+    EXPECT_LT(throw_g2, catch_g2);
+}
+
+// The worker thread's file carries its own throw and catch lines.
+TEST_F(LogExceptionsTest, WorkerThreadFileCarriesItsOwnEvents) {
+    ASSERT_FALSE(worker_lines.empty());
+    const std::string t = unique_event_line(worker_lines, "!! throw std::runtime_error \"in a worker\"");
+    ASSERT_FALSE(t.empty()) << worker_content;
+    EXPECT_EQ(count_indentation_depth(t), 3) << t;
+    const std::string c = unique_event_line(worker_lines, "!! catch std::runtime_error \"in a worker\"");
+    ASSERT_FALSE(c.empty()) << worker_content;
+    EXPECT_EQ(count_indentation_depth(c), 2) << c;
+    EXPECT_NE(c.find(":" + std::to_string(site_lines["CATCH_L"]) + ")"), std::string::npos) << c;
+    // ... and the main file does not.
+    EXPECT_EQ(trace_content.find("\"in a worker\""), std::string::npos);
+}
+
+// With LOG_ELAPSED an event line carries its column word instead of a duration.
+TEST_F(LogExceptionsElapsedTest, EventLinesCarryTheirColumnWord) {
+    for (const auto& line : event_lines(trace_lines, "throw")) {
+        EXPECT_EQ(field_of(line), "[  throw   ]") << line;
+    }
+    for (const auto& line : event_lines(trace_lines, "rethrow")) {
+        EXPECT_EQ(field_of(line), "[ rethrow  ]") << line;
+    }
+    for (const auto& line : event_lines(trace_lines, "catch")) {
+        EXPECT_EQ(field_of(line), "[  catch   ]") << line;
+    }
+    EXPECT_GE(event_lines(trace_lines, "throw").size(), 8u) << trace_content;
+    EXPECT_GE(event_lines(trace_lines, "catch").size(), 12u) << trace_content;
+}
+
+// With LOG_ADDR the address column of an event line holds the site address.
+TEST_F(LogExceptionsAllFlagsTest, EventLinesCarryTheSiteAddress) {
+    const std::regex layout(
+            R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] \[  throw   \] addr: \[0x[0-9a-f]{16}\] (\|  )*!! throw std::runtime_error "bad header"  \(thrown at: .+:\d+\)$)");
+    const std::string a = unique_event_line(trace_lines, "!! throw std::runtime_error \"bad header\"  (thrown at:");
+    ASSERT_FALSE(a.empty()) << trace_content;
+    EXPECT_TRUE(std::regex_match(a, layout)) << a;
+}
+
+// ---- an exception nobody catches -------------------------------------------
+
+namespace {
+
+class LogExceptionsUncaughtTest : public ::testing::Test {
+protected:
+    std::string trace_content;
+    std::vector<std::string> trace_lines;
+    std::string trace_file_path;
+    std::map<std::string, int> site_lines;
+    int run_status = -1;
+
+    void SetUp() override {
+        char tmp_path[] = "/tmp/cslg_uncaught_XXXXXX";
+        int fd = mkstemp(tmp_path);
+        ASSERT_GE(fd, 0) << "mkstemp failed";
+        close(fd);
+        trace_file_path = tmp_path;
+        const std::string stdout_path = trace_file_path + ".stdout";
+
+        std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_file_path + "\" \""
+                        + UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH + "\" > \"" + stdout_path
+                        + "\" 2>/dev/null";
+        // Expected to terminate via SIGABRT (std::terminate); asserted non-zero.
+        run_status = system(cmd.c_str());
+
+        trace_content = read_file(trace_file_path);
+        trace_lines = split_lines(trace_content);
+        for (const auto& line : split_lines(read_file(stdout_path))) {
+            const size_t eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            try {
+                site_lines[line.substr(0, eq)] = std::stoi(line.substr(eq + 1));
+            } catch (...) {
+            }
+        }
+        unlink(stdout_path.c_str());
+    }
+
+    void TearDown() override {
+        if (!trace_file_path.empty()) {
+            unlink(trace_file_path.c_str());
+        }
+    }
+};
+
+} // namespace
+
+// std::terminate runs no exit hook, so every frame active at the throw keeps
+// its placeholder. The throw line is written before the runtime searches for a
+// handler; when it finds none it calls __cxa_begin_catch itself before
+// terminating, which the tracer turns into the "terminate" line — the last
+// line of the trace, naming what killed the process. The default terminate
+// handler's own rethrow and catch (to print its message) are not traced.
+TEST_F(LogExceptionsUncaughtTest, TerminateLineIsTheLastLineAndActiveFramesStayPending) {
+    ASSERT_NE(run_status, 0) << "the uncaught driver exited cleanly — nothing to test";
+    ASSERT_GE(trace_lines.size(), 2u) << "trace too short:\n" << trace_content;
+
+    const std::string& last = trace_lines.back();
+    EXPECT_EQ(last.find("!! terminate std::logic_error \"nobody catches this\"  (no handler found)"),
+              last.find("!! ")) << "last line:\n" << last << "\ntrace:\n" << trace_content;
+    EXPECT_NE(last.find("!! terminate"), std::string::npos) << last;
+    EXPECT_EQ(field_of_line(last), "[ terminate]") << last;
+    EXPECT_EQ(count_indentation_depth(last), 3) << "a child of uncaught_leaf:\n" << last;
+
+    const std::string& throw_line = trace_lines[trace_lines.size() - 2];
+    EXPECT_NE(throw_line.find("!! throw std::logic_error \"nobody catches this\"  (thrown at: "),
+              std::string::npos) << throw_line;
+    EXPECT_NE(throw_line.find(":" + std::to_string(site_lines["THROW_UNCAUGHT"]) + ")"), std::string::npos)
+            << throw_line;
+    EXPECT_EQ(field_of_line(throw_line), "[  throw   ]") << throw_line;
+    EXPECT_EQ(trace_content.find("!! rethrow"), std::string::npos) << "the terminate handler's rethrow leaked:\n"
+                                                                     << trace_content;
+    EXPECT_EQ(trace_content.find("!! catch"), std::string::npos) << "the terminate handler's catch leaked:\n"
+                                                                   << trace_content;
+
+    for (const char* fn : { " main ", "uncaught_outer", "uncaught_leaf" }) {
+        const std::string line = find_unique_line(trace_lines, fn);
+        ASSERT_FALSE(line.empty()) << fn << " line missing or not unique. Trace:\n" << trace_content;
+        EXPECT_NE(line.find("[  pending ]"), std::string::npos) << line;
+        EXPECT_EQ(tree_glyph_of(line) == '\0' || tree_glyph_of(line) == '|', true) << line;
+    }
+    const std::string done = find_unique_line(trace_lines, "uncaught_completed_work");
+    ASSERT_FALSE(done.empty()) << trace_content;
+    EXPECT_TRUE(std::regex_search(done, duration_field_regex())) << done;
+    EXPECT_GE(parse_duration_ns(done), 1'000'000LL) << done;
 }

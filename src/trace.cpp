@@ -31,6 +31,8 @@
 #endif
 
 #ifdef LOG_EXCEPTIONS
+    #include "eventFormat.h"
+    #include "exceptionEvents.h"
     #include "frameReconcile.h"
     #include <cstring>
     #include <exception>
@@ -899,9 +901,176 @@ void trace_begin() {
     // no ordering at all: they are deliberately leaked (see callStack.h).
     std::atexit(trace_shutdown);
 
+#ifdef LOG_EXCEPTIONS
+    // Before any throw can be traced: make sure the interposers can forward to
+    // the C++ runtime (aborts with a clear message if the runtime is linked
+    // statically) and are the active definitions (warns otherwise).
+    instrumentation::events::verify_interposers();
+#endif
+
     g.trace_ready.store(true, std::memory_order_release);
     t_in_instrumentation = false;
 }
+
+#ifdef LOG_EXCEPTIONS
+namespace {
+
+// Column word of an event line with LOG_ELAPSED (the 12-byte word plus the
+// separating space, like the "[  pending ] " splice of a call line), or nothing.
+#ifdef LOG_ELAPSED
+constexpr const char* EVENT_COLUMN_THROW = "[  throw   ] ";
+constexpr const char* EVENT_COLUMN_RETHROW = "[ rethrow  ] ";
+constexpr const char* EVENT_COLUMN_CATCH = "[  catch   ] ";
+constexpr const char* EVENT_COLUMN_TERMINATE = "[ terminate] ";
+static_assert(sizeof("[  throw   ] ") - 1 == utils::DURATION_FIELD_WIDTH + 1, "column word + space");
+static_assert(sizeof("[ rethrow  ] ") - 1 == utils::DURATION_FIELD_WIDTH + 1, "column word + space");
+static_assert(sizeof("[  catch   ] ") - 1 == utils::DURATION_FIELD_WIDTH + 1, "column word + space");
+static_assert(sizeof("[ terminate] ") - 1 == utils::DURATION_FIELD_WIDTH + 1, "column word + space");
+#else
+constexpr const char* EVENT_COLUMN_THROW = "";
+constexpr const char* EVENT_COLUMN_RETHROW = "";
+constexpr const char* EVENT_COLUMN_CATCH = "";
+constexpr const char* EVENT_COLUMN_TERMINATE = "";
+#endif
+
+// Writes one exception event line (see include/eventFormat.h) as a child of the
+// innermost logged frame — at depth current_stack_depth + 1 — and advances the
+// byte cursor exactly like a call line does. `site` is an address inside the
+// throwing / catching instruction, or null for an event without a site (the
+// terminate line). Runs inside the calling function's guard, cancellation block
+// and exception barrier; the resolver and the demangler may allocate on a first
+// sight.
+NO_INSTRUMENT
+void write_event_line(const char* verb, const char* site_label, const char* suffix, const char* column,
+                      const std::type_info* type, const char* what, const void* site) {
+    FILE* fp = get_thread_fp();
+    if (fp == nullptr) {
+        return;
+    }
+    instrumentation::ResolvedFrameView location;
+    if (site != nullptr) {
+        instrumentation::resolve_site(const_cast<void*>(site), location);
+    }
+    const std::string type_name =
+            type != nullptr ? instrumentation::demangle_symbol(type->name()) : std::string("<unknown type>");
+
+    char timestamp[utils::PRETTY_TIME_BUF_SIZE];
+    utils::pretty_time_into(timestamp, sizeof(timestamp));
+    utils::EventLine event;
+    event.timestamp = timestamp;
+#ifdef LOG_ADDR
+    if (site != nullptr) {
+        event.site_address = const_cast<void*>(site);
+    }
+#endif
+    event.depth = t_state.current_stack_depth + 1;
+    event.verb = verb;
+    event.type_name = type_name.c_str();
+    event.what = what;
+    event.site_label = site_label;
+    event.site_file = location.caller_filename;
+    event.site_line = location.caller_line_number;
+    event.suffix = suffix;
+
+    char line[utils::FORMAT_BUF_SIZE];
+    const std::size_t line_size =
+            utils::format_event_into(line, sizeof(line), event, column, /*append_newline=*/true);
+    // Cursor bookkeeping as for a call line: a short write leaves an unknown
+    // number of bytes in the file, so later patch offsets could not be trusted.
+    if (fwrite(line, 1, line_size, fp) == line_size) {
+        t_state.cursor += static_cast<off_t>(line_size);
+    } else {
+        t_state.cursor_valid = false;
+    }
+}
+
+} // namespace
+
+namespace instrumentation {
+namespace events {
+
+NO_INSTRUMENT
+bool inside_tracer() {
+    return t_in_instrumentation;
+}
+
+NO_INSTRUMENT
+void on_throw(ThrowKind kind, const std::type_info* type, const char* what, const void* site) {
+    if (t_in_instrumentation) {
+        return;
+    }
+    // Same discipline as the hooks: cancellation blocked around the file write,
+    // the guard set for the whole duration, and an exception barrier — an
+    // exception escaping here would replace the program's exception with ours.
+    ScopedCancelDisable no_cancel;
+    t_in_instrumentation = true;
+    try {
+        switch (kind) {
+        case ThrowKind::primary:
+            write_event_line("throw", "thrown at", "", EVENT_COLUMN_THROW, type, what, site);
+            break;
+        case ThrowKind::rethrow:
+            write_event_line("rethrow", "rethrown at", "", EVENT_COLUMN_RETHROW, type, what, site);
+            break;
+        case ThrowKind::exception_ptr:
+            write_event_line("rethrow", "rethrown at", " via std::rethrow_exception", EVENT_COLUMN_RETHROW,
+                             type, what, site);
+            break;
+        }
+    } catch (...) {
+        // Swallow (realistically only bad_alloc under OOM): the event goes untraced.
+    }
+    t_in_instrumentation = false;
+}
+
+NO_INSTRUMENT
+void on_terminate(const std::type_info* type, const char* what) {
+    if (t_in_instrumentation) {
+        return;
+    }
+    ScopedCancelDisable no_cancel;
+    t_in_instrumentation = true;
+    try {
+        write_event_line("terminate", "no handler found", "", EVENT_COLUMN_TERMINATE, type, what, nullptr);
+    } catch (...) {
+        // Swallow (realistically only bad_alloc under OOM): the event goes untraced.
+    }
+    t_in_instrumentation = false;
+}
+
+NO_INSTRUMENT
+void on_catch(const std::type_info* type, const char* what, const void* wrapper_site,
+              const void* wrapper_frame) {
+    if (t_in_instrumentation) {
+        return;
+    }
+    ScopedCancelDisable no_cancel;
+    t_in_instrumentation = true;
+    try {
+        // The interposer was called from the catcher's landing pad, so the level
+        // derived from its return address and frame address is the catcher's own.
+        // Every record below it belongs to a frame the exception unwound: on Clang
+        // those frames ran no exit hook, so this is where they are reclaimed and
+        // their lines marked; on GCC their exit hooks already popped them and
+        // nothing is left below the catcher. Then the catch line lands at the
+        // catcher's depth + 1.
+        resolve_thread_stack_bounds();
+        const void* catch_level = frame_level(wrapper_site, wrapper_frame);
+        reclaim_dead_records(instrumentation::dead_records_on_catch(t_state.frames.data(),
+                                                                    t_state.frames.size(), catch_level,
+                                                                    t_state.stack_bounds),
+                             utils::FRAME_END_EXCEPTION);
+        write_event_line("catch", "caught at", "", EVENT_COLUMN_CATCH, type, what,
+                         static_cast<const char*>(wrapper_site) - 1);
+    } catch (...) {
+        // Swallow (realistically only bad_alloc under OOM): the event goes untraced.
+    }
+    t_in_instrumentation = false;
+}
+
+} // namespace events
+} // namespace instrumentation
+#endif
 
 // Note: there used to be a trace_end() __attribute__((destructor)) here as a
 // "fallback for _exit/abort". That comment was incorrect — _exit and abort do
@@ -986,12 +1155,16 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             // runs none, longjmp runs none on either compiler) leave records behind.
             // Reclaim them BEFORE this frame is formatted, so its line lands at the
             // depth of the frames that are really alive. Rules: frameReconcile.h.
+            // A dead record found while an exception is in flight (this frame runs
+            // from a destructor during unwinding, under Clang) was unwound by that
+            // exception; otherwise a non-local jump skipped it.
             resolve_thread_stack_bounds();
             key.level = frame_level(hook_site, hook_frame);
             reclaim_dead_records(instrumentation::dead_records_on_enter(
                                          t_state.frames.data(), t_state.frames.size(), key,
                                          t_state.stack_bounds),
-                                 utils::FRAME_END_JUMP);
+                                 std::uncaught_exceptions() > 0 ? utils::FRAME_END_EXCEPTION
+                                                                : utils::FRAME_END_JUMP);
 #endif
 
             FILE* fp = get_thread_fp();

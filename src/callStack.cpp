@@ -490,6 +490,35 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
     return true;
 }
 
+void bfdResolver::resolve_location(void* address, ResolvedFrameView& out) {
+    // Same two-phase shape as resolve_no_unwind(): the cache is consulted under
+    // s_bfd_mutex, and on a miss dladdr() runs with the mutex RELEASED (it takes
+    // glibc's loader lock — see the lock-order rule in resolve_no_unwind) before
+    // the BFD work and the insertion re-take it.
+    {
+        std::lock_guard<std::mutex> lock(s_bfd_mutex);
+        check_bfd_initialized();
+        auto loc_it = location_cache().find(address);
+        if (loc_it != location_cache().end()) {
+            out.caller_filename = &loc_it->second.first;
+            out.caller_line_number = loc_it->second.second;
+            return;
+        }
+    }
+    Dl_info info {};
+    const Dl_info* dl = nullptr;
+    if (dladdr(address, &info) != 0 && info.dli_fbase != nullptr) {
+        dl = &info;
+    }
+    std::lock_guard<std::mutex> lock(s_bfd_mutex);
+    auto loc_it = location_cache().find(address);
+    if (loc_it == location_cache().end()) {
+        loc_it = location_cache().emplace(address, resolve_filename_and_line(address, dl)).first;
+    }
+    out.caller_filename = &loc_it->second.first;
+    out.caller_line_number = loc_it->second.second;
+}
+
 std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address) {
     ResolvedFrameView view;
     if (!resolve_no_unwind(callee_address, caller_address, view)) {
@@ -578,6 +607,17 @@ std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address)
         return std::nullopt;
     }
     return std::make_optional(own_frame(view));
+}
+
+void resolve_site(void* address, ResolvedFrameView& out) {
+    // Same guard as the other entry points (the interposers call this from
+    // inside their own guard, so it saves/restores it unchanged).
+    ScopedNoInstrument guard;
+    bfdResolver::resolve_location(address, out);
+}
+
+std::string demangle_symbol(const char* mangled) {
+    return demangle_cxa(mangled);
 }
 
 } // namespace instrumentation

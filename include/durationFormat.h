@@ -45,6 +45,22 @@ inline constexpr const char* DURATION_UNWOUND = "[  unwound ]";
 static_assert(sizeof("[  unwound ]") - 1 == DURATION_FIELD_WIDTH,
               "DURATION_UNWOUND must be exactly DURATION_FIELD_WIDTH chars");
 
+// Column words of the exception event lines LOG_EXCEPTIONS writes with
+// LOG_ELAPSED (a throw, rethrow or catch has no duration): exactly
+// DURATION_FIELD_WIDTH chars each, so every line keeps its columns.
+inline constexpr const char* DURATION_EVENT_THROW = "[  throw   ]";
+inline constexpr const char* DURATION_EVENT_RETHROW = "[ rethrow  ]";
+inline constexpr const char* DURATION_EVENT_CATCH = "[  catch   ]";
+inline constexpr const char* DURATION_EVENT_TERMINATE = "[ terminate]";
+static_assert(sizeof("[  throw   ]") - 1 == DURATION_FIELD_WIDTH,
+              "DURATION_EVENT_THROW must be exactly DURATION_FIELD_WIDTH chars");
+static_assert(sizeof("[ rethrow  ]") - 1 == DURATION_FIELD_WIDTH,
+              "DURATION_EVENT_RETHROW must be exactly DURATION_FIELD_WIDTH chars");
+static_assert(sizeof("[  catch   ]") - 1 == DURATION_FIELD_WIDTH,
+              "DURATION_EVENT_CATCH must be exactly DURATION_FIELD_WIDTH chars");
+static_assert(sizeof("[ terminate]") - 1 == DURATION_FIELD_WIDTH,
+              "DURATION_EVENT_TERMINATE must be exactly DURATION_FIELD_WIDTH chars");
+
 // Byte 1 of every field is a space: format_duration_12chars() prints a whole
 // part of at most three digits in a four-wide column, and the placeholder, the
 // saturation sentinel and DURATION_UNWOUND keep a space there too. That byte is

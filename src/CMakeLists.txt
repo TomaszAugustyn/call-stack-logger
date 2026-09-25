@@ -10,7 +10,9 @@ file(GLOB_RECURSE HEADERS "../include/*.h")
 
 # Static library: compiled WITHOUT instrumentation flags. All functions in the library
 # have NO_INSTRUMENT attribute, so instrumentation hooks are never needed here.
-add_library(callstacklogger STATIC callStack.cpp trace.cpp ${HEADERS})
+# exceptions.cpp holds the LOG_EXCEPTIONS interposers of the C++ runtime's
+# throw/catch entry points; it compiles to nothing without that option.
+add_library(callstacklogger STATIC callStack.cpp trace.cpp exceptions.cpp ${HEADERS})
 cslg_apply_sanitizers(callstacklogger)
 
 # PUBLIC include dir: consumers get the include path automatically when they link
