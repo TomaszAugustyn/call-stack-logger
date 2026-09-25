@@ -591,7 +591,7 @@ both compilers, including -O2 and the sanitizer builds.
 `src/exceptions.cpp` interposes the C++ runtime's entry points and
 `trace.cpp` turns each event into a line (`include/eventFormat.h`, pure and
 unit-tested: `utils::EventLine`, `format_event_into`, `sanitize_what_into`;
-the bridge between the two files is the internal `src/exceptionEvents.h`).
+the bridge between the two files is the internal `include/exceptionEvents.h`).
 
 - **Interposition.** `cslg_cxa_throw`, `cslg_cxa_rethrow`,
   `cslg_cxa_begin_catch`, `cslg_rethrow_exception` and `cslg_terminate` are
@@ -776,6 +776,7 @@ call-stack-logger/
 |   |-- callStack.h             # bfdResolver struct, get_call_stack(), resolve() API
 |   |-- durationFormat.h        # utils::format_duration_12chars (LOG_ELAPSED helper), flag byte, event words
 |   |-- eventFormat.h           # LOG_EXCEPTIONS: exception event lines (throw/rethrow/catch/terminate), what() sanitizer
+|   |-- exceptionEvents.h       # LOG_EXCEPTIONS: internal bridge, interposers (exceptions.cpp) -> trace state (trace.cpp); not public API
 |   |-- format.h                # utils::format() - formats ResolvedFrame into string
 |   |-- frameReconcile.h        # LOG_EXCEPTIONS: pure frame-stack reconciliation rules (levels)
 |   |-- prettyTime.h            # utils::pretty_time() + PRETTY_TIME_LENGTH constant
@@ -785,7 +786,6 @@ call-stack-logger/
 |-- src/
 |   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, library + executable)
 |   |-- callStack.cpp           # Core implementation: BFD loading, symbol resolution
-|   |-- exceptionEvents.h       # Internal bridge: interposers (exceptions.cpp) -> trace state (trace.cpp)
 |   |-- exceptions.cpp          # LOG_EXCEPTIONS: __cxa_throw/__cxa_rethrow/__cxa_begin_catch/std::rethrow_exception/std::terminate interposers
 |   |-- trace.cpp               # __cyg_profile_func_enter/exit, trace file I/O, exception event lines
 |   |-- main.cpp                # Demo program exercising various C++ features
@@ -976,7 +976,7 @@ The LOG_EXCEPTIONS interposers (`cslg_cxa_throw`, `cslg_cxa_rethrow`,
 `cslg_cxa_begin_catch`, `cslg_rethrow_exception`, `cslg_terminate` with the public
 names as weak aliases), the `what()` extraction, the terminate detection and
 `events::verify_interposers()`; compiles to nothing without the option or with
-`DISABLE_INSTRUMENTATION`. Talks to `trace.cpp` only through `src/exceptionEvents.h`
+`DISABLE_INSTRUMENTATION`. Talks to `trace.cpp` only through `include/exceptionEvents.h`
 (`events::on_throw` / `on_catch` / `on_terminate` / `inside_tracer`). See "Exception
 Events (LOG_EXCEPTIONS)" in the Architecture section.
 

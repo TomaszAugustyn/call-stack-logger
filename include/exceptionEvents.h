@@ -10,10 +10,11 @@
 #pragma once
 
 // Internal to the library (LOG_EXCEPTIONS): the bridge between the exception
-// interposers in exceptions.cpp, which see every throw, rethrow and catch of the
-// process, and the per-thread trace state in trace.cpp, which turns them into
-// event lines and reconciles the frame stack. Not installed, not part of the
-// public API.
+// interposers in exceptions.cpp, which see every throw, rethrow, catch and
+// terminate of the process, and the per-thread trace state in trace.cpp, which
+// turns them into event lines and reconciles the frame stack. It sits with the
+// other headers for uniformity but is not part of the public API: nothing
+// outside the library's own sources includes it.
 
 #include <typeinfo>
 
