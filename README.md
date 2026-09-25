@@ -514,15 +514,25 @@ frames that returned normally keep `|_`.
   [25-09-2026 04:07:02.325] [ terminate] |  |  !! terminate std::logic_error "nobody catches this"  (no handler found)
   ```
 
-  The parenthesis says which road it was: `(no handler found)` for a `throw`,
-  a `throw;` or a `std::rethrow_exception()` that nothing catches; `(thrown
-  across a noexcept boundary)` when the exception could not leave a `noexcept`
-  function or a destructor running during unwinding, on both compilers;
-  `(std::terminate called at: file:line)` when the program called
-  `std::terminate()` itself, in a handler or with no exception at all
-  (`terminate (no active exception)`), or when the runtime did, for instance for
-  a `std::thread` whose function threw. The terminate handler's own rethrow and
-  catch, which the default one does to print its message, are not traced.
+  The parenthesis says which road it was. `(no handler found)` is a `throw`,
+  a `throw;` or a `std::rethrow_exception()` that nothing catches. The other
+  roads render the same line with a different ending:
+
+  ```
+  !! terminate std::logic_error "nobody catches this"  (thrown across a noexcept boundary)
+  !! terminate std::logic_error "nobody catches this"  (std::terminate called at: main.cpp:71)
+  !! terminate (no active exception)  (std::terminate called at: main.cpp:75)
+  ```
+
+  The first is an exception that could not leave a `noexcept` function, or a
+  destructor running during unwinding, on both compilers. The second is the
+  program calling `std::terminate()` itself, in a handler or anywhere else, or
+  the runtime calling it, for instance for a `std::thread` whose function threw;
+  the site is that call. The third is the same call with no exception being
+  handled; it reads `(exception in flight)` instead when an exception is on its
+  way but was not caught first, which older compilers do for `noexcept`
+  violations. The terminate handler's own rethrow and catch, which the default
+  one does to print its message, are not traced.
 - **With `LOG_ELAPSED`** the duration column of an event line holds a word
   instead of a duration: `[  throw   ]`, `[ rethrow  ]`, `[  catch   ]`,
   `[ terminate]`. **With `LOG_ADDR`** the address column holds the event's site
