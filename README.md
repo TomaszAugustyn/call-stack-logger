@@ -502,10 +502,10 @@ frames that returned normally keep `|_`.
   `std::rethrow_exception()`, the mechanism behind futures, coroutines and
   stored exception pointers, gives the same line with `via
   std::rethrow_exception` appended and the exact statement that rethrew.
-- **An exception nobody catches.** The runtime finds no handler, so it calls
-  the catch entry point itself and terminates. The tracer turns that into a
-  `terminate` line, the last line of the trace, and leaves every active frame
-  `[  pending ]`:
+- **An exception nobody catches, and every other road to `std::terminate`.**
+  The runtime finds no handler, so it calls the catch entry point itself and
+  terminates. The tracer turns that into a `terminate` line, the last line of
+  the trace, and leaves every active frame `[  pending ]`:
 
   ```
   [25-09-2026 04:07:02.325] [  pending ] |_ uncaught_outer()  (called from: main.cpp:58)
@@ -514,17 +514,23 @@ frames that returned normally keep `|_`.
   [25-09-2026 04:07:02.325] [ terminate] |  |  !! terminate std::logic_error "nobody catches this"  (no handler found)
   ```
 
-  The same line appears when an exception hits a `noexcept` boundary. The
-  default terminate handler's own rethrow and catch, which it does to print its
-  message, are not traced.
+  The parenthesis says which road it was: `(no handler found)` for a `throw`,
+  a `throw;` or a `std::rethrow_exception()` that nothing catches; `(thrown
+  across a noexcept boundary)` when the exception could not leave a `noexcept`
+  function or a destructor running during unwinding, on both compilers;
+  `(std::terminate called at: file:line)` when the program called
+  `std::terminate()` itself, in a handler or with no exception at all
+  (`terminate (no active exception)`), or when the runtime did, for instance for
+  a `std::thread` whose function threw. The terminate handler's own rethrow and
+  catch, which the default one does to print its message, are not traced.
 - **With `LOG_ELAPSED`** the duration column of an event line holds a word
   instead of a duration: `[  throw   ]`, `[ rethrow  ]`, `[  catch   ]`,
   `[ terminate]`. **With `LOG_ADDR`** the address column holds the event's site
-  (the terminate line has none).
+  (a terminate line has one only for a `std::terminate()` call).
 - **How it works.** The tracer defines `__cxa_throw`, `__cxa_rethrow`,
-  `__cxa_begin_catch` and `std::rethrow_exception` in your executable and
-  forwards every call to the C++ runtime's own implementation, found with
-  `dlsym(RTLD_NEXT)`. The dynamic linker resolves those names to the executable
+  `__cxa_begin_catch`, `std::rethrow_exception` and `std::terminate` in your
+  executable and forwards every call to the C++ runtime's own implementation,
+  found with `dlsym(RTLD_NEXT)`. The dynamic linker resolves those names to the executable
   first, so the tracer sees throws from your code, from `libstdc++.so` itself
   and from every shared library. The definitions are weak: a program that
   defines its own `__cxa_throw` (some backtrace-on-throw helpers do) still links,

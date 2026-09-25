@@ -1059,13 +1059,6 @@ constexpr const char* EVENT_COLUMN_CATCH = "";
 constexpr const char* EVENT_COLUMN_TERMINATE = "";
 #endif
 
-// Writes one exception event line (see include/eventFormat.h) as a child of the
-// innermost logged frame — at depth current_stack_depth + 1 — and advances the
-// byte cursor exactly like a call line does. `site` is an address inside the
-// throwing / catching instruction, or null for an event without a site (the
-// terminate line). Runs inside the calling function's guard, cancellation block
-// and exception barrier; the resolver and the demangler may allocate on a first
-// sight.
 // Demangled exception type names, memoized per type_info (demangling allocates
 // and costs microseconds; a program throws the same few types over and over).
 // Leaked like the resolver's caches; its own small mutex since events are rare.
@@ -1085,35 +1078,53 @@ const std::string& exception_type_name(const std::type_info* type) {
     return it->second;
 }
 
+// The resolved location of an event's site: an address inside the throwing,
+// catching or terminating instruction (the interposer's return address minus
+// one), resolved like a call site through the same caches.
+struct EventSite {
+    const void* address = nullptr;
+    instrumentation::ResolvedFrameView location;
+};
+
+NO_INSTRUMENT
+EventSite resolve_event_site(const void* address) {
+    EventSite site;
+    site.address = address;
+    if (address != nullptr) {
+        instrumentation::resolve_site(const_cast<void*>(address), site.location);
+    }
+    return site;
+}
+
+// Writes one exception event line (see include/eventFormat.h) as a child of the
+// innermost logged frame — at depth current_stack_depth + 1 — and advances the
+// byte cursor exactly like a call line does. `site` is the event's resolved
+// site, or one with a null address for an event without a site (a terminate
+// line for an exception the runtime gave up on). Runs inside the calling
+// function's guard, cancellation block and exception barrier.
 NO_INSTRUMENT
 void write_event_line(const char* verb, const char* site_label, const char* suffix, const char* column,
-                      const std::type_info* type, const char* what, const void* site) {
+                      const char* type_name, const char* what, const EventSite& site) {
     FILE* fp = get_thread_fp();
     if (fp == nullptr) {
         return;
     }
-    instrumentation::ResolvedFrameView location;
-    if (site != nullptr) {
-        instrumentation::resolve_site(const_cast<void*>(site), location);
-    }
-    const std::string& type_name = exception_type_name(type);
-
     char timestamp[utils::PRETTY_TIME_BUF_SIZE];
     utils::pretty_time_into(timestamp, sizeof(timestamp));
     utils::EventLine event;
     event.timestamp = timestamp;
 #ifdef LOG_ADDR
-    if (site != nullptr) {
-        event.site_address = const_cast<void*>(site);
+    if (site.address != nullptr) {
+        event.site_address = const_cast<void*>(site.address);
     }
 #endif
     event.depth = t_state.current_stack_depth + 1;
     event.verb = verb;
-    event.type_name = type_name.c_str();
+    event.type_name = type_name;
     event.what = what;
     event.site_label = site_label;
-    event.site_file = location.caller_filename;
-    event.site_line = location.caller_line_number;
+    event.site_file = site.location.caller_filename;
+    event.site_line = site.location.caller_line_number;
     event.suffix = suffix;
 
     char line[utils::FORMAT_BUF_SIZE];
@@ -1149,16 +1160,18 @@ void on_throw(ThrowKind kind, const std::type_info* type, const char* what, cons
     ScopedCancelDisable no_cancel;
     t_in_instrumentation = true;
     try {
+        const EventSite at = resolve_event_site(site);
+        const char* type_name = exception_type_name(type).c_str();
         switch (kind) {
         case ThrowKind::primary:
-            write_event_line("throw", "thrown at", "", EVENT_COLUMN_THROW, type, what, site);
+            write_event_line("throw", "thrown at", "", EVENT_COLUMN_THROW, type_name, what, at);
             break;
         case ThrowKind::rethrow:
-            write_event_line("rethrow", "rethrown at", "", EVENT_COLUMN_RETHROW, type, what, site);
+            write_event_line("rethrow", "rethrown at", "", EVENT_COLUMN_RETHROW, type_name, what, at);
             break;
         case ThrowKind::exception_ptr:
             write_event_line("rethrow", "rethrown at", " via std::rethrow_exception", EVENT_COLUMN_RETHROW,
-                             type, what, site);
+                             type_name, what, at);
             break;
         }
     } catch (...) {
@@ -1167,15 +1180,72 @@ void on_throw(ThrowKind kind, const std::type_info* type, const char* what, cons
     t_in_instrumentation = false;
 }
 
+namespace {
+
+// The what() of the exception being handled, read through public interfaces
+// only: the exception is rethrown into a local handler (the interposers stay
+// silent while the guard is set, so nothing is logged for it). Null when no
+// exception is being handled or it is not a std::exception. Used for the
+// terminate line of a std::terminate() call, where no object is at hand.
 NO_INSTRUMENT
-void on_terminate(const std::type_info* type, const char* what) {
+const char* current_exception_what(char (&buffer)[utils::WHAT_TEXT_CAPACITY]) {
+    const std::exception_ptr current = std::current_exception();
+    if (!current) {
+        return nullptr;
+    }
+    try {
+        std::rethrow_exception(current);
+    } catch (const std::exception& e) {
+        utils::sanitize_what_into(e.what(), buffer, sizeof(buffer));
+        return buffer;
+    } catch (...) {
+    }
+    return nullptr;
+}
+
+// The name of Clang's noexcept landing-pad stub: a hidden function in the
+// executable (or shared library) that calls __cxa_begin_catch and then
+// std::terminate(), where GCC 13+ calls the runtime's __cxa_call_terminate. The
+// catch interposer's return address lies inside it, and the resolver names it
+// from the symbol table.
+constexpr const char* CLANG_TERMINATE_STUB = "__clang_call_terminate";
+
+} // namespace
+
+NO_INSTRUMENT
+void on_terminate(TerminateReason reason, const std::type_info* type, const char* what, const void* site) {
     if (t_in_instrumentation) {
         return;
     }
     ScopedCancelDisable no_cancel;
     t_in_instrumentation = true;
     try {
-        write_event_line("terminate", "no handler found", "", EVENT_COLUMN_TERMINATE, type, what, nullptr);
+        const EventSite at = resolve_event_site(site);
+        const char* label = "no handler found";
+        const char* type_name = exception_type_name(type).c_str();
+        char buffer[utils::WHAT_TEXT_CAPACITY];
+        switch (reason) {
+        case TerminateReason::no_handler:
+            break;
+        case TerminateReason::noexcept_boundary:
+            label = "thrown across a noexcept boundary";
+            break;
+        case TerminateReason::terminate_called:
+            label = "std::terminate called at";
+            if (type == nullptr) {
+                // Nothing is being handled: either a plain std::terminate() call, or
+                // an exception still in flight that the caller did not catch first
+                // (a noexcept violation compiled by GCC before 13).
+                type_name = std::uncaught_exceptions() > 0 ? "(exception in flight)" : "(no active exception)";
+            }
+            break;
+        }
+        if (type != nullptr && what == nullptr) {
+            // A dependent exception, or a std::terminate() call: the interposer had
+            // no object to read; the exception being handled is the one to name.
+            what = current_exception_what(buffer);
+        }
+        write_event_line("terminate", label, "", EVENT_COLUMN_TERMINATE, type_name, what, at);
     } catch (...) {
         // Swallow (realistically only bad_alloc under OOM): the event goes untraced.
     }
@@ -1183,36 +1253,64 @@ void on_terminate(const std::type_info* type, const char* what) {
 }
 
 NO_INSTRUMENT
-void on_catch(const std::type_info* type, const char* what, const void* wrapper_site,
+bool on_catch(const std::type_info* type, const char* what, bool dependent, const void* wrapper_site,
               const void* wrapper_frame) {
     if (t_in_instrumentation) {
-        return;
+        return false;
     }
+    bool terminating = false;
     ScopedCancelDisable no_cancel;
     t_in_instrumentation = true;
     try {
-        // The interposer was called from the catcher's landing pad, so the level
-        // derived from its return address and frame address is the catcher's own.
-        // Every record below it belongs to a frame the exception unwound: on Clang
-        // those frames ran no exit hook, so this is where they are reclaimed and
-        // their lines marked; on GCC their exit hooks already popped them and
-        // nothing is left below the catcher. Then the catch line lands at the
-        // catcher's depth + 1.
-        resolve_thread_stack_bounds();
-        const void* catch_level = frame_level(wrapper_site, wrapper_frame);
-        reclaim_dead_records(instrumentation::dead_records_on_catch(t_state.frames.data(),
-                                                                    t_state.frames.size(), catch_level,
-                                                                    t_state.stack_bounds),
-                             utils::FRAME_END_EXCEPTION);
-        // Frames inlined into the catcher that the exception unwound share the
-        // catcher's level; the DWARF inline chain at the catch site tells them apart.
-        reclaim_dead_inlined_records_on_catch(catch_level, static_cast<const char*>(wrapper_site) - 1);
-        write_event_line("catch", "caught at", "", EVENT_COLUMN_CATCH, type, what,
-                         static_cast<const char*>(wrapper_site) - 1);
+        const EventSite at = resolve_event_site(static_cast<const char*>(wrapper_site) - 1);
+        const char* type_name = exception_type_name(type).c_str();
+        char buffer[utils::WHAT_TEXT_CAPACITY];
+        if (dependent && what == nullptr) {
+            what = current_exception_what(buffer);
+        }
+        if (at.location.caller_function_base != nullptr
+            && *at.location.caller_function_base == CLANG_TERMINATE_STUB) {
+            // Not a catch: the exception hit a noexcept boundary and the program
+            // is terminating (GCC's equivalent, __cxa_call_terminate, is recognized
+            // by the interposer itself; GCC also ran the unwound frames' exit hooks
+            // first). The stub is called from the noexcept function's landing pad,
+            // so every record at or below the stub's level is a frame the exception
+            // unwound — the stub now occupies that stack slot — and is reclaimed,
+            // which puts the terminate line under the noexcept function.
+            resolve_thread_stack_bounds();
+            const char* stub_level = static_cast<const char*>(frame_level(wrapper_site, wrapper_frame));
+            reclaim_dead_records(instrumentation::dead_records_on_catch(t_state.frames.data(),
+                                                                        t_state.frames.size(), stub_level + 1,
+                                                                        t_state.stack_bounds),
+                                 utils::FRAME_END_EXCEPTION);
+            write_event_line("terminate", "thrown across a noexcept boundary", "", EVENT_COLUMN_TERMINATE,
+                             type_name, what, EventSite{});
+            terminating = true;
+        } else {
+            // The interposer was called from the catcher's landing pad, so the level
+            // derived from its return address and frame address is the catcher's
+            // own. Every record below it belongs to a frame the exception unwound:
+            // on Clang those frames ran no exit hook, so this is where they are
+            // reclaimed and their lines marked; on GCC their exit hooks already
+            // popped them and nothing is left below the catcher. Then the catch
+            // line lands at the catcher's depth + 1.
+            resolve_thread_stack_bounds();
+            const void* catch_level = frame_level(wrapper_site, wrapper_frame);
+            reclaim_dead_records(instrumentation::dead_records_on_catch(t_state.frames.data(),
+                                                                        t_state.frames.size(), catch_level,
+                                                                        t_state.stack_bounds),
+                                 utils::FRAME_END_EXCEPTION);
+            // Frames inlined into the catcher that the exception unwound share the
+            // catcher's level; the DWARF inline chain at the catch site tells them
+            // apart.
+            reclaim_dead_inlined_records_on_catch(catch_level, at.address);
+            write_event_line("catch", "caught at", "", EVENT_COLUMN_CATCH, type_name, what, at);
+        }
     } catch (...) {
         // Swallow (realistically only bad_alloc under OOM): the event goes untraced.
     }
     t_in_instrumentation = false;
+    return terminating;
 }
 
 } // namespace events

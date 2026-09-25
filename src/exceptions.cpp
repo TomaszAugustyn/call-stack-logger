@@ -7,17 +7,17 @@
  * Contact Email: t.augustyn@poczta.fm
  */
 
-// LOG_EXCEPTIONS: interposers for the C++ runtime's throw, rethrow and catch
-// entry points. This translation unit is part of the static library that every
-// traced executable links, so its definitions of __cxa_throw, __cxa_rethrow,
-// __cxa_begin_catch and std::rethrow_exception live in the executable, and the
-// dynamic linker resolves every call to those names — from the program, from
-// libstdc++.so itself, from any shared library — to them first. Each one
-// reports the event to trace.cpp and then forwards to the runtime's own
-// implementation, found with dlsym(RTLD_NEXT) ("the next definition after the
-// executable").
+// LOG_EXCEPTIONS: interposers for the C++ runtime's throw, rethrow, catch and
+// terminate entry points. This translation unit is part of the static library
+// that every traced executable links, so its definitions of __cxa_throw,
+// __cxa_rethrow, __cxa_begin_catch, std::rethrow_exception and std::terminate
+// live in the executable, and the dynamic linker resolves every call to those
+// names — from the program, from libstdc++.so itself, from any shared library —
+// to them first. Each one reports the event to trace.cpp and then forwards to
+// the runtime's own implementation, found with dlsym(RTLD_NEXT) ("the next
+// definition after the executable").
 //
-// The four are defined as WEAK ALIASES of privately named functions. A program
+// The five are defined as WEAK ALIASES of privately named functions. A program
 // that defines its own __cxa_throw (some backtrace-on-throw helpers do) then
 // still links: its strong definition wins, ours is dropped, and
 // verify_interposers() can tell because the active definition is no longer the
@@ -52,15 +52,18 @@ using instrumentation::events::inside_tracer;
 using instrumentation::events::on_catch;
 using instrumentation::events::on_terminate;
 using instrumentation::events::on_throw;
+using instrumentation::events::TerminateReason;
 using instrumentation::events::ThrowKind;
 
 using cxa_throw_fn = void (*)(void*, std::type_info*, void (*)(void*));
 using cxa_rethrow_fn = void (*)();
 using cxa_begin_catch_fn = void* (*)(void*);
 using rethrow_exception_fn = void (*)(std::exception_ptr);
+using terminate_fn = void (*)();
 
-// Itanium C++ ABI name of std::rethrow_exception(std::exception_ptr).
+// Itanium C++ ABI names of std::rethrow_exception(std::exception_ptr) and std::terminate().
 constexpr const char* RETHROW_EXCEPTION_SYMBOL = "_ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE";
+constexpr const char* TERMINATE_SYMBOL = "_ZSt9terminatev";
 
 // The runtime's own definition of `symbol`: the next one after this executable
 // in the dynamic linker's search order (libstdc++.so, or a sanitizer runtime's
@@ -150,19 +153,30 @@ constexpr _Unwind_Exception_Class exception_class_of(const char (&text)[9]) {
     return value;
 }
 constexpr _Unwind_Exception_Class PRIMARY_EXCEPTION_CLASS = exception_class_of("GNUCC++\0");
+constexpr _Unwind_Exception_Class DEPENDENT_EXCEPTION_CLASS = exception_class_of("GNUCC++\1");
+
+NO_INSTRUMENT
+_Unwind_Exception_Class exception_class(const void* exception_object) {
+    if (exception_object == nullptr) {
+        return 0;
+    }
+    return static_cast<const _Unwind_Exception*>(exception_object)->exception_class;
+}
 
 // True when `exception_object` (the _Unwind_Exception the runtime hands to
 // __cxa_begin_catch) is a native primary C++ exception, whose thrown object
-// immediately follows that header (Itanium C++ ABI 2.4.2 / 2.5). A dependent
-// exception (from std::rethrow_exception) refers to its primary indirectly, so
-// its what() is not read here.
+// immediately follows that header (Itanium C++ ABI 2.4.2 / 2.5).
 NO_INSTRUMENT
 bool is_native_primary_exception(const void* exception_object) {
-    if (exception_object == nullptr) {
-        return false;
-    }
-    const _Unwind_Exception* header = static_cast<const _Unwind_Exception*>(exception_object);
-    return header->exception_class == PRIMARY_EXCEPTION_CLASS;
+    return exception_class(exception_object) == PRIMARY_EXCEPTION_CLASS;
+}
+
+// True for a native dependent exception (std::rethrow_exception), which refers
+// to its primary through a private layout: its what() is read in trace.cpp
+// through std::current_exception() instead.
+NO_INSTRUMENT
+bool is_native_dependent_exception(const void* exception_object) {
+    return exception_class(exception_object) == DEPENDENT_EXCEPTION_CLASS;
 }
 
 // The code range [begin, end) of one function of the C++ runtime, from its
@@ -192,23 +206,45 @@ CodeRange runtime_code_range(const char* symbol) {
     return range;
 }
 
-// True when a __cxa_begin_catch call came from the runtime itself giving up:
-// __cxa_throw calls it when the unwinder found no handler, __cxa_call_terminate
-// when the exception hit a noexcept boundary — std::terminate() follows either.
-// The ranges are those of libstdc++'s own functions (a sanitizer's __cxa_throw
-// interceptor is not where the runtime gives up), resolved once, on the first
-// catch.
+// True — with the reason — when a __cxa_begin_catch call came from the runtime
+// itself giving up on the exception, which it does right before terminating
+// ("terminate is a handler" in the runtime's own words): __cxa_throw,
+// __cxa_rethrow and std::rethrow_exception call it when the unwinder found no
+// handler; __cxa_call_terminate (the landing pad of a noexcept function, GCC 13
+// and later) and __gxx_personality_v0 (a call site with no unwind information,
+// which the personality routine treats the same way) when the exception could
+// not leave a frame. The ranges are those of libstdc++'s own functions (a
+// sanitizer's __cxa_throw interceptor is not where the runtime gives up),
+// resolved once, on the first catch. Clang's noexcept landing pads call a stub
+// in the executable instead of __cxa_call_terminate; trace.cpp recognizes that
+// one by name (see on_catch). Everything else that ends in std::terminate() is
+// caught by the std::terminate interposer below.
 NO_INSTRUMENT
-bool catch_means_terminate(const void* return_address) {
-    static const CodeRange throw_range = runtime_code_range("__cxa_throw");
-    static const CodeRange call_terminate_range = runtime_code_range("__cxa_call_terminate");
-    return throw_range.contains(return_address) || call_terminate_range.contains(return_address);
+bool catch_means_terminate(const void* return_address, TerminateReason& reason) {
+    struct GiveUpSite {
+        CodeRange range;
+        TerminateReason reason;
+    };
+    static const GiveUpSite sites[] = {
+        { runtime_code_range("__cxa_throw"), TerminateReason::no_handler },
+        { runtime_code_range("__cxa_rethrow"), TerminateReason::no_handler },
+        { runtime_code_range(RETHROW_EXCEPTION_SYMBOL), TerminateReason::no_handler },
+        { runtime_code_range("__cxa_call_terminate"), TerminateReason::noexcept_boundary },
+        { runtime_code_range("__gxx_personality_v0"), TerminateReason::noexcept_boundary },
+    };
+    for (const GiveUpSite& site : sites) {
+        if (site.range.contains(return_address)) {
+            reason = site.reason;
+            return true;
+        }
+    }
+    return false;
 }
 
-// Set once the runtime started terminating this thread's program: the default
-// terminate handler rethrows and catches the exception once more to print its
-// message, which is the runtime's doing, not the program's, so nothing is
-// logged after the terminate line.
+// Set once this thread's program started terminating: the default terminate
+// handler rethrows and catches the exception once more to print its message,
+// and a custom handler may do the same, which is the handler's doing, not the
+// program's flow, so no event is logged after the terminate line.
 thread_local bool t_terminating = false;
 
 // Copies what() into a one-line buffer (see utils::sanitize_what_into) and
@@ -295,14 +331,37 @@ extern "C" NO_INSTRUMENT void* cslg_cxa_begin_catch(void* exception_object) noex
             what = sanitized_what(std_exception_what(type, thrown), buffer);
         }
         const void* return_address = __builtin_return_address(0);
-        if (catch_means_terminate(return_address)) {
+        TerminateReason reason;
+        if (catch_means_terminate(return_address, reason)) {
             t_terminating = true;
-            on_terminate(type, what);
-        } else {
-            on_catch(type, what, return_address, __builtin_frame_address(0));
+            on_terminate(reason, type, what, nullptr);
+        } else if (on_catch(type, what, is_native_dependent_exception(exception_object), return_address,
+                            __builtin_frame_address(0))) {
+            t_terminating = true;
         }
     }
     return handler_object;
+}
+
+// std::terminate() itself, for every path that does not go through one of the
+// give-up sites above: the program calling it (in a handler, or with no
+// exception at all), a `noexcept` violation compiled by GCC before 13 or by
+// Clang (whose stub the catch interposer may already have recognized — then
+// t_terminating is set and nothing more is written), the runtime's own
+// callers such as a std::thread whose function threw. The type comes from the
+// exception being handled, if any; its what() is read in trace.cpp.
+extern "C" NO_INSTRUMENT __attribute__((noreturn)) void cslg_terminate() {
+    static const terminate_fn real = next_definition<terminate_fn>(TERMINATE_SYMBOL);
+    if (real == nullptr) {
+        cannot_forward("std::terminate");
+    }
+    if (!inside_tracer() && !t_terminating) {
+        t_terminating = true;
+        on_terminate(TerminateReason::terminate_called, abi::__cxa_current_exception_type(), nullptr,
+                     static_cast<const char*>(__builtin_return_address(0)) - 1);
+    }
+    real();
+    __builtin_unreachable();
 }
 
 // The public names, as aliases of the functions above (see the file comment).
@@ -340,6 +399,7 @@ extern "C" void* __cxa_begin_catch(void*) noexcept
 } // namespace __cxxabiv1
 namespace std {
 void rethrow_exception(exception_ptr) __attribute__((CSLG_ALIAS_LINKAGE alias("cslg_rethrow_exception")));
+void terminate() noexcept __attribute__((noreturn, CSLG_ALIAS_LINKAGE alias("cslg_terminate")));
 } // namespace std
 
 // ---- startup check --------------------------------------------------------
@@ -360,6 +420,7 @@ void verify_interposers() {
         { "__cxa_begin_catch", "__cxa_begin_catch", reinterpret_cast<const void*>(&cslg_cxa_begin_catch) },
         { RETHROW_EXCEPTION_SYMBOL, "std::rethrow_exception",
           reinterpret_cast<const void*>(&cslg_rethrow_exception) },
+        { TERMINATE_SYMBOL, "std::terminate", reinterpret_cast<const void*>(&cslg_terminate) },
     };
     for (const Entry& entry : entries) {
         const void* active = dlsym(RTLD_DEFAULT, entry.symbol);

@@ -2620,7 +2620,11 @@ protected:
     std::map<std::string, int> site_lines;
     int run_status = -1;
 
-    void SetUp() override {
+    // Runs the terminate driver in `mode` (see uncaught_traced_program.cpp; ""
+    // is the plain uncaught throw) and loads its trace and the "<TAG>=<line>"
+    // pairs it printed. Every mode ends in std::terminate, so the process is
+    // expected to die with SIGABRT.
+    void run(const char* mode) {
         char tmp_path[] = "/tmp/cslg_uncaught_XXXXXX";
         int fd = mkstemp(tmp_path);
         ASSERT_GE(fd, 0) << "mkstemp failed";
@@ -2629,9 +2633,8 @@ protected:
         const std::string stdout_path = trace_file_path + ".stdout";
 
         std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_file_path + "\" \""
-                        + UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH + "\" > \"" + stdout_path
+                        + UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH + "\" " + mode + " > \"" + stdout_path
                         + "\" 2>/dev/null";
-        // Expected to terminate via SIGABRT (std::terminate); asserted non-zero.
         run_status = system(cmd.c_str());
 
         trace_content = read_file(trace_file_path);
@@ -2645,6 +2648,27 @@ protected:
             }
         }
         unlink(stdout_path.c_str());
+
+        ASSERT_NE(run_status, 0) << "the driver exited cleanly in mode '" << mode << "' — nothing to test";
+        ASSERT_GE(trace_lines.size(), 2u) << "trace too short:\n" << trace_content;
+    }
+
+    // The event lines ("!! ...") of the trace, in file order.
+    std::vector<std::string> event_lines() const {
+        std::vector<std::string> events;
+        for (const auto& line : trace_lines) {
+            if (line.find("!! ") != std::string::npos) events.push_back(line);
+        }
+        return events;
+    }
+
+    static bool has(const std::string& line, const std::string& needle) {
+        return line.find(needle) != std::string::npos;
+    }
+
+    // The tail of a site rendered from the reported line `tag`, e.g. ":42)".
+    std::string site_of(const char* tag, const char* suffix = "") {
+        return ":" + std::to_string(site_lines[tag]) + suffix + ")";
     }
 
     void TearDown() override {
@@ -2663,8 +2687,7 @@ protected:
 // line of the trace, naming what killed the process. The default terminate
 // handler's own rethrow and catch (to print its message) are not traced.
 TEST_F(LogExceptionsUncaughtTest, TerminateLineIsTheLastLineAndActiveFramesStayPending) {
-    ASSERT_NE(run_status, 0) << "the uncaught driver exited cleanly — nothing to test";
-    ASSERT_GE(trace_lines.size(), 2u) << "trace too short:\n" << trace_content;
+    ASSERT_NO_FATAL_FAILURE(run(""));
 
     const std::string& last = trace_lines.back();
     EXPECT_EQ(last.find("!! terminate std::logic_error \"nobody catches this\"  (no handler found)"),
@@ -2676,8 +2699,7 @@ TEST_F(LogExceptionsUncaughtTest, TerminateLineIsTheLastLineAndActiveFramesStayP
     const std::string& throw_line = trace_lines[trace_lines.size() - 2];
     EXPECT_NE(throw_line.find("!! throw std::logic_error \"nobody catches this\"  (thrown at: "),
               std::string::npos) << throw_line;
-    EXPECT_NE(throw_line.find(":" + std::to_string(site_lines["THROW_UNCAUGHT"]) + ")"), std::string::npos)
-            << throw_line;
+    EXPECT_NE(throw_line.find(site_of("THROW_UNCAUGHT")), std::string::npos) << throw_line;
     EXPECT_EQ(field_of_line(throw_line), "[  throw   ]") << throw_line;
     EXPECT_EQ(trace_content.find("!! rethrow"), std::string::npos) << "the terminate handler's rethrow leaked:\n"
                                                                      << trace_content;
@@ -2694,6 +2716,107 @@ TEST_F(LogExceptionsUncaughtTest, TerminateLineIsTheLastLineAndActiveFramesStayP
     ASSERT_FALSE(done.empty()) << trace_content;
     EXPECT_TRUE(std::regex_search(done, duration_field_regex())) << done;
     EXPECT_GE(parse_duration_ns(done), 1'000'000LL) << done;
+}
+
+// `throw;` in a handler with no outer handler: the runtime gives up inside
+// __cxa_rethrow, which calls __cxa_begin_catch itself like __cxa_throw does.
+// The trace shows the program's own catch and rethrow (at their exact lines,
+// children of the handler's function), then the terminate line, and nothing
+// of the terminate handler — no catch attributed to the runtime, no second
+// rethrow.
+TEST_F(LogExceptionsUncaughtTest, RethrowWithNoOuterHandlerEndsInTheTerminateLine) {
+    ASSERT_NO_FATAL_FAILURE(run("rethrow"));
+    const std::vector<std::string> events = event_lines();
+    ASSERT_EQ(events.size(), 4u) << "throw, catch, rethrow, terminate expected:\n" << trace_content;
+    EXPECT_TRUE(has(events[0], "!! throw std::logic_error \"nobody catches this\"  (thrown at: ")) << events[0];
+    EXPECT_TRUE(has(events[1], "!! catch std::logic_error \"nobody catches this\"  (caught at: ")) << events[1];
+    EXPECT_TRUE(has(events[1], site_of("CATCH_RETHROW"))) << events[1];
+    EXPECT_TRUE(has(events[2], "!! rethrow std::logic_error  (rethrown at: ")) << events[2];
+    EXPECT_TRUE(has(events[2], site_of("RETHROW"))) << events[2];
+    EXPECT_TRUE(has(events[3], "!! terminate std::logic_error \"nobody catches this\"  (no handler found)"))
+            << events[3];
+    EXPECT_EQ(events[3], trace_lines.back()) << trace_content;
+    EXPECT_EQ(field_of_line(events[3]), "[ terminate]") << events[3];
+    for (size_t i = 1; i < 4; ++i) {
+        EXPECT_EQ(count_indentation_depth(events[i]), 2) << "a child of the handler's function:\n" << events[i];
+        EXPECT_FALSE(has(events[i], "<bfd_error>")) << events[i];
+    }
+}
+
+// The same through std::rethrow_exception: the dependent exception it throws
+// hides its primary object from the interposer, so the terminate line's
+// what() comes from std::current_exception() inside the tracer.
+TEST_F(LogExceptionsUncaughtTest, RethrowExceptionWithNoOuterHandlerEndsInTheTerminateLine) {
+    ASSERT_NO_FATAL_FAILURE(run("rethrow_ptr"));
+    const std::vector<std::string> events = event_lines();
+    ASSERT_EQ(events.size(), 4u) << "throw, catch, rethrow, terminate expected:\n" << trace_content;
+    EXPECT_TRUE(has(events[1], "!! catch std::logic_error \"nobody catches this\"  (caught at: ")) << events[1];
+    EXPECT_TRUE(has(events[1], site_of("CATCH_RETHROW_PTR"))) << events[1];
+    EXPECT_TRUE(has(events[2], "!! rethrow std::logic_error  (rethrown at: ")) << events[2];
+    EXPECT_TRUE(has(events[2], site_of("RETHROW_PTR", " via std::rethrow_exception"))) << events[2];
+    EXPECT_TRUE(has(events[3], "!! terminate std::logic_error \"nobody catches this\"  (no handler found)"))
+            << events[3];
+    EXPECT_EQ(events[3], trace_lines.back()) << trace_content;
+    for (size_t i = 1; i < 4; ++i) {
+        EXPECT_EQ(count_indentation_depth(events[i]), 2) << events[i];
+        EXPECT_FALSE(has(events[i], "<bfd_error>")) << events[i];
+    }
+}
+
+// An exception escaping a noexcept function never reaches the handler in the
+// caller: GCC's landing pad calls the runtime's __cxa_call_terminate, Clang's
+// calls a stub in the executable (__clang_call_terminate), and both are told
+// from a real catch. The terminate line is a child of the noexcept function on
+// both compilers, the frames the exception unwound are marked, and nothing
+// looks like a catch.
+TEST_F(LogExceptionsUncaughtTest, ExceptionEscapingNoexceptEndsInTheTerminateLine) {
+    ASSERT_NO_FATAL_FAILURE(run("noexcept"));
+    const std::vector<std::string> events = event_lines();
+    ASSERT_EQ(events.size(), 2u) << "throw and terminate expected:\n" << trace_content;
+    EXPECT_TRUE(has(events[0], "!! throw std::logic_error \"nobody catches this\"  (thrown at: ")) << events[0];
+    EXPECT_TRUE(has(events[1],
+                    "!! terminate std::logic_error \"nobody catches this\"  (thrown across a noexcept boundary)"))
+            << events[1];
+    EXPECT_EQ(events[1], trace_lines.back()) << trace_content;
+    EXPECT_EQ(field_of_line(events[1]), "[ terminate]") << events[1];
+    EXPECT_EQ(count_indentation_depth(events[1]), 3) << "a child of noexcept_wall:\n" << events[1];
+    for (const char* fn : { "uncaught_outer", "uncaught_leaf" }) {
+        const std::string line = find_unique_line(trace_lines, fn);
+        ASSERT_FALSE(line.empty()) << fn << " line missing or not unique. Trace:\n" << trace_content;
+        EXPECT_EQ(tree_glyph_of(line), '!') << "left by the exception:\n" << line;
+    }
+    EXPECT_EQ(tree_glyph_of(find_unique_line(trace_lines, "noexcept_wall")), '|') << trace_content;
+}
+
+// A handler that calls std::terminate() itself: the catch is a real one, then
+// the std::terminate interposer writes the terminate line with the call's
+// exact site and the what() of the exception being handled.
+TEST_F(LogExceptionsUncaughtTest, HandlerCallingTerminateEndsInTheTerminateLineWithItsSite) {
+    ASSERT_NO_FATAL_FAILURE(run("catch_terminate"));
+    const std::vector<std::string> events = event_lines();
+    ASSERT_EQ(events.size(), 3u) << "throw, catch, terminate expected:\n" << trace_content;
+    EXPECT_TRUE(has(events[1], "!! catch std::logic_error \"nobody catches this\"  (caught at: ")) << events[1];
+    EXPECT_TRUE(has(events[1], site_of("CATCH_TERMINATE"))) << events[1];
+    EXPECT_TRUE(has(events[2], "!! terminate std::logic_error \"nobody catches this\"  (std::terminate called at: "))
+            << events[2];
+    EXPECT_TRUE(has(events[2], site_of("TERMINATE_CALL"))) << events[2];
+    EXPECT_EQ(events[2], trace_lines.back()) << trace_content;
+    EXPECT_EQ(field_of_line(events[2]), "[ terminate]") << events[2];
+    EXPECT_EQ(count_indentation_depth(events[1]), 2) << events[1];
+    EXPECT_EQ(count_indentation_depth(events[2]), 2) << events[2];
+}
+
+// std::terminate() with no exception at all still leaves a line saying so,
+// with the call's site.
+TEST_F(LogExceptionsUncaughtTest, TerminateWithoutAnExceptionLeavesALine) {
+    ASSERT_NO_FATAL_FAILURE(run("no_exception"));
+    const std::vector<std::string> events = event_lines();
+    ASSERT_EQ(events.size(), 1u) << "only the terminate line expected:\n" << trace_content;
+    EXPECT_TRUE(has(events[0], "!! terminate (no active exception)  (std::terminate called at: ")) << events[0];
+    EXPECT_TRUE(has(events[0], site_of("TERMINATE_CALL"))) << events[0];
+    EXPECT_EQ(events[0], trace_lines.back()) << trace_content;
+    EXPECT_EQ(field_of_line(events[0]), "[ terminate]") << events[0];
+    EXPECT_EQ(count_indentation_depth(events[0]), 2) << "a child of terminate_without_exception:\n" << events[0];
 }
 
 // ============================================================================

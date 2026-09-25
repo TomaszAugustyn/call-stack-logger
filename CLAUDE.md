@@ -594,9 +594,10 @@ unit-tested: `utils::EventLine`, `format_event_into`, `sanitize_what_into`;
 the bridge between the two files is the internal `src/exceptionEvents.h`).
 
 - **Interposition.** `cslg_cxa_throw`, `cslg_cxa_rethrow`,
-  `cslg_cxa_begin_catch` and `cslg_rethrow_exception` are ordinary functions;
-  the public names `__cxa_throw`, `__cxa_rethrow`, `__cxa_begin_catch` and
-  `std::rethrow_exception` are WEAK ALIASES of them. The executable that links
+  `cslg_cxa_begin_catch`, `cslg_rethrow_exception` and `cslg_terminate` are
+  ordinary functions; the public names `__cxa_throw`, `__cxa_rethrow`,
+  `__cxa_begin_catch`, `std::rethrow_exception` and `std::terminate` are WEAK
+  ALIASES of them. The executable that links
   the library therefore defines those names, the dynamic linker resolves every
   call — from the program, from `libstdc++.so` itself, from any `.so` — to
   them first, and each forwards to the runtime's own implementation found once
@@ -628,26 +629,60 @@ the bridge between the two files is the internal `src/exceptionEvents.h`).
   forwards FIRST, then `__cxa_current_exception_type()`; for a native PRIMARY
   exception the thrown object follows the `_Unwind_Exception` header (Itanium
   ABI 2.4.2), so its `what()` is read the same way; a dependent exception (from
-  `std::rethrow_exception`) gets the type only. The exception class is compared
+  `std::rethrow_exception`, class "GNUCC++" + 1) refers to its primary through
+  a private layout, so `on_catch` reads its `what()` in `trace.cpp` by
+  rethrowing `std::current_exception()` into a local handler
+  (`current_exception_what()`; the interposers stay silent under the guard, so
+  nothing is logged for that rethrow). The exception class is compared
   as the 64-bit INTEGER libstdc++ builds from "GNUCC++" + 0 / 1 — its bytes are
   reversed in memory on little-endian machines, a byte comparison never matches
   (the first attempt's bug). The site passed to trace.cpp is the interposer's
   return address minus one, resolved by the new `instrumentation::resolve_site()`
   (the location half of `resolve_no_unwind`, same caches, same lock order) and
   the type name by `instrumentation::demangle_symbol()`.
-- **Terminate.** When the unwinder finds no handler, libstdc++'s `__cxa_throw`
-  calls `__cxa_begin_catch` itself and then `std::terminate()`; a `noexcept`
-  boundary does the same through `__cxa_call_terminate`. The catch interposer
-  recognizes both by the caller's address lying inside those two runtime
-  functions (code ranges from `dladdr1(..., RTLD_DL_SYMENT)` on libstdc++'s OWN
-  definitions — looked up in the library that defines the RTLD_NEXT
-  `__cxa_begin_catch`, which no sanitizer intercepts; under GCC ASan the
-  RTLD_NEXT `__cxa_throw` is libasan's interceptor, whose range would never
-  match — resolved once) and reports `on_terminate` instead of a catch:
-  `!! terminate <type> "<what>"  (no handler found)`, column `[ terminate]`,
-  no site, no address. It then sets the per-thread `t_terminating` flag so the
-  default terminate handler's own rethrow and catch (to print its message) are
+- **Terminate.** Three detectors, each writing one terminate line
+  (`events::on_terminate` with a `TerminateReason`) and setting the per-thread
+  `t_terminating` flag first, so that the terminate handler's own rethrow and
+  catch (the default one does that to print its message; a custom one may) are
   not traced. The frames active at that point keep `[  pending ]`.
+  (1) *The runtime giving up.* When the unwinder finds no handler, libstdc++'s
+  `__cxa_throw`, `__cxa_rethrow` and `std::rethrow_exception` call
+  `__cxa_begin_catch` themselves ("terminate is a handler", in the runtime's own
+  words) and then `std::terminate()`; an exception that cannot leave a
+  `noexcept` function does the same through `__cxa_call_terminate` (GCC 13 and
+  later), and a call site without unwind information through
+  `__gxx_personality_v0`. The catch interposer recognizes these five by the
+  caller's address lying inside them (`catch_means_terminate`: code ranges from
+  `dladdr1(..., RTLD_DL_SYMENT)` on libstdc++'s OWN definitions — looked up in
+  the library that defines the RTLD_NEXT `__cxa_begin_catch`, which no
+  sanitizer intercepts; under GCC ASan the RTLD_NEXT `__cxa_throw` is libasan's
+  interceptor, whose range would never match — resolved once, on the first
+  catch): `!! terminate <type> "<what>"  (no handler found)` or `(thrown across
+  a noexcept boundary)`, column `[ terminate]`, no site.
+  (2) *Clang's stub.* Clang's noexcept landing pads call a hidden function in
+  the executable, `__clang_call_terminate`, instead of `__cxa_call_terminate`.
+  `on_catch` in `trace.cpp` sees that the resolved catch site's function name
+  (`caller_function_base`, from the symbol table) is that stub, reclaims every
+  record at or below the stub's level (the frames the exception unwound: GCC
+  ran their exit hooks before its landing pad, Clang did not — the stub now
+  occupies that stack slot, so nothing at its level can be alive), writes the
+  noexcept terminate line instead of a catch line and returns true so the
+  interposer marks the thread.
+  (3) *`std::terminate` itself*, the fifth interposed entry point
+  (`cslg_terminate`, alias of `_ZSt9terminatev`), for every remaining path: the
+  program calling it in a handler or with no exception, a `std::thread` whose
+  function threw, a noexcept violation compiled by GCC before 13:
+  `!! terminate <type> "<what>"  (std::terminate called at: file:line)` with the
+  call's site (and an address column entry under LOG_ADDR), the type from
+  `__cxa_current_exception_type()` and the `what()` read like a dependent
+  exception's (`current_exception_what()`); with nothing being handled the type
+  reads `(no active exception)`, or `(exception in flight)` when one is
+  uncaught. GCC's `__cxa_call_terminate` bypasses `std::terminate()` (it calls
+  the handler directly), which is why (1) is not redundant with (3). Probed
+  through every path on both compilers (`throw;` and `std::rethrow_exception`
+  without an outer handler, noexcept functions and throwing destructors during
+  unwinding, `std::thread`, custom handlers, a throw across `qsort`, direct
+  calls); pinned by the six `LogExceptionsUncaughtTest` modes.
 - **trace.cpp side.** `events::on_throw` / `on_catch` / `on_terminate` run with
   the re-entrancy guard set, cancellation blocked and an exception barrier
   (like the hooks) and write the line through `write_event_line()` at depth
@@ -663,7 +698,7 @@ the bridge between the two files is the internal `src/exceptionEvents.h`).
   the tracer's own exceptions and handlers (the hooks' barriers,
   `get_call_stack()`'s throw).
 - **Startup check.** `trace_begin()` calls `events::verify_interposers()`:
-  for each of the four names, if `dlsym(RTLD_DEFAULT)` is not our function →
+  for each of the five names, if `dlsym(RTLD_DEFAULT)` is not our function →
   one stderr WARNING (events through that name are not traced); else if
   `dlsym(RTLD_NEXT)` finds nothing → `cannot_forward()`: FATAL + abort, which
   is the `-static-libstdc++` / fully static case (no runtime definition to
@@ -682,7 +717,7 @@ the bridge between the two files is the internal `src/exceptionEvents.h`).
   cached site resolution, a memoized type name (`exception_type_name()`, a
   small leaked map with its own mutex: `__cxa_demangle` allocates and costs
   microseconds) and a line write, on top of the unwinder's own microseconds;
-  the first catch resolves the two terminate code ranges once. The
+  the first catch resolves the five give-up code ranges once. The
   reconciliation's per-call work is kept off the -O0 hot path deliberately: the
   callee's base name is computed once into the name cache (`CachedName`, handed
   to the hook as `ResolvedFrameView::callee_base_name`; parsing it per call with
@@ -751,7 +786,7 @@ call-stack-logger/
 |   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, library + executable)
 |   |-- callStack.cpp           # Core implementation: BFD loading, symbol resolution
 |   |-- exceptionEvents.h       # Internal bridge: interposers (exceptions.cpp) -> trace state (trace.cpp)
-|   |-- exceptions.cpp          # LOG_EXCEPTIONS: __cxa_throw/__cxa_rethrow/__cxa_begin_catch/std::rethrow_exception interposers
+|   |-- exceptions.cpp          # LOG_EXCEPTIONS: __cxa_throw/__cxa_rethrow/__cxa_begin_catch/std::rethrow_exception/std::terminate interposers
 |   |-- trace.cpp               # __cyg_profile_func_enter/exit, trace file I/O, exception event lines
 |   |-- main.cpp                # Demo program exercising various C++ features
 |-- tests/                      # Unit and integration tests (BUILD_TESTS=ON, top-level builds only)
@@ -777,7 +812,7 @@ call-stack-logger/
 |       |-- exception_traced_program.cpp # Instrumented; throw/catch through instrumented frames (GCC pairing)
 |       |-- exceptions_traced_program.cpp # Instrumented LOG_EXCEPTIONS driver: every kind of non-local exit + markers
 |       |-- throwing_lib.cpp      # Shared lib built without instrumentation whose only function throws
-|       |-- uncaught_traced_program.cpp # Instrumented, LOG_EXCEPTIONS + LOG_ELAPSED; throws and never catches (terminate line)
+|       |-- uncaught_traced_program.cpp # Instrumented, LOG_EXCEPTIONS + LOG_ELAPSED; every path to std::terminate, one per mode (terminate line)
 |       |-- inlined_traced_program.cpp # Instrumented at -O2, LOG_EXCEPTIONS; always_inline thrower chain and retry leaf (inline chains)
 |       |-- crash_traced_program.cpp # Instrumented, LOG_ELAPSED; abort()s mid-chain (pending-placeholder crash diagnostics)
 |       |-- global_dtor_traced_program.cpp # Instrumented; global object dtor calls traced code during exit()
@@ -938,8 +973,8 @@ The core implementation. Key functions:
 
 ### `src/exceptions.cpp`
 The LOG_EXCEPTIONS interposers (`cslg_cxa_throw`, `cslg_cxa_rethrow`,
-`cslg_cxa_begin_catch`, `cslg_rethrow_exception` with the public names as weak
-aliases), the `what()` extraction, the terminate detection and
+`cslg_cxa_begin_catch`, `cslg_rethrow_exception`, `cslg_terminate` with the public
+names as weak aliases), the `what()` extraction, the terminate detection and
 `events::verify_interposers()`; compiles to nothing without the option or with
 `DISABLE_INSTRUMENTATION`. Talks to `trace.cpp` only through `src/exceptionEvents.h`
 (`events::on_throw` / `on_catch` / `on_terminate` / `inside_tracer`). See "Exception
@@ -1325,12 +1360,21 @@ Test pure/deterministic functions from the include headers:
   catch whose thrower chain was inlined into the catcher sits under the catcher, the
   catch line too, the inlined frames carry `!_`; and a retry loop whose longjmp'ing leaf
   is inlined keeps its marker at the loop's depth with every leaf marked `~_` — both
-  need the DWARF inline chains (under Clang, the `-gdwarf-4` the variant propagates). `LogExceptionsUncaughtTest` drives
-  `cslg_uncaught_traced_program_log_exceptions_elapsed`: the process must die, the
-  last line is the `terminate` line at the thrower's depth + 1, the throw line
-  precedes it with the exact site, no rethrow/catch of the terminate handler leaks,
-  the active frames keep `[  pending ]` and the completed helper has its duration.
-  The driver sets stdout unbuffered, since the abort would discard its reported line.
+  need the DWARF inline chains (under Clang, the `-gdwarf-4` the variant propagates). `LogExceptionsUncaughtTest` (6 tests) drives
+  `cslg_uncaught_traced_program_log_exceptions_elapsed` in one mode per test (its
+  command-line argument): the plain uncaught throw (the process must die, the last
+  line is the `terminate` line at the thrower's depth + 1, the throw line precedes
+  it with the exact site, no rethrow/catch of the terminate handler leaks, the
+  active frames keep `[  pending ]` and the completed helper has its duration);
+  `throw;` and `std::rethrow_exception` with no outer handler (exactly the program's
+  own catch and rethrow lines at their reported sites as children of the handler's
+  function, then `(no handler found)` — with the what() of the dependent exception —
+  and no event attributed to the runtime); an exception escaping a `noexcept`
+  function (`(thrown across a noexcept boundary)` as a child of that function on
+  both compilers, the unwound frames marked `!`, no catch line); a handler calling
+  `std::terminate()` (its catch, then `(std::terminate called at: file:line)` with
+  the what()); and `std::terminate()` with no exception (`(no active exception)`).
+  The driver sets stdout unbuffered, since the abort would discard its reported lines.
 - `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the both-flags
   variant `cslg_traced_test_program_log_elapsed_addr`. Asserts the
   ordering "timestamp → duration → addr" via regex, the tree column stays
