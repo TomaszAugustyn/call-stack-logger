@@ -79,6 +79,26 @@ endif()
 
 if(LOG_EXCEPTIONS)
     target_compile_definitions(callstacklogger PRIVATE LOG_EXCEPTIONS)
+    # Clang emits DWARF 5 by default. libbfd (binutils 2.46 at the time of
+    # writing) does not walk the DW_TAG_inlined_subroutine chain of Clang's
+    # DWARF 5 output: bfd_find_inliner_info() reports no inlined functions at
+    # an address inside an inlined body, although elfutils and llvm-symbolizer
+    # read the same chain, and libbfd itself reads GCC's DWARF 5 chains and
+    # Clang's DWARF 4 chains fine. LOG_EXCEPTIONS uses the chain at a catch
+    # site (and at the entry of an inlined function) to tell frames that were
+    # inlined into the catcher and unwound — dead — from the catcher's own live
+    # inline chain, which share one physical frame and therefore one level.
+    # Without it, Clang at -O2 marks such frames only when the inlined catcher
+    # returns, and the catch line and the calls after it sit deeper meanwhile.
+    # Asking Clang for DWARF 4 restores the exact behavior. This changes only
+    # the debug-info format of the consumer's own objects, not code generation;
+    # DWARF 4 and 5 objects mix freely in one link, and every debugger reads
+    # DWARF 4. A consumer that passes -gdwarf-5 after our flag gets the
+    # self-healing behavior described above. Added only with LOG_EXCEPTIONS=ON
+    # under Clang; GCC keeps its default.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(callstacklogger INTERFACE -gdwarf-4)
+    endif()
 endif()
 
 # Demo executable: only built when cslg is the top-level project (standalone

@@ -512,6 +512,41 @@ in `tests/unit/test_frame_reconcile.cpp`):
   caller`) resolves to the CALLER's level and takes the closest candidate below
   it; otherwise the topmost candidate; no candidate at all → the positional
   pop of the default build. Records above the match are dead and popped.
+- **Inline chains** (`function_base_name`, `dead_records_above_match` in
+  `frameReconcile.h`; `bfdResolver::resolve_inline_chain` / `read_inline_chain`
+  with the leaked `inline_chain_cache()`; `reclaim_dead_inlined_records_on_enter`
+  / `_on_catch` / `_above_parent` in `trace.cpp`). Frames inlined into a host
+  share its level AND its caller, so the level rules cannot tell a dead inlined
+  frame from a live inline host. DWARF can: `bfd_find_nearest_line` followed by
+  `bfd_find_inliner_info` (state kept in the bfd, hence under `s_bfd_mutex`)
+  gives the chain of functions inlined into each other at an address,
+  innermost first, cached per address as BASE NAMES (last component, no scope,
+  template arguments or parameter list — GCC's inlined entries are unqualified
+  DW_AT_names, Clang's are linkage names, the records' names are demangled full
+  names). Every FrameRecord stores `name_base` (a view into the leaked name
+  cache) for these comparisons. Rules: at a CATCH, records at the catcher's
+  level above the first record (from the top) whose base name is the chain's
+  innermost entry are dead; at an ENTER whose level equals the top record's, a
+  top record with the entering frame's own callee/caller/level is a dead
+  retry-loop frame unless the chain shows the function inlined into itself
+  (chain[0] == chain[1], GCC's recursive inlining; LLVM never inlines
+  recursively), then records above the record of chain[1] (the host) are dead;
+  at an ENTER by a normal call, `CachedLocation::function_base` — the base name
+  of the innermost function containing the CALL SITE, stored with every
+  memoized location and handed back in `ResolvedFrameView::caller_function_base`
+  at zero extra cost — names the direct parent, and records at the parent's
+  level above the parent's record are dead (an inlined leaf that longjmp'ed out
+  of a retry loop before the next call). An empty chain (no DWARF location)
+  means nothing is known and nothing is popped; a name that is not found means
+  the same. None of the rules can pop a live record: a live host is always at
+  or below the first match. Clang emits DWARF 5, whose inline chains libbfd
+  2.46 does not walk (elfutils/llvm-symbolizer do; `-gdwarf-4` works), so
+  `src/CMakeLists.txt` adds `-gdwarf-4` to the library's INTERFACE compile
+  options under Clang when LOG_EXCEPTIONS is on (the test variant function
+  does the same); an override to DWARF 5 falls back to the lazy behavior
+  (reclaimed when the host exits). Pinned by `LogExceptionsInlinedTest`
+  (driver `inlined_traced_program.cpp`, `always_inline` frames, compiled at -O2
+  unconditionally).
 - **Thread-stack confinement**: `pthread_getattr_np` bounds, resolved once per
   thread inside the enter hook's barrier (the main thread's lookup reads
   /proc/self/maps). Records off the thread stack (fibers, sigaltstack) are
@@ -730,6 +765,7 @@ call-stack-logger/
 |       |-- exceptions_traced_program.cpp # Instrumented LOG_EXCEPTIONS driver: every kind of non-local exit + markers
 |       |-- throwing_lib.cpp      # Shared lib built without instrumentation whose only function throws
 |       |-- uncaught_traced_program.cpp # Instrumented, LOG_EXCEPTIONS + LOG_ELAPSED; throws and never catches (terminate line)
+|       |-- inlined_traced_program.cpp # Instrumented at -O2, LOG_EXCEPTIONS; always_inline thrower chain and retry leaf (inline chains)
 |       |-- crash_traced_program.cpp # Instrumented, LOG_ELAPSED; abort()s mid-chain (pending-placeholder crash diagnostics)
 |       |-- global_dtor_traced_program.cpp # Instrumented; global object dtor calls traced code during exit()
 |       |-- cancel_traced_program.cpp # Instrumented; worker thread is pthread_cancel()ed while tracing
@@ -880,7 +916,12 @@ The core implementation. Key functions:
 - `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames)
 - `resolve_site()` / `bfdResolver::resolve_location()` - Location-only lookup of an
   instruction address (a throw or catch site) through the location cache; `demangle_symbol()`
-  - the public demangler (LOG_EXCEPTIONS event lines)
+  - the public demangler (LOG_EXCEPTIONS event lines); `inline_chain_at()` /
+  `bfdResolver::resolve_inline_chain()` - the DWARF inline chain at an address as base
+  names, innermost first, memoized (LOG_EXCEPTIONS reconciliation of inlined frames)
+- The location cache stores `CachedLocation { file, line, function_base }`: the base
+  name of the innermost function containing each call site rides along with the
+  location and reaches the enter hook as `ResolvedFrameView::caller_function_base`
 
 ### `src/exceptions.cpp`
 The LOG_EXCEPTIONS interposers (`cslg_cxa_throw`, `cslg_cxa_rethrow`,
@@ -1050,7 +1091,11 @@ Test pure/deterministic functions from the include headers:
   left alone, unknown bounds treated as one stack; catch reclaiming everything below
   the catcher and nothing at its level; exit matching exact level, tail-called
   closest-below, dead records above the match, recursion runs before and after
-  longjmp, positional fallback without a matching record or on a foreign stack
+  longjmp, positional fallback without a matching record or on a foreign stack;
+  `function_base_name` (scopes, templates, parameter lists, anonymous namespaces,
+  `operator()` and `operator<`) and `dead_records_above_match` (pops only above the
+  first match within the equal-level group, nothing without a match or when the
+  match is on top)
 
 ### Integration Tests (`tests/integration/`)
 
@@ -1257,7 +1302,13 @@ Test pure/deterministic functions from the include headers:
   sanitized messages (control characters, a 300-byte text cut to 127, `throw 42`),
   the order of events along the flow (throw, cleanup helper, catch, marker; a throw
   inside a handler), and the worker thread's own events; `LogExceptionsElapsedTest`
-  adds the event column words. `LogExceptionsUncaughtTest` drives
+  adds the event column words. `LogExceptionsInlinedTest` (2 tests) drives
+  `cslg_traced_test_program_log_exceptions_inlined`, built from
+  `inlined_traced_program.cpp` at -O2 with `always_inline` frames: the call after a
+  catch whose thrower chain was inlined into the catcher sits under the catcher, the
+  catch line too, the inlined frames carry `!_`; and a retry loop whose longjmp'ing leaf
+  is inlined keeps its marker at the loop's depth with every leaf marked `~_` — both
+  need the DWARF inline chains (under Clang, the `-gdwarf-4` the variant propagates). `LogExceptionsUncaughtTest` drives
   `cslg_uncaught_traced_program_log_exceptions_elapsed`: the process must die, the
   last line is the `terminate` line at the thrower's depth + 1, the throw line
   precedes it with the exact site, no rethrow/catch of the terminate handler leaks,

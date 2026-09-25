@@ -571,6 +571,25 @@ is a constant of each hook call site, measured once per site with a two-frame
 unwind and cached per thread; afterwards each hook pays one hash lookup and an
 addition.
 
+**Inlined frames.** A function the optimizer inlined still fires its hooks, but
+it runs inside its host's physical frame: same level, same caller. The level
+rules alone cannot tell a dead inlined frame (unwound by an exception under
+Clang, skipped by `longjmp`) from a live inline host, so the tracer asks DWARF.
+The inline chain at a site, the list of functions inlined into each other
+there, comes from the same debug information BFD already reads for line
+numbers: at a catch, its innermost entry is the function that caught, and every
+record above that function's record at the same level is dead; at an enter,
+the entry after the innermost is the entering function's host, with the same
+rule; and the function containing a call site names a normal call's parent, so
+dead inlined frames above the parent's record are reclaimed before the call's
+line is written. The chains are resolved once per site and cached. Clang emits
+DWARF 5 by default, and BFD does not walk Clang's DWARF 5 inline chains
+(elfutils and llvm-symbolizer do), so with `LOG_EXCEPTIONS` the
+`callstacklogger::instrumented` target compiles your code with `-gdwarf-4`
+under Clang; that changes only the debug-info format of your objects, and a
+build that overrides it with `-gdwarf-5` degrades to reclaiming such frames when
+their host returns.
+
 ### Marking the frames that did not return ###
 
 A reclaimed frame does not just disappear from the bookkeeping: its line is
@@ -609,10 +628,12 @@ A line at depth 0 has no glyph, so only its duration field can carry the mark.
 What this does not cover, and what happens instead:
 
 - A frame that `longjmp`s out and is then called again **from the very same call
-  site** at the same level looks like a recursive inlined copy of itself and is
-  kept until the frame that contains the loop returns; calls made inside that
-  loop meanwhile are indented one level deeper per iteration. The pairing itself
-  stays correct, and the frames are marked when they are reclaimed.
+  site** at the same level is reclaimed on re-entry, DWARF permitting: the
+  inline chain shows whether the re-entered function is a recursive inlined
+  copy of the stale record (kept) or a fresh activation (the stale record is
+  dead). Where the site has no DWARF location the record is kept until the
+  frame containing the loop returns, with one extra indentation level per
+  iteration meanwhile.
 - **Fibers and stackful coroutines** switch stacks within one thread. The
   tracer's frame stack interleaves their frames today, and `LOG_EXCEPTIONS`
   leaves them exactly as they are: the level rules only ever compare frames on

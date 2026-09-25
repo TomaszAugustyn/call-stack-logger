@@ -37,6 +37,7 @@
     #include <cstring>
     #include <exception>
     #include <functional>
+    #include <string_view>
     #include <unordered_map>
     #include <unwind.h>
 #endif
@@ -91,6 +92,11 @@ struct FrameRecord {
     const void* callee;
     const void* caller;
     const void* level;
+    // Base name (function_base_name) of the frame's demangled name — a view into
+    // the resolver's leaked name cache, empty for an unlogged frame. Compared
+    // with the base names DWARF gives for inlined functions when records share
+    // a physical frame (see reclaim_dead_inlined_records_*).
+    std::string_view name_base;
     // std::uncaught_exceptions() at enter. GCC runs the exit hook of a frame the
     // unwinder passes through while the exception is still in flight, so a
     // higher count at exit means the frame ended by exception; a destructor (or
@@ -514,6 +520,106 @@ void reclaim_dead_records(std::size_t count, char how) {
             mark_frame_end(dead, how, field);
         }
     }
+}
+
+// True when `record` is a logged frame whose base name equals `base` (see
+// function_base_name in frameReconcile.h).
+NO_INSTRUMENT
+bool record_has_base_name(const FrameRecord& record, const std::string& base) {
+    return !record.name_base.empty() && record.name_base == base;
+}
+
+// Reclaims dead inlined records sitting ABOVE the parent of a frame that is
+// being entered by a normal call: `parent_base` is the base name of the
+// innermost function containing the call site (cached with the site's
+// location, so this costs no lookup), i.e. the frame's direct parent. Records
+// at the parent's level above the parent's own record are frames inlined into
+// that physical frame that were entered after the parent and never exited
+// (an inlined leaf that longjmp'ed out of a retry loop, a frame inlined into a
+// catcher and unwound before the next call). Nothing is known, and nothing
+// touched, when the parent's record is not found in its group.
+NO_INSTRUMENT
+void reclaim_dead_inlined_records_above_parent(const instrumentation::FrameKey& key,
+                                               const std::string* parent_base, char how) {
+    if (parent_base == nullptr || parent_base->empty() || t_state.frames.empty()) {
+        return;
+    }
+    const FrameRecord& top = t_state.frames.back();
+    if (!(instrumentation::stack_address(top.level) > instrumentation::stack_address(key.level))
+        || !instrumentation::on_thread_stack(t_state.stack_bounds, top.level)
+        || !instrumentation::on_thread_stack(t_state.stack_bounds, key.level)) {
+        return;
+    }
+    const void* parent_level = top.level;
+    reclaim_dead_records(instrumentation::dead_records_above_match(
+                                 t_state.frames.data(), t_state.frames.size(), parent_level,
+                                 [parent_base](const FrameRecord& record) {
+                                     return record_has_base_name(record, *parent_base);
+                                 }),
+                         how);
+}
+
+// Reclaims dead records that share the level of the frame ENTERING at `site`
+// (the enter hook's return address, minus one) — frames inlined into the same
+// physical frame that an exception unwound or a longjmp skipped, which the
+// level rules alone cannot tell from live inline hosts. With `chain` the inline
+// chain at that site (innermost first; empty when the site has no DWARF
+// location, in which case nothing is touched):
+//   * a top record with the entering frame's own callee, caller and level is a
+//     dead frame that was re-called from the same site after leaving without an
+//     exit hook (a setjmp/longjmp retry loop) — unless the chain shows the
+//     entering function inlined into itself, a recursive inlined copy whose
+//     outer activation that record is;
+//   * then, if the chain names the entering frame's inline host, every record
+//     of the group above the host's record is a dead inlined frame.
+NO_INSTRUMENT
+void reclaim_dead_inlined_records_on_enter(const instrumentation::FrameKey& key, const void* site, char how) {
+    if (t_state.frames.empty() || t_state.frames.back().level != key.level
+        || !instrumentation::on_thread_stack(t_state.stack_bounds, key.level)) {
+        return;
+    }
+    const std::vector<std::string>* chain = instrumentation::inline_chain_at(const_cast<void*>(site));
+    if (chain == nullptr || chain->empty()) {
+        return;
+    }
+    const bool recursive_inline = chain->size() >= 2 && (*chain)[0] == (*chain)[1];
+    while (!recursive_inline && !t_state.frames.empty()
+           && instrumentation::same_activation_site(t_state.frames.back(), key)
+           && t_state.frames.back().level == key.level) {
+        reclaim_dead_records(1, how);
+    }
+    if (chain->size() >= 2) {
+        const std::string& host = (*chain)[1];
+        reclaim_dead_records(instrumentation::dead_records_above_match(
+                                     t_state.frames.data(), t_state.frames.size(), key.level,
+                                     [&host](const FrameRecord& record) {
+                                         return record_has_base_name(record, host);
+                                     }),
+                             how);
+    }
+}
+
+// Reclaims dead records that share the CATCHER's level: frames inlined into the
+// catcher's physical frame that the exception unwound. `chain` is the inline
+// chain at the catch site, whose innermost entry is the function that caught;
+// every record of the group above that function's record is dead.
+NO_INSTRUMENT
+void reclaim_dead_inlined_records_on_catch(const void* catch_level, const void* site) {
+    if (t_state.frames.empty() || t_state.frames.back().level != catch_level
+        || !instrumentation::on_thread_stack(t_state.stack_bounds, catch_level)) {
+        return;
+    }
+    const std::vector<std::string>* chain = instrumentation::inline_chain_at(const_cast<void*>(site));
+    if (chain == nullptr || chain->empty()) {
+        return;
+    }
+    const std::string& catcher = (*chain)[0];
+    reclaim_dead_records(instrumentation::dead_records_above_match(
+                                 t_state.frames.data(), t_state.frames.size(), catch_level,
+                                 [&catcher](const FrameRecord& record) {
+                                     return record_has_base_name(record, catcher);
+                                 }),
+                         utils::FRAME_END_EXCEPTION);
 }
 
 // Resolves the extent of this thread's own stack once, with pthread_getattr_np().
@@ -1060,6 +1166,9 @@ void on_catch(const std::type_info* type, const char* what, const void* wrapper_
                                                                     t_state.frames.size(), catch_level,
                                                                     t_state.stack_bounds),
                              utils::FRAME_END_EXCEPTION);
+        // Frames inlined into the catcher that the exception unwound share the
+        // catcher's level; the DWARF inline chain at the catch site tells them apart.
+        reclaim_dead_inlined_records_on_catch(catch_level, static_cast<const char*>(wrapper_site) - 1);
         write_event_line("catch", "caught at", "", EVENT_COLUMN_CATCH, type, what,
                          static_cast<const char*>(wrapper_site) - 1);
     } catch (...) {
@@ -1120,6 +1229,7 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
         const void* const hook_site = __builtin_return_address(0);
         const void* const hook_frame = __builtin_frame_address(0);
         instrumentation::FrameKey key{ callee, caller, nullptr };
+        const std::string* frame_name = nullptr;
 #endif
         // Exception barrier: a tracing hook must never inject an exception into the
         // traced program. Everything that can realistically throw (bad_alloc from
@@ -1160,17 +1270,29 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             // exception; otherwise a non-local jump skipped it.
             resolve_thread_stack_bounds();
             key.level = frame_level(hook_site, hook_frame);
+            const char dead_how = std::uncaught_exceptions() > 0 ? utils::FRAME_END_EXCEPTION
+                                                                 : utils::FRAME_END_JUMP;
             reclaim_dead_records(instrumentation::dead_records_on_enter(
                                          t_state.frames.data(), t_state.frames.size(), key,
                                          t_state.stack_bounds),
-                                 std::uncaught_exceptions() > 0 ? utils::FRAME_END_EXCEPTION
-                                                                : utils::FRAME_END_JUMP);
+                                 dead_how);
+            // Records at this frame's own level (inlined activations, retry loops)
+            // need the DWARF inline chain to be told apart — cold, cached per site.
+            reclaim_dead_inlined_records_on_enter(key, static_cast<const char*>(hook_site) - 1, dead_how);
 #endif
 
             FILE* fp = get_thread_fp();
             if (fp != nullptr) {
                 instrumentation::ResolvedFrameView frame;
                 if (instrumentation::resolve(callee, caller, frame)) {
+#ifdef LOG_EXCEPTIONS
+                    // Views into the leaked name cache: valid for the process lifetime.
+                    frame_name = frame.callee_function_name;
+                    // The call site names this frame's direct parent; dead inlined
+                    // frames above the parent's record are reclaimed before this
+                    // line's depth is fixed.
+                    reclaim_dead_inlined_records_above_parent(key, frame.caller_function_base, dead_how);
+#endif
                     // Timestamp only for frames that are actually logged; the view
                     // points at this stack buffer for the rest of the hook.
                     char timestamp[utils::PRETTY_TIME_BUF_SIZE];
@@ -1246,6 +1368,9 @@ void __cyg_profile_func_enter(void *callee, void *caller) {
             // Null only if the barrier above was left before the level was derived
             // (then the record is an unlogged one whose level nothing will match).
             record.level = key.level;
+            record.name_base = (logged && frame_name != nullptr)
+                    ? instrumentation::function_base_name(*frame_name)
+                    : std::string_view();
             record.uncaught_at_enter = std::uncaught_exceptions();
 #endif
 #ifdef CSLG_LINE_PATCHING

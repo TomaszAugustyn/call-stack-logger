@@ -102,6 +102,9 @@
 #ifndef UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH
     #error "UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH must be defined by CMake"
 #endif
+#ifndef TRACED_PROGRAM_LOG_EXCEPTIONS_INLINED_PATH
+    #error "TRACED_PROGRAM_LOG_EXCEPTIONS_INLINED_PATH must be defined by CMake"
+#endif
 
 namespace {
 
@@ -2163,6 +2166,11 @@ protected:
     void SetUp() override { run_driver(TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH); }
 };
 
+class LogExceptionsInlinedTest : public LogExceptionsRunner {
+protected:
+    void SetUp() override { run_driver(TRACED_PROGRAM_LOG_EXCEPTIONS_INLINED_PATH); }
+};
+
 // Frames the driver leaves by exception, each named exactly once in the trace.
 const std::vector<std::string> kFramesLeftByException = { "exc_thrower()", "exc_mid()" };
 // Frames the driver leaves by longjmp: the two of scenario H (one leaf, one mid).
@@ -2686,4 +2694,47 @@ TEST_F(LogExceptionsUncaughtTest, TerminateLineIsTheLastLineAndActiveFramesStayP
     ASSERT_FALSE(done.empty()) << trace_content;
     EXPECT_TRUE(std::regex_search(done, duration_field_regex())) << done;
     EXPECT_GE(parse_duration_ns(done), 1'000'000LL) << done;
+}
+
+// ============================================================================
+// LOG_EXCEPTIONS — frames inlined into the catcher or into a retry loop share
+// its physical frame; the DWARF inline chain tells the dead ones from the live
+// host, at the catch and at the next enter, so the following calls sit at
+// their true depth immediately (inlined_traced_program.cpp, always_inline,
+// -O2).
+// ============================================================================
+
+// main -> inl_catcher(1) -> inl_middle(2, inlined) -> inl_thrower(3, inlined) throws;
+// caught in inl_catcher, which then calls inl_after_catch: a child of the
+// catcher (2), not of the stale inlined frames.
+TEST_F(LogExceptionsInlinedTest, CallAfterCatchSitsUnderTheInlinedCatcherNotUnderTheUnwoundFrames) {
+    EXPECT_EQ(depth_of(trace_lines, "inl_catcher"), 1) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_middle"), 2) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_thrower"), 3) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_after_catch"), 2)
+            << "the call after the catch must not sit under the unwound inlined frames:\n" << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_marker_a"), 1) << trace_content;
+
+    const std::string catch_line = unique_event_line(trace_lines, "!! catch std::runtime_error \"inlined throw\"");
+    ASSERT_FALSE(catch_line.empty()) << trace_content;
+    EXPECT_EQ(count_indentation_depth(catch_line), 2) << "the catch line is a child of the catcher:\n"
+                                                        << catch_line;
+    EXPECT_NE(catch_line.find(":" + std::to_string(site_lines["CATCH_INL"]) + ")"), std::string::npos)
+            << catch_line;
+    EXPECT_EQ(glyph_of(trace_lines, "inl_middle"), '!') << trace_content;
+    EXPECT_EQ(glyph_of(trace_lines, "inl_thrower"), '!') << trace_content;
+    EXPECT_EQ(glyph_of(trace_lines, "inl_after_catch"), '|') << trace_content;
+}
+
+// Three longjmps out of an inlined leaf re-entered from the same site: the
+// stale records are reclaimed at each re-entry, so the marker after the loop is
+// a child of the loop function (2), and every leaf frame is marked '~'.
+TEST_F(LogExceptionsInlinedTest, RetryLoopWithAnInlinedLeafKeepsTheMarkerAtItsDepth) {
+    EXPECT_EQ(depth_of(trace_lines, "inl_loop_jump"), 1) << trace_content;
+    EXPECT_EQ(depths_of(trace_lines, "inl_jump_leaf"), (std::vector<int>{ 2, 2, 2 })) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_loop_marker"), 2) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_marker_b"), 1) << trace_content;
+    for (const auto& line : lines_of(trace_lines, "inl_jump_leaf")) {
+        EXPECT_EQ(tree_glyph_of(line), '~') << line;
+    }
 }

@@ -146,6 +146,15 @@ public:
     NO_INSTRUMENT
     static void resolve_location(void* address, ResolvedFrameView& out);
 
+    /// The inline chain at `address`: the base names (function_base_name in
+    /// frameReconcile.h) of the functions inlined into each other there,
+    /// innermost first, read from DWARF with bfd_find_inliner_info(). Empty when
+    /// the address has no DWARF line information (then nothing is known about
+    /// inlining there). Memoized per address; the pointer stays valid for the
+    /// process lifetime like the other cache entries.
+    NO_INSTRUMENT
+    static const std::vector<std::string>* resolve_inline_chain(void* address);
+
 private:
     /// Walks the object's section list to find the section containing `address`
     /// and writes the section-relative offset to `offset_out`. Returns nullptr
@@ -163,11 +172,25 @@ private:
     static std::optional<std::string> resolve_function_name(void* callee_address,
                                                             const Dl_info* dl_info);
 
+    /// One memoized call-site location: the file (or a fallback text), the line
+    /// (none when unknown) and the base name of the innermost function containing
+    /// the address (empty when unknown; see ResolvedFrameView::caller_function_base).
+    struct CachedLocation {
+        std::string file;
+        std::optional<unsigned int> line;
+        std::string function_base;
+    };
+
     /// Same contract as resolve_function_name(): `dl_info` is the caller's
     /// dladdr() result, obtained outside s_bfd_mutex.
     NO_INSTRUMENT
-    static std::pair<std::string, std::optional<unsigned int>> resolve_filename_and_line(
-            void* caller_address, const Dl_info* dl_info);
+    static CachedLocation resolve_filename_and_line(void* caller_address, const Dl_info* dl_info);
+
+    /// Reads the inline chain for `address` (see resolve_inline_chain) — must be
+    /// called with s_bfd_mutex held; `dl_info` is the address's dladdr() result
+    /// obtained outside the mutex (null when dladdr() failed).
+    NO_INSTRUMENT
+    static std::vector<std::string> read_inline_chain(void* address, const Dl_info* dl_info);
 
     NO_INSTRUMENT
     static void check_bfd_initialized();
@@ -260,10 +283,18 @@ private:
     }
 
     NO_INSTRUMENT
-    static std::unordered_map<void*, std::pair<std::string, std::optional<unsigned int>>>&
-    location_cache() {
-        static auto* instance =
-                new std::unordered_map<void*, std::pair<std::string, std::optional<unsigned int>>>();
+    static std::unordered_map<void*, CachedLocation>& location_cache() {
+        static auto* instance = new std::unordered_map<void*, CachedLocation>();
+        return *instance;
+    }
+
+    /// Inline chains per address (resolve_inline_chain). Consulted only when
+    /// the LOG_EXCEPTIONS reconciliation meets records at the current frame's
+    /// own level (inlined activations, catches), so it stays small. Leaked and
+    /// protected by s_bfd_mutex like the other caches.
+    NO_INSTRUMENT
+    static std::unordered_map<void*, std::vector<std::string>>& inline_chain_cache() {
+        static auto* instance = new std::unordered_map<void*, std::vector<std::string>>();
         return *instance;
     }
 
@@ -316,5 +347,10 @@ void resolve_site(void* address, ResolvedFrameView& out);
 /// returns the input unchanged when it is not a mangled name.
 NO_INSTRUMENT
 std::string demangle_symbol(const char* mangled);
+
+/// The inline chain at `address` (see bfdResolver::resolve_inline_chain), for
+/// the LOG_EXCEPTIONS reconciliation of frames that share a physical frame.
+NO_INSTRUMENT
+const std::vector<std::string>* inline_chain_at(void* address);
 
 } // namespace instrumentation

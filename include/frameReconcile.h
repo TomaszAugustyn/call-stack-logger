@@ -11,6 +11,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #ifndef NO_INSTRUMENT
     #define NO_INSTRUMENT __attribute__((no_instrument_function))
@@ -221,6 +223,93 @@ NO_INSTRUMENT inline std::size_t exiting_record_index(const Record* records, std
         }
     }
     return best;
+}
+
+// ---- inline chains: telling dead inlined frames from live inline hosts ----
+//
+// Frames inlined into a host run in the host's physical frame, so they share
+// its level and its caller, and the rules above cannot see whether such a
+// record is a live host of the current frame or a dead inlined callee that an
+// exception unwound (Clang) or a longjmp skipped. What can: the INLINE CHAIN of
+// the current site, read from DWARF through BFD (bfd_find_inliner_info) — the
+// list of functions inlined into each other at that address, innermost first.
+// At a catch, the innermost entry is the function that caught; at an enter, the
+// entry after the innermost is the entering function's inline host. Records of
+// the same level that sit ABOVE the record of that function are dead.
+//
+// Names come from DWARF (an unqualified DW_AT_name for inlined entries under
+// GCC, a linkage name under Clang) and from the resolver (a demangled full
+// name), so they are compared by their BASE NAME: the last component, without
+// namespaces, class scope, template arguments or parameter list.
+
+// The base name of a demangled function name: "ns::A::foo(int) const" -> "foo",
+// "std::vector<int, std::allocator<int> >::at(unsigned long)" -> "at",
+// "middle" -> "middle". The parameter list is cut at the first '(' outside
+// template brackets that does not belong to "operator()".
+NO_INSTRUMENT
+inline std::string_view function_base_name(std::string_view name) {
+    int depth = 0;
+    std::size_t cut = std::string_view::npos;
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        if (name.compare(i, 21, "(anonymous namespace)") == 0) {
+            i += 20; // a scope component, not a parameter list
+            continue;
+        }
+        if (name.compare(i, 8, "operator") == 0) {
+            // An operator's own symbol ("operator<", "operator()", "operator new[]",
+            // "operator int") runs up to the '(' of the parameter list; its '<' and
+            // '>' characters are not template brackets.
+            i += 8;
+            if (name.compare(i, 2, "()") == 0) {
+                i += 2;
+            }
+            while (i < name.size() && name[i] != '(') {
+                ++i;
+            }
+            cut = i;
+            break;
+        }
+        const char c = name[i];
+        if (c == '<') {
+            ++depth;
+        } else if (c == '>') {
+            --depth;
+        } else if (c == '(' && depth == 0) {
+            cut = i;
+            break;
+        }
+    }
+    name = name.substr(0, cut);
+    depth = 0;
+    std::size_t last_scope = 0;
+    for (std::size_t i = 0; i + 1 < name.size(); ++i) {
+        const char c = name[i];
+        if (c == '<') {
+            ++depth;
+        } else if (c == '>') {
+            --depth;
+        } else if (c == ':' && name[i + 1] == ':' && depth == 0) {
+            last_scope = i + 2;
+        }
+    }
+    return name.substr(last_scope);
+}
+
+// Number of records at the top of the stack that share `level` and sit ABOVE
+// the first record (searching from the top) for which `matches` is true: those
+// are inlined frames entered after the live one and never exited. 0 when no
+// record of the group matches (then nothing is known and nothing is popped).
+template <class Record, class Matches>
+NO_INSTRUMENT inline std::size_t dead_records_above_match(const Record* records, std::size_t count,
+                                                          const void* level, Matches matches) {
+    std::size_t i = count;
+    while (i > 0 && records[i - 1].level == level) {
+        --i;
+        if (matches(records[i])) {
+            return count - 1 - i;
+        }
+    }
+    return 0;
 }
 
 } // namespace instrumentation

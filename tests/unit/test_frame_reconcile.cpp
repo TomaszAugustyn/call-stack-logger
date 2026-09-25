@@ -18,6 +18,8 @@
 #include "frameReconcile.h"
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -300,4 +302,42 @@ TEST(FrameReconcileTest, OnThreadStackHonorsTheHalfOpenRange) {
     EXPECT_FALSE(instrumentation::on_thread_stack(b, ptr(b.hi)));
     EXPECT_FALSE(instrumentation::on_thread_stack(b, ptr(b.lo - 1)));
     EXPECT_TRUE(instrumentation::on_thread_stack(unknown_stack(), ptr(0x1)));
+}
+
+// -------- inline chains --------
+
+TEST(FrameReconcileTest, BaseNameStripsScopeParametersAndTemplates) {
+    using instrumentation::function_base_name;
+    EXPECT_EQ(function_base_name("exc_thrower()"), "exc_thrower");
+    EXPECT_EQ(function_base_name("ns::A::foo(int) const"), "foo");
+    EXPECT_EQ(function_base_name("std::vector<int, std::allocator<int> >::at(unsigned long)"), "at");
+    EXPECT_EQ(function_base_name("middle"), "middle");
+    EXPECT_EQ(function_base_name("host(int)"), "host");
+    EXPECT_EQ(function_base_name("foo<int>(int)"), "foo<int>");
+    EXPECT_EQ(function_base_name("ns::(anonymous namespace)::helper(char const*)"), "helper");
+    EXPECT_EQ(function_base_name("A::operator()(int) const"), "operator()");
+    EXPECT_EQ(function_base_name("A::operator<(A const&) const"), "operator<");
+    EXPECT_EQ(function_base_name(""), "");
+}
+
+TEST(FrameReconcileTest, DeadRecordsAboveMatchPopsOnlyAboveTheMatch) {
+    // [A(0), H(1), X(1), Y(1)]: H is the live host at level 1, X and Y inlined
+    // callees that never exited.
+    std::vector<Rec> records = { { FN_A, SITE_1, frame(0) }, { FN_B, SITE_2, frame(1) },
+                                 { FN_C, SITE_2, frame(1) }, { FN_C, SITE_2, frame(1) } };
+    const auto is_host = [](const Rec& r) { return r.callee == FN_B; };
+    EXPECT_EQ(instrumentation::dead_records_above_match(records.data(), records.size(), frame(1), is_host), 2u);
+}
+
+TEST(FrameReconcileTest, DeadRecordsAboveMatchIsZeroWithoutAMatchOrWhenTheMatchIsOnTop) {
+    std::vector<Rec> records = { { FN_A, SITE_1, frame(0) }, { FN_B, SITE_2, frame(1) },
+                                 { FN_C, SITE_2, frame(1) } };
+    const auto never = [](const Rec&) { return false; };
+    EXPECT_EQ(instrumentation::dead_records_above_match(records.data(), records.size(), frame(1), never), 0u);
+    const auto top_is_it = [](const Rec& r) { return r.callee == FN_C; };
+    EXPECT_EQ(instrumentation::dead_records_above_match(records.data(), records.size(), frame(1), top_is_it),
+              0u);
+    // The search never leaves the equal-level group: A at level 0 is not examined.
+    const auto only_a = [](const Rec& r) { return r.callee == FN_A; };
+    EXPECT_EQ(instrumentation::dead_records_above_match(records.data(), records.size(), frame(1), only_a), 0u);
 }

@@ -220,6 +220,11 @@ function(cslg_add_flag_variant variant driver)
     # so the variant libraries compile the same code the shipped library does.
     target_compile_definitions(callstacklogger_${variant} PRIVATE _FILE_OFFSET_BITS=64)
     target_compile_options(callstacklogger_${variant} INTERFACE -g)
+    # Same DWARF 4 request as the shipped library makes under Clang with
+    # LOG_EXCEPTIONS (see src/CMakeLists.txt for why).
+    if("LOG_EXCEPTIONS" IN_LIST ARGN AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(callstacklogger_${variant} INTERFACE -gdwarf-4)
+    endif()
     target_link_options(callstacklogger_${variant} INTERFACE -rdynamic)
     target_link_libraries(callstacklogger_${variant} PUBLIC ${CSLG_BFD_LINK_LIBS} Threads::Threads)
 
@@ -296,6 +301,14 @@ target_link_libraries(cslg_traced_test_program_log_exceptions_elapsed PRIVATE Th
 cslg_add_flag_variant(log_exceptions_all exceptions_traced_program.cpp LOG_EXCEPTIONS LOG_ELAPSED LOG_ADDR)
 target_link_libraries(cslg_traced_test_program_log_exceptions_all PRIVATE Threads::Threads cslg_throwing_lib)
 
+# Inlined-frames driver: the throwing chain and the retry-loop leaf are
+# always_inline, so they share their host's physical frame (and level) at any
+# build type — the shape the level rules alone cannot reconcile and the DWARF
+# inline chain must. Compiled at -O2 unconditionally so the inlining decisions
+# and hook placement match the optimized builds the README recommends.
+cslg_add_flag_variant(log_exceptions_inlined inlined_traced_program.cpp LOG_EXCEPTIONS)
+target_compile_options(cslg_traced_test_program_log_exceptions_inlined PRIVATE -O2)
+
 # Combined-flags variant: both output-content macros defined simultaneously.
 # Exercises LOG_ELAPSED's byte-offset math under the line-layout changes
 # introduced by LOG_ADDR (prepends "addr: [0x...]" after the tree), proving the
@@ -337,6 +350,7 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     TRACED_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_elapsed>"
     TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_all>"
     UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH="$<TARGET_FILE:cslg_uncaught_traced_program_log_exceptions_elapsed>"
+    TRACED_PROGRAM_LOG_EXCEPTIONS_INLINED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_inlined>"
 )
 
 # When the user passes -DLOG_ADDR=ON or -DLOG_ELAPSED=ON globally, the

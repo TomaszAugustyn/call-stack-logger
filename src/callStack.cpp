@@ -8,6 +8,7 @@
  */
 
 #include "callStack.h"
+#include "frameReconcile.h"
 #include "prettyTime.h"
 #include "stdSymbolFilter.h"
 
@@ -335,28 +336,37 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address, con
     return demangle_cxa(info.dli_sname) + " <bfd_error>";
 }
 
-std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filename_and_line(
-        void* address, const Dl_info* dl_info) {
+bfdResolver::CachedLocation bfdResolver::resolve_filename_and_line(void* address, const Dl_info* dl_info) {
+    CachedLocation location;
     // A null dl_info means dladdr() failed for the caller address (see
     // resolve_function_name()).
     if (dl_info == nullptr) {
-        return std::make_pair("<caller address to object not found>", std::nullopt);
+        location.file = "<caller address to object not found>";
+        return location;
     }
     // Private copy: ensure_bfd_loaded() may redirect dli_fname to /proc/self/exe.
     Dl_info info = *dl_info;
+    // The dynamic symbol names the containing function when nothing better turns
+    // up below (a stripped object); BFD's symtab/DWARF answer replaces it.
+    if (info.dli_sname != nullptr) {
+        location.function_base = std::string(function_base_name(demangle_cxa(info.dli_sname)));
+    }
 
     storedBfd* currBfd = ensure_bfd_loaded(info);
     if (currBfd == nullptr) {
-        return std::make_pair("<could not open caller object file>", std::nullopt);
+        location.file = "<could not open caller object file>";
+        return location;
     }
 
     if (currBfd->abfd->sections == nullptr) {
-        return std::make_pair(std::string("<no sections in caller object>"), std::nullopt);
+        location.file = "<no sections in caller object>";
+        return location;
     }
     intptr_t offset = 0;
     asection* section = find_containing_section(*currBfd, address, offset);
     if (section == nullptr) {
-        return std::make_pair("<not sectioned address>", std::nullopt);
+        location.file = "<not sectioned address>";
+        return location;
     }
 
     const char* file = nullptr;
@@ -364,6 +374,11 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
     unsigned int line = 0;
     if (bfd_find_nearest_line(
                 currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
+        // `func` is the innermost function containing the address — an inlined
+        // copy's own name when the site lies inside one (DWARF inline info).
+        if (func != nullptr && func[0] != '\0') {
+            location.function_base = std::string(function_base_name(demangle_cxa(func)));
+        }
         // BFD "success" can still carry no usable location: `file` may be
         // non-null but EMPTY with line 0 (DWARF's "no source line" sentinel) —
         // observed with GCC 16 / binutils 2.46 for libc frames of optimized
@@ -372,22 +387,29 @@ std::pair<std::string, std::optional<unsigned int>> bfdResolver::resolve_filenam
         // degrade through the same fallbacks as an outright lookup failure
         // (function name with ":???", then "<unknown function>").
         if (file != nullptr && file[0] != '\0') {
-            return std::make_pair(std::string(file),
-                                  line != 0 ? std::make_optional(line) : std::nullopt);
+            location.file = file;
+            if (line != 0) {
+                location.line = line;
+            }
+            return location;
         }
         if (func != nullptr && func[0] != '\0') {
-            return std::make_pair(demangle_cxa(func), std::nullopt);
+            location.file = demangle_cxa(func);
+            return location;
         }
-        return std::make_pair(std::string("<unknown function>"), std::nullopt);
+        location.file = "<unknown function>";
+        return location;
     }
     // bfd_find_nearest_line failed for the section containing the address
     // (typical for stripped objects: no symtab, no DWARF). Degrade to the
     // <bfd_error> fallback — the address cannot be in any other section.
     // Mirrors the <bfd_error> return in resolve_function_name().
     if (info.dli_sname != nullptr) {
-        return std::make_pair(demangle_cxa(info.dli_sname) + " <bfd_error>", std::nullopt);
+        location.file = demangle_cxa(info.dli_sname) + " <bfd_error>";
+        return location;
     }
-    return std::make_pair(std::string("<bfd_error>"), std::nullopt);
+    location.file = "<bfd_error>";
+    return location;
 }
 
 bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out) {
@@ -420,8 +442,9 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
         }
         auto loc_it = location_cache().find(caller_address);
         if (loc_it != location_cache().end()) {
-            out.caller_filename = &loc_it->second.first;
-            out.caller_line_number = loc_it->second.second;
+            out.caller_filename = &loc_it->second.file;
+            out.caller_line_number = loc_it->second.line;
+            out.caller_function_base = &loc_it->second.function_base;
             have_location = true;
         }
     }
@@ -479,8 +502,9 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
                                           resolve_filename_and_line(caller_address, caller_dl))
                                  .first;
             }
-            out.caller_filename = &loc_it->second.first;
-            out.caller_line_number = loc_it->second.second;
+            out.caller_filename = &loc_it->second.file;
+            out.caller_line_number = loc_it->second.line;
+            out.caller_function_base = &loc_it->second.function_base;
         }
     }
 
@@ -500,8 +524,9 @@ void bfdResolver::resolve_location(void* address, ResolvedFrameView& out) {
         check_bfd_initialized();
         auto loc_it = location_cache().find(address);
         if (loc_it != location_cache().end()) {
-            out.caller_filename = &loc_it->second.first;
-            out.caller_line_number = loc_it->second.second;
+            out.caller_filename = &loc_it->second.file;
+            out.caller_line_number = loc_it->second.line;
+            out.caller_function_base = &loc_it->second.function_base;
             return;
         }
     }
@@ -515,8 +540,73 @@ void bfdResolver::resolve_location(void* address, ResolvedFrameView& out) {
     if (loc_it == location_cache().end()) {
         loc_it = location_cache().emplace(address, resolve_filename_and_line(address, dl)).first;
     }
-    out.caller_filename = &loc_it->second.first;
-    out.caller_line_number = loc_it->second.second;
+    out.caller_filename = &loc_it->second.file;
+    out.caller_line_number = loc_it->second.line;
+    out.caller_function_base = &loc_it->second.function_base;
+}
+
+std::vector<std::string> bfdResolver::read_inline_chain(void* address, const Dl_info* dl_info) {
+    std::vector<std::string> chain;
+    if (dl_info == nullptr) {
+        return chain;
+    }
+    Dl_info info = *dl_info;
+    storedBfd* currBfd = ensure_bfd_loaded(info);
+    if (currBfd == nullptr || currBfd->abfd->sections == nullptr) {
+        return chain;
+    }
+    intptr_t offset = 0;
+    asection* section = find_containing_section(*currBfd, address, offset);
+    if (section == nullptr) {
+        return chain;
+    }
+    const char* file = nullptr;
+    const char* func = nullptr;
+    unsigned line = 0;
+    if (!bfd_find_nearest_line(
+                currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
+        return chain;
+    }
+    // Without a DWARF location there is no DWARF inline information either: an
+    // empty chain tells the caller that nothing is known, which it treats as
+    // "no inlining" only where that is provably safe.
+    if (file == nullptr || file[0] == '\0' || line == 0 || func == nullptr) {
+        return chain;
+    }
+    // The innermost function, then each function it was inlined into. BFD keeps
+    // the walk's state in the bfd object, which s_bfd_mutex (held by the caller)
+    // protects between the two calls.
+    chain.emplace_back(function_base_name(demangle_cxa(func)));
+    while (bfd_find_inliner_info(currBfd->abfd.get(), &file, &func, &line)) {
+        if (func != nullptr) {
+            chain.emplace_back(function_base_name(demangle_cxa(func)));
+        }
+    }
+    return chain;
+}
+
+const std::vector<std::string>* bfdResolver::resolve_inline_chain(void* address) {
+    // Same two-phase shape as resolve_no_unwind(): cache under s_bfd_mutex,
+    // dladdr() with the mutex released, BFD work and insertion under it again.
+    {
+        std::lock_guard<std::mutex> lock(s_bfd_mutex);
+        check_bfd_initialized();
+        auto it = inline_chain_cache().find(address);
+        if (it != inline_chain_cache().end()) {
+            return &it->second;
+        }
+    }
+    Dl_info info {};
+    const Dl_info* dl = nullptr;
+    if (dladdr(address, &info) != 0 && info.dli_fbase != nullptr) {
+        dl = &info;
+    }
+    std::lock_guard<std::mutex> lock(s_bfd_mutex);
+    auto it = inline_chain_cache().find(address);
+    if (it == inline_chain_cache().end()) {
+        it = inline_chain_cache().emplace(address, read_inline_chain(address, dl)).first;
+    }
+    return &it->second;
 }
 
 std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address) {
@@ -618,6 +708,12 @@ void resolve_site(void* address, ResolvedFrameView& out) {
 
 std::string demangle_symbol(const char* mangled) {
     return demangle_cxa(mangled);
+}
+
+const std::vector<std::string>* inline_chain_at(void* address) {
+    // Same guard as the other entry points; the hooks already hold it.
+    ScopedNoInstrument guard;
+    return bfdResolver::resolve_inline_chain(address);
 }
 
 } // namespace instrumentation
