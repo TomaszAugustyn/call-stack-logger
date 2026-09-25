@@ -108,8 +108,12 @@ jobs:
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y binutils-dev libc6-dbg
 
+    # Every LOG_* option on: the sanitizers then also run the shipped library
+    # with the exception interposers, the in-place patching and the address
+    # column active (the per-flag test variants cover the same code in every
+    # job; here the default library and the demo get it too).
     - name: Configure CMake
-      run: cmake -B build -DBUILD_TESTS=ON -DSANITIZE=address+undefined
+      run: cmake -B build -DBUILD_TESTS=ON -DSANITIZE=address+undefined -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON
 
     - name: Build
       run: cmake --build build
@@ -135,7 +139,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y binutils-dev libc6-dbg
 
     - name: Configure CMake
-      run: cmake -B build -DBUILD_TESTS=ON -DSANITIZE=thread
+      run: cmake -B build -DBUILD_TESTS=ON -DSANITIZE=thread -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON
 
     - name: Build
       run: cmake --build build

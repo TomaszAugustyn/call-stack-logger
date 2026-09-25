@@ -65,7 +65,10 @@ services:
         echo '=== Coverage report generated at coverage-report/index.html ==='
       "
 
-  # AddressSanitizer + UndefinedBehaviorSanitizer run (GCC).
+  # AddressSanitizer + UndefinedBehaviorSanitizer run (GCC), with every LOG_*
+  # option on so the shipped library runs sanitized with the exception
+  # interposers, the in-place patching and the address column active (the
+  # per-flag test variants cover the same code in every service).
   # LSan suppression file bypasses BFD-internal caches that persist to exit.
   sanitize-asan:
     build: .
@@ -77,7 +80,7 @@ services:
       LSAN_OPTIONS: "suppressions=/workspace/tests/lsan-suppressions.txt:print_suppressions=0"
     command: >
       bash -c "
-        cmake -B build-asan -DBUILD_TESTS=ON -DSANITIZE=address+undefined &&
+        cmake -B build-asan -DBUILD_TESTS=ON -DSANITIZE=address+undefined -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
         cmake --build build-asan -j$$(nproc) &&
         cd build-asan && ctest --output-on-failure
       "
@@ -91,7 +94,7 @@ services:
       TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
     command: >
       bash -c "
-        cmake -B build-tsan -DBUILD_TESTS=ON -DSANITIZE=thread &&
+        cmake -B build-tsan -DBUILD_TESTS=ON -DSANITIZE=thread -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
         cmake --build build-tsan -j$$(nproc) &&
         cd build-tsan && ctest --output-on-failure
       "
@@ -110,7 +113,7 @@ services:
       LSAN_OPTIONS: "suppressions=/workspace/tests/lsan-suppressions.txt:print_suppressions=0"
     command: >
       bash -c "
-        cmake -B build-asan-clang -DBUILD_TESTS=ON -DSANITIZE=address+undefined -DCMAKE_CXX_COMPILER=clang++ &&
+        cmake -B build-asan-clang -DBUILD_TESTS=ON -DSANITIZE=address+undefined -DCMAKE_CXX_COMPILER=clang++ -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
         cmake --build build-asan-clang -j$$(nproc) &&
         cd build-asan-clang && ctest --output-on-failure
       "
@@ -123,7 +126,7 @@ services:
       TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
     command: >
       bash -c "
-        cmake -B build-tsan-clang -DBUILD_TESTS=ON -DSANITIZE=thread -DCMAKE_CXX_COMPILER=clang++ &&
+        cmake -B build-tsan-clang -DBUILD_TESTS=ON -DSANITIZE=thread -DCMAKE_CXX_COMPILER=clang++ -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
         cmake --build build-tsan-clang -j$$(nproc) &&
         cd build-tsan-clang && ctest --output-on-failure
       "
