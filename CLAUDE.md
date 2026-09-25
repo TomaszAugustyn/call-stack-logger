@@ -469,7 +469,9 @@ with `|  ` and `|_ ` prefixes.
 ### Frame Reconciliation After Non-Local Exits (LOG_EXCEPTIONS)
 
 Opt-in via `-DLOG_EXCEPTIONS=ON` (PRIVATE macro on the library, like the other
-`LOG_*` flags; the default build's object code is byte-identical without it).
+`LOG_*` flags; the default build compiles none of it — it differs from before
+only by two pointer fields in `ResolvedFrameView` and the base name the
+resolver stores per callee, so the hooks' stack layout, not their logic, moved).
 
 The positional enter/exit pairing above breaks silently whenever a frame leaves
 WITHOUT running its exit hook: Clang emits no exit hook on the exception-unwind
@@ -676,9 +678,20 @@ the bridge between the two files is the internal `src/exceptionEvents.h`).
   executable and RTLD_NEXT skips it, so every throw wrapper calls
   `__asan_handle_no_return` itself through a weak reference. The full suite
   passes under GCC and Clang ASan+UBSan and TSan.
-- **Cost.** Zero on the hot path (no per-call work): a throw pays one cached
-  site resolution plus a line write on top of the unwinder's own microseconds;
-  the first catch resolves the two terminate code ranges once.
+- **Cost.** The interposers add nothing per call. A throw or catch pays one
+  cached site resolution, a memoized type name (`exception_type_name()`, a
+  small leaked map with its own mutex: `__cxa_demangle` allocates and costs
+  microseconds) and a line write, on top of the unwinder's own microseconds;
+  the first catch resolves the two terminate code ranges once. The
+  reconciliation's per-call work is kept off the -O0 hot path deliberately: the
+  callee's base name is computed once into the name cache (`CachedName`, handed
+  to the hook as `ResolvedFrameView::callee_base_name`; parsing it per call with
+  `std::string_view` at -O0 cost about a microsecond), and `frame_level()`
+  consults a 256-slot direct-mapped front cache before the per-site hash map.
+  Measured through an external CMake consumer on the reference host (hpet VM,
+  trace to /dev/null): the option adds about 0.35 µs to a traced call with the
+  library at -O0 and a throw+catch pair costs about 7 µs more than untraced,
+  mostly the two event lines (README's cost table has the numbers).
 
 ### Output Format
 

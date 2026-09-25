@@ -625,6 +625,34 @@ its width and its columns:
 
 A line at depth 0 has no glyph, so only its duration field can carry the mark.
 
+### Cost ###
+
+Measured on the reference host (a Fedora 44 VM with the `hpet` clocksource,
+GCC 16) through an external CMake project that links `callstacklogger::instrumented`,
+with the trace written to `/dev/null`. "Traced call" is one instrumented call
+of a leaf function; "throw + catch" is one `throw` caught two instrumented
+frames up, including those two calls.
+
+| Build type     | Options                       | Traced call | Throw + catch |
+| -------------- | ----------------------------- | ----------- | ------------- |
+| default (-O0)  | none                          | 2.45 µs     | 6.4 µs        |
+| default (-O0)  | `LOG_EXCEPTIONS`              | 2.79 µs     | 13.3 µs       |
+| default (-O0)  | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 6.1 µs   | 20.2 µs       |
+| RelWithDebInfo | none                          | 2.01 µs     | 5.3 µs        |
+| RelWithDebInfo | `LOG_EXCEPTIONS`              | 2.07 µs     | 10.5 µs       |
+| RelWithDebInfo | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 5.4 µs   | 17.3 µs       |
+
+Per traced call the option adds one level lookup in each hook (a direct-mapped
+cache in front of a per-thread hash map), one `std::uncaught_exceptions()` read
+on exit and a handful of compares; the first hook at each call site also pays
+one two-frame unwind to measure that site's level distance. A throw or catch
+adds the event line itself: a memoized site resolution, a memoized type name,
+the formatting and the write. The `LOG_ELAPSED` rows carry that option's own
+cost (two clock reads and a `pwrite()` per call, expensive on an `hpet` clock).
+With the option off nothing of this runs: the hooks contain no code for it.
+The default build differs from before only by two pointer fields in the
+resolver's frame view and one short base name the resolver stores per callee.
+
 What this does not cover, and what happens instead:
 
 - A frame that `longjmp`s out and is then called again **from the very same call
@@ -784,7 +812,9 @@ cmake -B build-tsan -DBUILD_TESTS=ON -DSANITIZE=thread
 cmake --build build-tsan && cd build-tsan && ctest --output-on-failure
 ```
 
-Or via Docker:
+Or via Docker (these services also switch every `LOG_*` option on, so the
+exception interposers, the in-place patching and the address column run
+sanitized in the shipped library as well as in the per-flag test variants):
 ```bash
 docker compose run sanitize-asan         # GCC   — ASan + UBSan + LSan
 docker compose run sanitize-tsan         # GCC   — TSan
@@ -851,8 +881,8 @@ GitHub Actions runs on every push and pull request to `master`:
 - **GCC (build, test, coverage):** Builds, runs unit and integration tests, generates lcov HTML report (uploaded as an artifact).
 - **GCC RelWithDebInfo (optimized build, test):** Builds with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` (the build type recommended to integrators) and runs the full suite — pins caller resolution and the documented inlining semantics under optimization.
 - **Clang (build, test):** Builds and runs unit and integration tests.
-- **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer. Fails on any memory error, UB, or non-suppressed leak.
-- **Sanitize (GCC, TSan):** Builds with `SANITIZE=thread` and runs the full test suite under ThreadSanitizer.
+- **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and every `LOG_*` option on (`LOG_EXCEPTIONS`, `LOG_ELAPSED`, `LOG_ADDR`), and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer, so the exception interposers, the in-place patching and the address column run sanitized in the shipped library too, not only in the per-flag test variants. Fails on any memory error, UB, or non-suppressed leak.
+- **Sanitize (GCC, TSan):** Builds with `SANITIZE=thread` and the same options, and runs the full test suite under ThreadSanitizer.
 
 Clang sanitizer runs are intentionally NOT part of CI — GCC covers the core sweep, and Clang's LSan behaviour drifts across toolchain versions which would add maintenance noise. They remain available locally via `docker compose run sanitize-asan-clang` / `sanitize-tsan-clang`.
 
