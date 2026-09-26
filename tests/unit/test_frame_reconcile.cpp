@@ -320,6 +320,26 @@ TEST(FrameReconcileTest, BaseNameStripsScopeParametersAndTemplates) {
     EXPECT_EQ(function_base_name(""), "");
 }
 
+// A local entity — a lambda's operator(), a local class's member — is scoped by
+// the enclosing function's full signature, whose parameter list is not the
+// base name's cut point; a lambda's brace block is a scope component too.
+// Before this rule the lambda's base name was the enclosing function's own.
+TEST(FrameReconcileTest, BaseNameOfLocalEntitiesIsTheirOwn) {
+    using instrumentation::function_base_name;
+    EXPECT_EQ(function_base_name("host(int)::{lambda(int)#1}::operator()(int) const"), "operator()");
+    EXPECT_EQ(function_base_name("main::{lambda(int)#1}::operator()(int) const"), "operator()");
+    EXPECT_EQ(function_base_name("host(int)::$_0::operator()(int) const"), "operator()");
+    EXPECT_EQ(function_base_name("host(int)::{lambda(auto:1)#2}::operator()<int>(int) const"),
+              "operator()<int>");
+    EXPECT_EQ(function_base_name("host(std::vector<int, std::allocator<int> >)::Local::method() const"),
+              "method");
+    EXPECT_EQ(function_base_name("host(void (*)(int))::{unnamed type#1}::method()"), "method");
+    EXPECT_EQ(function_base_name("cooperator(int)"), "cooperator");
+    EXPECT_EQ(function_base_name("std::operator<< <char>(std::ostream&, char const*)"), "operator<< <char>");
+    EXPECT_EQ(function_base_name("broken(int"), "broken");
+    EXPECT_EQ(function_base_name("{lambda"), "{lambda"); // unbalanced: returned as is
+}
+
 TEST(FrameReconcileTest, DeadRecordsAboveMatchPopsOnlyAboveTheMatch) {
     // [A(0), H(1), X(1), Y(1)]: H is the live host at level 1, X and Y inlined
     // callees that never exited.

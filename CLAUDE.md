@@ -544,10 +544,17 @@ in `tests/unit/test_frame_reconcile.cpp`):
   frame from a live inline host. DWARF can: `bfd_find_nearest_line` followed by
   `bfd_find_inliner_info` (state kept in the bfd, hence under `s_bfd_mutex`)
   gives the chain of functions inlined into each other at an address,
-  innermost first, cached per address as BASE NAMES (last component, no scope,
-  template arguments or parameter list — GCC's inlined entries are unqualified
-  DW_AT_names, Clang's are linkage names, the records' names are demangled full
-  names). Every FrameRecord stores `name_base` (a view into the leaked name
+  innermost first, cached per address as BASE NAMES (last component, no scope
+  or parameter list — libbfd hands back linkage names where DWARF has them, so
+  both sides are demangled full names run through the same
+  `function_base_name`; a local entity's scope includes the enclosing
+  function's parameter list and, for a lambda, a brace block, both of which the
+  parser skips: "host(int)::{lambda(int)#1}::operator()(int) const" is
+  "operator()", not "host" — the old cut at the first parenthesis gave a lambda
+  the base name of its enclosing function, so a dead lambda inlined into its
+  catcher matched the catcher's own name at the catch and was never reclaimed
+  there; pinned by
+  `LogExceptionsInlinedTest.CallAfterCatchingAnInlinedLambdaSitsUnderTheCatcher`). Every FrameRecord stores `name_base` (a view into the leaked name
   cache) for these comparisons. Rules: at a CATCH, records at the catcher's
   level above the first record (from the top) whose base name is the chain's
   innermost entry are dead; at an ENTER whose level equals the top record's, a

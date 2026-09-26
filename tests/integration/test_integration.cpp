@@ -2959,3 +2959,27 @@ TEST_F(LogExceptionsInlinedTest, RetryLoopWithAnInlinedLeafKeepsTheMarkerAtItsDe
         EXPECT_EQ(tree_glyph_of(line), '~') << line;
     }
 }
+
+// A lambda defined in inl_lambda_catcher, inlined into it, throws; the catcher
+// catches. Its operator() is a local entity whose demangled name starts with the
+// catcher's own, and the base names must still differ: the catch-site chain
+// names the catcher, whose record lies below the dead lambda's. The call after
+// the catch is then a child of the catcher (2), not of the lambda; the lambda's
+// line carries '!'. (GCC spells the lambda "{lambda(int)#1}", Clang "$_0".)
+TEST_F(LogExceptionsInlinedTest, CallAfterCatchingAnInlinedLambdaSitsUnderTheCatcher) {
+    EXPECT_EQ(depth_of(trace_lines, "inl_lambda_catcher(int)  (called from:"), 1) << trace_content;
+    std::vector<std::string> lambda_lines;
+    for (const auto& line : lines_of(trace_lines, "::operator()(int) const")) {
+        if (line.find("inl_lambda_catcher(int)::") != std::string::npos) lambda_lines.push_back(line);
+    }
+    ASSERT_EQ(lambda_lines.size(), 1u) << trace_content;
+    EXPECT_EQ(count_indentation_depth(lambda_lines[0]), 2) << lambda_lines[0];
+    EXPECT_EQ(tree_glyph_of(lambda_lines[0]), '!') << lambda_lines[0];
+    const std::string catch_line = unique_event_line(trace_lines, "!! catch std::runtime_error \"lambda throw\"");
+    ASSERT_FALSE(catch_line.empty()) << trace_content;
+    EXPECT_EQ(count_indentation_depth(catch_line), 2) << "the catch line is a child of the catcher:\n" << catch_line;
+    EXPECT_NE(catch_line.find(":" + std::to_string(site_lines["CATCH_LAMBDA"]) + ")"), std::string::npos) << catch_line;
+    EXPECT_EQ(depth_of(trace_lines, "inl_after_lambda_catch"), 2)
+            << "the call after the catch must not sit under the unwound lambda:\n" << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_marker_c"), 1) << trace_content;
+}

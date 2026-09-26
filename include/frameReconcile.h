@@ -242,20 +242,43 @@ NO_INSTRUMENT inline std::size_t exiting_record_index(const Record* records, std
 // name), so they are compared by their BASE NAME: the last component, without
 // namespaces, class scope, template arguments or parameter list.
 
+// Index of the bracket closing the one at `open` (nesting counted), or npos.
+NO_INSTRUMENT
+inline std::size_t matching_bracket(std::string_view name, std::size_t open, char open_char, char close_char) {
+    int depth = 0;
+    for (std::size_t i = open; i < name.size(); ++i) {
+        if (name[i] == open_char) {
+            ++depth;
+        } else if (name[i] == close_char && --depth == 0) {
+            return i;
+        }
+    }
+    return std::string_view::npos;
+}
+
 // The base name of a demangled function name: "ns::A::foo(int) const" -> "foo",
 // "std::vector<int, std::allocator<int> >::at(unsigned long)" -> "at",
+// "host(int)::{lambda(int)#1}::operator()(int) const" -> "operator()",
 // "middle" -> "middle". The parameter list is cut at the first '(' outside
-// template brackets that does not belong to "operator()".
+// template brackets that neither belongs to "operator()" nor opens a scope
+// component — "(anonymous namespace)::", or the parameter list of the function
+// enclosing a local entity, "host(int)::" — and a brace block ("{lambda(int)#1}",
+// "{unnamed type#1}") is a scope component as a whole.
 NO_INSTRUMENT
 inline std::string_view function_base_name(std::string_view name) {
     int depth = 0;
     std::size_t cut = std::string_view::npos;
     for (std::size_t i = 0; i < name.size(); ++i) {
-        if (name.compare(i, 21, "(anonymous namespace)") == 0) {
-            i += 20; // a scope component, not a parameter list
+        const char c = name[i];
+        if (c == '{') {
+            const std::size_t close = matching_bracket(name, i, '{', '}');
+            if (close == std::string_view::npos) {
+                break;
+            }
+            i = close;
             continue;
         }
-        if (name.compare(i, 8, "operator") == 0) {
+        if (name.compare(i, 8, "operator") == 0 && (i == 0 || name[i - 1] == ':' || name[i - 1] == ' ')) {
             // An operator's own symbol ("operator<", "operator()", "operator new[]",
             // "operator int") runs up to the '(' of the parameter list; its '<' and
             // '>' characters are not template brackets.
@@ -269,12 +292,16 @@ inline std::string_view function_base_name(std::string_view name) {
             cut = i;
             break;
         }
-        const char c = name[i];
         if (c == '<') {
             ++depth;
         } else if (c == '>') {
             --depth;
         } else if (c == '(' && depth == 0) {
+            const std::size_t close = matching_bracket(name, i, '(', ')');
+            if (close != std::string_view::npos && name.compare(close + 1, 2, "::") == 0) {
+                i = close + 1; // a scope component, not the parameter list
+                continue;
+            }
             cut = i;
             break;
         }
@@ -284,6 +311,14 @@ inline std::string_view function_base_name(std::string_view name) {
     std::size_t last_scope = 0;
     for (std::size_t i = 0; i + 1 < name.size(); ++i) {
         const char c = name[i];
+        if (c == '{') {
+            const std::size_t close = matching_bracket(name, i, '{', '}');
+            if (close == std::string_view::npos) {
+                break;
+            }
+            i = close;
+            continue;
+        }
         if (c == '<') {
             ++depth;
         } else if (c == '>') {

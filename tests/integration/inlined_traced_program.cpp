@@ -87,6 +87,30 @@ NOINLINE void inl_marker_b() {
     std::puts("inl_marker_b");
 }
 
+// --- C. a lambda inlined into the function that defines it throws; that function catches ---
+// The lambda's operator() is a local entity of inl_lambda_catcher, so its
+// demangled name begins with the catcher's own ("inl_lambda_catcher(int)::{lambda
+// (int)#1}::operator()..."): the base names of the two must differ for the
+// catch-site inline chain to find the catcher's record below the dead lambda's.
+
+NOINLINE void inl_after_lambda_catch() {
+    std::puts("inl_after_lambda_catch");
+}
+
+NOINLINE void inl_lambda_catcher(int x) {
+    auto thrower = [](int v) __attribute__((always_inline)) {
+        if (v > 0) { REPORT_LINE("THROW_LAMBDA"); throw std::runtime_error("lambda throw"); }
+    };
+    try {
+        thrower(x);
+    } catch (const std::exception& e) { REPORT_LINE("CATCH_LAMBDA"); std::printf("caught: %s\n", e.what()); }
+    inl_after_lambda_catch();
+}
+
+NOINLINE void inl_marker_c() {
+    std::puts("inl_marker_c");
+}
+
 // clang-format on
 
 int main(int argc, char**) {
@@ -94,5 +118,7 @@ int main(int argc, char**) {
     inl_marker_a();
     inl_loop_jump();
     inl_marker_b();
+    inl_lambda_catcher(argc);
+    inl_marker_c();
     return 0;
 }
