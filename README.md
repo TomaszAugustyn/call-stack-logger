@@ -582,10 +582,16 @@ running shallower one. The hooks use that to reclaim what is gone:
 
 The level is the canonical frame address and not the hook's own frame address on
 purpose: the latter also depends on the callee's frame size, so two functions
-called from the same place would not compare equal. The distance between the two
-is a constant of each hook call site, measured once per site with a two-frame
-unwind and cached per thread; afterwards each hook pays one hash lookup and an
-addition.
+called from the same place would not compare equal. How the one derives from the
+other is a constant of each hook call site, measured once per site with a
+two-frame unwind and cached per thread; afterwards each hook pays one hash
+lookup and an addition. For a frame that keeps a frame pointer the level derives
+from that pointer rather than from the hook's frame address (on x86; the two
+sit a fixed two words apart), which stays exact when the frame's size differs
+from call to call — `alloca()`, variable-length arrays — where the distance to
+the hook's frame changes with every call. A catch measures the catcher's level
+afresh instead of trusting the cache: a stale distance there could reclaim the
+catcher's own record.
 
 **Inlined frames.** A function the optimizer inlined still fires its hooks, but
 it runs inside its host's physical frame: same level, same caller. The level

@@ -215,6 +215,23 @@ struct HookSiteHash {
     }
 };
 
+// How the level of the frame that called a hook — its canonical frame address
+// (CFA), see frameReconcile.h — derives from the hook's own frame, per hook
+// site: a distance added to a base. The base is the hook's frame address when
+// the calling frame has a fixed size (its CFA then sits a constant distance
+// above the hook's frame) or, on x86, the frame pointer that frame saved in the
+// hook's frame: a frame that keeps a frame pointer has its CFA exactly two
+// words above it — the return address and the saved pointer — however much
+// stack it has below. The second form is what keeps the level exact for
+// frames whose size varies between activations (alloca(), variable-length
+// arrays), where the distance to the hook's frame changes with every call;
+// such frames always keep a frame pointer. Measured once per site by
+// measure_level_rule().
+struct LevelRule {
+    std::ptrdiff_t distance;
+    bool from_saved_frame_pointer;
+};
+
 // All per-thread state bundled in one struct for readability.
 struct PerThreadState {
     int current_stack_depth = -1;
@@ -236,17 +253,17 @@ struct PerThreadState {
     // resolved once by resolve_thread_stack_bounds() on the thread's first enter.
     instrumentation::StackBounds stack_bounds;
     bool stack_bounds_resolved = false;
-    // Per hook site, the distance from the hook's own frame address to the level
-    // (canonical frame address) of the frame that called the hook. Filled by
-    // frame_level(); bounded by the number of hook call sites in the program.
-    std::unordered_map<HookSite, std::ptrdiff_t, HookSiteHash> level_offsets;
-    // Direct-mapped front cache of level_offsets, indexed by site address: one
+    // Per hook site, how the level (canonical frame address) of the frame that
+    // called the hook derives from the hook's own frame (see LevelRule). Filled
+    // by frame_level(); bounded by the number of hook call sites in the program.
+    std::unordered_map<HookSite, LevelRule, HookSiteHash> level_rules;
+    // Direct-mapped front cache of level_rules, indexed by site address: one
     // compare on a hit, so the hot path never pays the hash map's machinery
     // (which, with the library built at -O0, costs more than everything else the
-    // option adds per call). 256 slots x 16 bytes per thread.
+    // reconciliation adds per call). 256 slots x 24 bytes per thread.
     struct LevelCacheSlot {
         const void* site;
-        std::ptrdiff_t distance;
+        LevelRule rule;
     };
     static constexpr std::size_t LEVEL_CACHE_SLOTS = 256;
     LevelCacheSlot level_cache[LEVEL_CACHE_SLOTS] = {};
@@ -426,8 +443,6 @@ void mark_frame_end(const FrameRecord& record, char how, const char* field) {
     }
 }
 
-// State of the _Unwind_Backtrace walk in frame_level(): the hook site looked
-// for and the CFA of the frame that resumes there.
 #endif // LOG_EXCEPTIONS: the marks
 
 // Where the hooks found the records they reclaim. With LOG_EXCEPTIONS it decides
@@ -438,6 +453,8 @@ void mark_frame_end(const FrameRecord& record, char how, const char* field) {
 // noticed now); records found at a CATCH were unwound by that exception.
 enum class Reclaim { at_enter, at_exit, at_catch };
 
+// State of the _Unwind_Backtrace walk in measure_level_rule(): the hook site
+// looked for and the CFA of the frame that resumes there.
 struct LevelSearch {
     const void* site;
     std::uintptr_t cfa;
@@ -464,47 +481,37 @@ _Unwind_Reason_Code level_search_step(_Unwind_Context* context, void* argument) 
     return _URC_NO_REASON;
 }
 
-// The level of the frame that called a hook: its canonical frame address (CFA,
-// the stack pointer just before the call that created the frame), derived from
-// the hook's return address (`site`) and the hook's own frame address (`frame`).
-//
-// The distance between `frame` and that CFA is a constant of the hook site: the
-// hook's frame address is the calling frame's stack pointer at the call minus
-// the hook's fixed prologue, and the CFA lies a fixed frame size above that
-// stack pointer. So the distance is measured ONCE per site — an unwinder walk
-// that stops at the frame resuming at `site`, matched by address rather than by
-// frame count so inlining of this helper can never shift it — and every later
-// call is a hash lookup and an addition. The CFA rather than the hook's frame
-// address is what the reconciliation rules need: two different functions called
-// from the same place have the same CFA but frame addresses that differ by their
-// frame sizes.
+// The frame pointer the calling frame saved in the hook's frame: the first
+// word the hook pushed. On x86 and AArch64 that word is the previous frame
+// pointer whenever the calling frame keeps one.
+NO_INSTRUMENT
+inline const void* saved_frame_pointer(const void* frame) {
+    return *static_cast<const void* const*>(frame);
+}
+
+NO_INSTRUMENT
+inline const void* apply_level_rule(const LevelRule& rule, const void* frame) {
+    const void* base = rule.from_saved_frame_pointer ? saved_frame_pointer(frame) : frame;
+    return static_cast<const char*>(base) + rule.distance;
+}
+
+// Measures the level rule for a hook site (`site`: the hook's return address,
+// `frame`: the hook's own frame address) with one unwinder walk that stops at
+// the frame resuming at `site` — matched by address rather than by frame count,
+// so inlining of this helper can never shift it — and reads that frame's CFA
+// from the next context (see level_search_step).
 //
 // A site whose frame the unwinder cannot describe (an object without unwind
 // tables) gets the smallest distance any frame can have, which keeps its level
-// at or below its true value and the ordering rules sound. Never throws: a
-// failed cache insertion just repeats the measurement on the next call. Runs
-// with no lock held (the walk consults the loader's tables).
+// at or below its true value and the ordering rules sound. Runs with no lock
+// held (the walk consults the loader's tables) and never throws.
 NO_INSTRUMENT
-const void* frame_level(const void* site, const void* frame) {
-    // Sites are instruction addresses following a call, so the low bits vary:
-    // drop the two lowest and take the next eight as the slot.
-    PerThreadState::LevelCacheSlot& slot =
-            t_state.level_cache[(reinterpret_cast<std::uintptr_t>(site) >> 2) % PerThreadState::LEVEL_CACHE_SLOTS];
-    if (slot.site == site) {
-        return static_cast<const char*>(frame) + slot.distance;
-    }
-    const HookSite key{ site };
-    auto it = t_state.level_offsets.find(key);
-    if (it != t_state.level_offsets.end()) {
-        slot.site = site;
-        slot.distance = it->second;
-        return static_cast<const char*>(frame) + it->second;
-    }
+LevelRule measure_level_rule(const void* site, const void* frame) {
     // Smallest possible distance: the call into the frame leaves its return
     // address 8 bytes below the CFA, and the hook's prologue puts a return
     // address and a saved frame pointer (16 bytes) below the frame's stack
     // pointer — 24 bytes for a frame with no locals of its own.
-    std::ptrdiff_t distance = 24;
+    LevelRule rule{ 24, false };
     LevelSearch search{ site, 0, false, false };
     _Unwind_Backtrace(level_search_step, &search);
     const std::uintptr_t frame_address = reinterpret_cast<std::uintptr_t>(frame);
@@ -512,19 +519,77 @@ const void* frame_level(const void* site, const void* frame) {
     // information gone wrong (hand-written assembly with bad directives, say):
     // keep the minimum distance instead. It underestimates the level, which at
     // worst keeps a dead record a little longer and never pops a live one.
-    if (search.found && search.cfa > frame_address
-        && instrumentation::on_thread_stack(t_state.stack_bounds, reinterpret_cast<const void*>(search.cfa))) {
-        distance = static_cast<std::ptrdiff_t>(search.cfa - frame_address);
+    if (!search.found || search.cfa <= frame_address
+        || !instrumentation::on_thread_stack(t_state.stack_bounds, reinterpret_cast<const void*>(search.cfa))) {
+        return rule;
     }
+#if defined(__x86_64__) || defined(__i386__)
+    // The calling frame keeps a frame pointer when its CFA is exactly two words
+    // above the pointer it saved in the hook's frame (see LevelRule); the level
+    // then derives from that pointer on every later call, which stays exact when
+    // the frame's size varies. A general-purpose register that happens to hold
+    // precisely that address is the only way this can misfire.
+    const std::uintptr_t two_words = 2 * sizeof(void*);
+    if (search.cfa == reinterpret_cast<std::uintptr_t>(saved_frame_pointer(frame)) + two_words) {
+        rule.distance = static_cast<std::ptrdiff_t>(two_words);
+        rule.from_saved_frame_pointer = true;
+        return rule;
+    }
+#endif
+    rule.distance = static_cast<std::ptrdiff_t>(search.cfa - frame_address);
+    return rule;
+}
+
+// The level of the frame that called a hook: its canonical frame address (CFA,
+// the stack pointer just before the call that created the frame), derived from
+// the hook's return address (`site`) and the hook's own frame address (`frame`)
+// through the site's LevelRule. The rule is a constant of the hook site, so it
+// is measured ONCE per site (measure_level_rule) and every later call is a
+// hash lookup and an addition. The CFA rather than the hook's frame address is
+// what the reconciliation rules need: two different functions called from the
+// same place have the same CFA but frame addresses that differ by their frame
+// sizes. Never throws: a failed cache insertion just repeats the measurement
+// on the next call.
+NO_INSTRUMENT
+const void* frame_level(const void* site, const void* frame) {
+    // Sites are instruction addresses following a call, so the low bits vary:
+    // drop the two lowest and take the next eight as the slot.
+    PerThreadState::LevelCacheSlot& slot =
+            t_state.level_cache[(reinterpret_cast<std::uintptr_t>(site) >> 2) % PerThreadState::LEVEL_CACHE_SLOTS];
+    if (slot.site == site) {
+        return apply_level_rule(slot.rule, frame);
+    }
+    const HookSite key{ site };
+    auto it = t_state.level_rules.find(key);
+    if (it != t_state.level_rules.end()) {
+        slot.site = site;
+        slot.rule = it->second;
+        return apply_level_rule(it->second, frame);
+    }
+    const LevelRule rule = measure_level_rule(site, frame);
     try {
-        t_state.level_offsets.emplace(key, distance);
+        t_state.level_rules.emplace(key, rule);
     } catch (...) {
         // Out of memory: not in the map, measured again on the next front-cache miss.
     }
     slot.site = site;
-    slot.distance = distance;
-    return static_cast<const char*>(frame) + distance;
+    slot.rule = rule;
+    return apply_level_rule(rule, frame);
 }
+
+#ifdef LOG_EXCEPTIONS
+// The level of the frame that called a hook, measured afresh with the unwinder
+// instead of through the per-site cache: exact whatever the frame's layout —
+// a variable-size frame on an architecture where LevelRule cannot use the
+// frame pointer, a frame whose stack pointer was realigned for over-aligned
+// locals (the CFA then sits at a distance from the hook's frame that changes
+// with every call, on which a cached rule would be wrong). For sites reached
+// rarely, where the walk's cost does not matter but a wrong level would.
+NO_INSTRUMENT
+const void* measured_frame_level(const void* site, const void* frame) {
+    return apply_level_rule(measure_level_rule(site, frame), frame);
+}
+#endif // LOG_EXCEPTIONS: the catch-time level
 
 // Pops `count` records from the top of this thread's frame stack whose frames are
 // gone without having run their exit hook (see frameReconcile.h for how they are
@@ -1303,7 +1368,7 @@ bool on_catch(const std::type_info* type, const char* what, bool dependent, cons
             // unwound — the stub now occupies that stack slot — and is reclaimed,
             // which puts the terminate line under the noexcept function.
             resolve_thread_stack_bounds();
-            const char* stub_level = static_cast<const char*>(frame_level(wrapper_site, wrapper_frame));
+            const char* stub_level = static_cast<const char*>(measured_frame_level(wrapper_site, wrapper_frame));
             reclaim_dead_records(instrumentation::dead_records_on_catch(t_state.frames.data(),
                                                                         t_state.frames.size(), stub_level + 1,
                                                                         t_state.stack_bounds),
@@ -1318,9 +1383,16 @@ bool on_catch(const std::type_info* type, const char* what, bool dependent, cons
             // on Clang those frames ran no exit hook, so this is where they are
             // reclaimed and their lines marked; on GCC their exit hooks already
             // popped them and nothing is left below the catcher. Then the catch
-            // line lands at the catcher's depth + 1.
+            // line lands at the catcher's depth + 1. The level is measured afresh
+            // rather than taken from the per-site cache: a catcher whose frame
+            // size varies between activations (alloca, a variable-length array)
+            // or whose stack pointer is realigned puts the landing pad at a
+            // different distance from its CFA on each catch, and a level that
+            // overshoots the catcher's own reclaims live records — the catcher's,
+            // even main's — for the rest of the thread. A catch is rare enough
+            // to pay the walk.
             resolve_thread_stack_bounds();
-            const void* catch_level = frame_level(wrapper_site, wrapper_frame);
+            const void* catch_level = measured_frame_level(wrapper_site, wrapper_frame);
             reclaim_dead_records(instrumentation::dead_records_on_catch(t_state.frames.data(),
                                                                         t_state.frames.size(), catch_level,
                                                                         t_state.stack_bounds),

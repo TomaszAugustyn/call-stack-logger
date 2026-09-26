@@ -2640,6 +2640,33 @@ TEST_F(LogExceptionsTest, WorkerThreadFileCarriesItsOwnEvents) {
     EXPECT_EQ(trace_content.find("\"in a worker\""), std::string::npos);
 }
 
+// A catcher whose frame size differs on every call (alloca): the catch is found
+// at the catcher's exact level each time, so its line and the call after it sit
+// under the catcher, and the records of the catcher and of its host survive
+// all three catches — a level distance cached from the first call would have
+// reclaimed them at the second.
+TEST_F(LogExceptionsTest, CatchInAVariableSizeFrameKeepsTheCatcherAlive) {
+    EXPECT_EQ(depth_of(trace_lines, "exc_vla_host"), 1) << trace_content;
+    EXPECT_EQ(depths_of(trace_lines, "exc_vla_catcher"), (std::vector<int>{ 2, 2, 2 })) << trace_content;
+    EXPECT_EQ(depths_of(trace_lines, "exc_vla_thrower"), (std::vector<int>{ 3, 3, 3 })) << trace_content;
+    EXPECT_EQ(depths_of(trace_lines, "exc_vla_marker"), (std::vector<int>{ 3, 3, 3 })) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "exc_marker_m"), 1) << trace_content;
+    int catches = 0;
+    for (const auto& line : event_lines(trace_lines, "catch")) {
+        if (line.find(":" + std::to_string(site_lines["CATCH_M"]) + ")") != std::string::npos) {
+            ++catches;
+            EXPECT_EQ(count_indentation_depth(line), 3) << line;
+        }
+    }
+    EXPECT_EQ(catches, 3) << trace_content;
+    for (const auto& line : lines_of(trace_lines, "exc_vla_catcher")) {
+        EXPECT_EQ(tree_glyph_of(line), '|') << line;
+    }
+    for (const auto& line : lines_of(trace_lines, "exc_vla_thrower")) {
+        EXPECT_EQ(tree_glyph_of(line), '!') << line;
+    }
+}
+
 // With LOG_ELAPSED an event line carries its column word instead of a duration.
 TEST_F(LogExceptionsElapsedTest, EventLinesCarryTheirColumnWord) {
     for (const auto& line : event_lines(trace_lines, "throw")) {

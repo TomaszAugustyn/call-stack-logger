@@ -502,11 +502,26 @@ in `tests/unit/test_frame_reconcile.cpp`):
   resuming at the hook's return address BY ADDRESS (so inlining of the helper
   cannot shift it) and reads the CFA from the NEXT context — libgcc stores in a
   context the CFA of the frame it just unwound, and LLVM libunwind reports the
-  caller's stack pointer there, the same value. The distance is cached in the
-  per-thread `level_offsets` map (private `HookSite` key type, bounded by the
-  number of hook call sites); later hooks pay one hash lookup. A site the
-  unwinder cannot describe gets the minimum distance (24 bytes), which keeps
-  its level at or below the true value and the ordering sound.
+  caller's stack pointer there, the same value. What is cached per site is a
+  `LevelRule` (in the per-thread `level_rules` map, private `HookSite` key type,
+  bounded by the number of hook call sites, plus a 256-slot direct-mapped front
+  cache): a distance added either to the hook's frame address or, on x86, to
+  the frame pointer the calling frame saved in the hook's frame. The second
+  form is chosen when the measured CFA lies exactly two words above that saved
+  pointer (the calling frame keeps a frame pointer), and it stays exact for
+  frames whose size varies between activations — `alloca()`, variable-length
+  arrays — where the distance from the hook's frame to the CFA changes with
+  every call; such frames always keep a frame pointer. Later hooks pay one hash
+  lookup. A site the unwinder cannot describe gets the minimum distance (24
+  bytes), which keeps its level at or below the true value and the ordering
+  sound. `on_catch` does not use the cache at all: `measured_frame_level()`
+  walks the unwinder for every catch, because a catcher whose frame size varies
+  (or whose stack pointer is realigned for over-aligned locals) puts its landing
+  pad — and the interposer called from it — at a different distance from its
+  CFA on each catch, and a level that overshoots the catcher's own reclaims
+  live records (the catcher's, even main's) for the rest of the thread. Pinned
+  by `LogExceptionsTest.CatchInAVariableSizeFrameKeepsTheCatcherAlive` (an
+  `alloca()` catcher called with 4096, 16 and 4096 bytes).
 - **Enter** (`dead_records_on_enter`): pop records whose level is below the
   entering frame's (deeper, cannot be alive) and records at the SAME level with
   a DIFFERENT caller (reused stack slot after longjmp). Equal level with equal

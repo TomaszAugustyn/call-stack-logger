@@ -27,6 +27,7 @@
  * optimization level; the inlined shape has its own driver.
  */
 
+#include <alloca.h>
 #include <csetjmp>
 #include <cstdio>
 #include <exception>
@@ -207,6 +208,49 @@ NOINLINE void exc_messages() {
     } catch (int) { REPORT_LINE("CATCH_K3"); }
 }
 
+// --- M. a catch inside a function whose frame size differs on every call ---
+// alloca() (a variable-length array does the same) moves the stack pointer by a
+// different amount per call, so the landing pad — and the tracer's catch
+// interposer called from it — sits at a different distance from the frame's
+// canonical address each time. The catcher's level must be exact every time: a
+// distance cached from the first call overshoots on a later one and reclaims
+// the catcher's own record, even main's, for the rest of the thread.
+
+NOINLINE void exc_vla_thrower() {
+    REPORT_LINE("THROW_M"); throw std::domain_error("in a variable frame");
+}
+
+NOINLINE void exc_vla_marker() {
+    std::puts("exc_vla_marker");
+}
+
+NOINLINE void exc_vla_catcher(int bytes) {
+    volatile char* buffer = static_cast<volatile char*>(alloca(bytes));
+    buffer[0] = 1;
+    try {
+        exc_vla_thrower();
+    } catch (const std::exception&) { REPORT_LINE("CATCH_M"); }
+    exc_vla_marker();
+}
+
+// Keeps the catcher's frame well below the top of the stack: a level that
+// overshoots the catcher's by the alloca difference then still lies on the
+// thread's stack, where the rules apply, and reclaims live records — instead
+// of being dismissed as off-stack when main's frame happens to sit near the
+// end of the stack mapping, which would hide the defect on some runs.
+NOINLINE void exc_vla_host() {
+    volatile char pad[8192];
+    pad[0] = 1;
+    pad[sizeof(pad) - 1] = 2;
+    exc_vla_catcher(4096);
+    exc_vla_catcher(16);
+    exc_vla_catcher(4096);
+}
+
+NOINLINE void exc_marker_m() {
+    std::puts("exc_marker_m");
+}
+
 // --- L. an exception caught inside a worker thread (its own trace file) ---
 
 NOINLINE void exc_thread_thrower() {
@@ -243,6 +287,8 @@ int main() {
     exc_marker_h();
     exc_loop_jump();
     exc_void_rec(3);
+    exc_vla_host();
+    exc_marker_m();
     exc_messages();
     std::thread worker([] {
         exc_thread_body();
