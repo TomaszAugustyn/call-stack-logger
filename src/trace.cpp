@@ -30,8 +30,14 @@
 #include <vector>
 
 #ifdef LOG_ELAPSED
-    #include "durationFormat.h"
     #include <chrono>
+#endif
+
+// The duration field's constants: the placeholder and the durations
+// (LOG_ELAPSED), the event column words and the end-of-frame flag
+// (LOG_EXCEPTIONS with LOG_ELAPSED).
+#if defined(LOG_ELAPSED) || defined(LOG_EXCEPTIONS)
+    #include "durationFormat.h"
 #endif
 
 #ifdef LOG_EXCEPTIONS
@@ -1134,24 +1140,6 @@ void trace_begin() {
 #ifdef LOG_EXCEPTIONS
 namespace {
 
-// Column word of an event line with LOG_ELAPSED (the 12-byte word plus the
-// separating space, like the "[  pending ] " splice of a call line), or nothing.
-#ifdef LOG_ELAPSED
-constexpr const char* EVENT_COLUMN_THROW = "[  throw   ] ";
-constexpr const char* EVENT_COLUMN_RETHROW = "[ rethrow  ] ";
-constexpr const char* EVENT_COLUMN_CATCH = "[  catch   ] ";
-constexpr const char* EVENT_COLUMN_TERMINATE = "[ terminate] ";
-static_assert(sizeof("[  throw   ] ") - 1 == utils::DURATION_FIELD_WIDTH + 1, "column word + space");
-static_assert(sizeof("[ rethrow  ] ") - 1 == utils::DURATION_FIELD_WIDTH + 1, "column word + space");
-static_assert(sizeof("[  catch   ] ") - 1 == utils::DURATION_FIELD_WIDTH + 1, "column word + space");
-static_assert(sizeof("[ terminate] ") - 1 == utils::DURATION_FIELD_WIDTH + 1, "column word + space");
-#else
-constexpr const char* EVENT_COLUMN_THROW = "";
-constexpr const char* EVENT_COLUMN_RETHROW = "";
-constexpr const char* EVENT_COLUMN_CATCH = "";
-constexpr const char* EVENT_COLUMN_TERMINATE = "";
-#endif
-
 // Demangled exception type names, memoized per type_info (demangling allocates
 // and costs microseconds; a program throws the same few types over and over).
 // Leaked like the resolver's caches; its own small mutex since events are rare.
@@ -1194,17 +1182,29 @@ EventSite resolve_event_site(const void* address) {
 
 // Writes one exception event line (see include/eventFormat.h) as a child of the
 // innermost logged frame — at depth current_stack_depth + 1 — and advances the
-// byte cursor exactly like a call line does. `site` is the event's resolved
+// byte cursor exactly like a call line does. `column_word` is the event's
+// 12-byte word for the duration column (utils::DURATION_EVENT_*), written with
+// the separating space like the "[  pending ] " splice of a call line when
+// LOG_ELAPSED is on and not at all otherwise. `site` is the event's resolved
 // site, or one with a null address for an event without a site (a terminate
 // line for an exception the runtime gave up on). Runs inside the calling
 // function's guard, cancellation block and exception barrier.
 NO_INSTRUMENT
-void write_event_line(const char* verb, const char* site_label, const char* suffix, const char* column,
+void write_event_line(const char* verb, const char* site_label, const char* suffix, const char* column_word,
                       const char* type_name, const char* what, const EventSite& site) {
     FILE* fp = get_thread_fp();
     if (fp == nullptr) {
         return;
     }
+#ifdef LOG_ELAPSED
+    char column[utils::DURATION_FIELD_WIDTH + 2];
+    std::memcpy(column, column_word, utils::DURATION_FIELD_WIDTH);
+    column[utils::DURATION_FIELD_WIDTH] = ' ';
+    column[utils::DURATION_FIELD_WIDTH + 1] = '\0';
+#else
+    (void)column_word;
+    const char* const column = "";
+#endif
     char timestamp[utils::PRETTY_TIME_BUF_SIZE];
     utils::pretty_time_into(timestamp, sizeof(timestamp));
     utils::EventLine event;
@@ -1260,14 +1260,14 @@ void on_throw(ThrowKind kind, EventType type, const char* what, const void* site
         const char* type_name = exception_type_name(type);
         switch (kind) {
         case ThrowKind::primary:
-            write_event_line("throw", "thrown at", "", EVENT_COLUMN_THROW, type_name, what, at);
+            write_event_line("throw", "thrown at", "", utils::DURATION_EVENT_THROW, type_name, what, at);
             break;
         case ThrowKind::rethrow:
-            write_event_line("rethrow", "rethrown at", "", EVENT_COLUMN_RETHROW, type_name, what, at);
+            write_event_line("rethrow", "rethrown at", "", utils::DURATION_EVENT_RETHROW, type_name, what, at);
             break;
         case ThrowKind::exception_ptr:
-            write_event_line("rethrow", "rethrown at", " via std::rethrow_exception", EVENT_COLUMN_RETHROW,
-                             type_name, what, at);
+            write_event_line("rethrow", "rethrown at", " via std::rethrow_exception",
+                             utils::DURATION_EVENT_RETHROW, type_name, what, at);
             break;
         }
     } catch (...) {
@@ -1341,7 +1341,7 @@ void on_terminate(TerminateReason reason, EventType type, const char* what, cons
             // no object to read; the exception being handled is the one to name.
             what = current_exception_what(buffer);
         }
-        write_event_line("terminate", label, "", EVENT_COLUMN_TERMINATE, type_name, what, at);
+        write_event_line("terminate", label, "", utils::DURATION_EVENT_TERMINATE, type_name, what, at);
     } catch (...) {
         // Swallow (realistically only bad_alloc under OOM): the event goes untraced.
     }
@@ -1379,8 +1379,8 @@ bool on_catch(EventType type, const char* what, bool dependent, const void* wrap
                                                                         t_state.frames.size(), stub_level + 1,
                                                                         t_state.stack_bounds),
                                  Reclaim::at_catch);
-            write_event_line("terminate", "thrown across a noexcept boundary", "", EVENT_COLUMN_TERMINATE,
-                             type_name, what, EventSite{});
+            write_event_line("terminate", "thrown across a noexcept boundary", "",
+                             utils::DURATION_EVENT_TERMINATE, type_name, what, EventSite{});
             terminating = true;
         } else {
             // The interposer was called from the catcher's landing pad, so the level
@@ -1407,7 +1407,7 @@ bool on_catch(EventType type, const char* what, bool dependent, const void* wrap
             // catcher's level; the DWARF inline chain at the catch site tells them
             // apart.
             reclaim_dead_inlined_records_on_catch(catch_level, at.address);
-            write_event_line("catch", "caught at", "", EVENT_COLUMN_CATCH, type_name, what, at);
+            write_event_line("catch", "caught at", "", utils::DURATION_EVENT_CATCH, type_name, what, at);
         }
     } catch (...) {
         // Swallow (realistically only bad_alloc under OOM): the event goes untraced.
