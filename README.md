@@ -892,8 +892,12 @@ docker compose run test
 # Run all tests with Clang
 docker compose run test-clang
 
-# Run all tests under the optimized build type (RelWithDebInfo, -O2 -g)
+# Run all tests under the optimized build type (RelWithDebInfo, -O2 -g), with GCC or Clang
 docker compose run test-optimized
+docker compose run test-clang-optimized
+
+# Build with the instrumentation compiled out and every LOG_* option on, run the unit tests
+docker compose run test-disabled
 
 # Generate code coverage report (output in coverage-report/index.html)
 docker compose run coverage
@@ -918,6 +922,8 @@ GitHub Actions runs on every push and pull request to `master`:
 - **GCC (build, test, coverage):** Builds, runs unit and integration tests, generates lcov HTML report (uploaded as an artifact).
 - **GCC RelWithDebInfo (optimized build, test):** Builds with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` (the build type recommended to integrators) and runs the full suite — pins caller resolution and the documented inlining semantics under optimization.
 - **Clang (build, test):** Builds and runs unit and integration tests.
+- **Clang RelWithDebInfo (optimized build, test):** The same suite with Clang at `-O2 -g`. Clang at -O2 lays the instrumented code out differently from GCC at -O2 and from Clang at -O0 (tail-called exit hooks, its own inlining and landing pads, and no exit hook on the exception-unwind path), so the frame reconciliation and the exception paths meet that combination only here.
+- **Instrumentation disabled (build, unit tests):** Configures with `-DDISABLE_INSTRUMENTATION=ON` and every `LOG_*` option on, builds, and runs the unit tests (the integration tests are skipped at configure time by design). Keeps the `#ifdef` seams between the options and the kill switch building; nothing else exercises that configuration.
 - **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and every `LOG_*` option on (`LOG_EXCEPTIONS`, `LOG_ELAPSED`, `LOG_ADDR`), and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer, so the exception interposers, the in-place patching and the address column run sanitized in the shipped library too, not only in the per-flag test variants. Fails on any memory error, UB, or non-suppressed leak.
 - **Sanitize (GCC, TSan):** Builds with `SANITIZE=thread` and the same options, and runs the full test suite under ThreadSanitizer.
 

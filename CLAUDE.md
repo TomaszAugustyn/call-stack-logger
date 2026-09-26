@@ -1566,7 +1566,7 @@ available locally via docker-compose.
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with five jobs:
+GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with seven jobs:
 - **gcc**: builds with `BUILD_TESTS=ON` and `COVERAGE=ON`, runs tests via `ctest`, generates and uploads the lcov HTML coverage report.
 - **gcc-optimized**: builds with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` (the build type README
   recommends to integrators), runs tests — pins caller resolution and the documented
@@ -1575,6 +1575,17 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with fiv
   `-fno-optimize-sibling-calls`). Locally available as the `test-optimized` docker
   compose service.
 - **clang**: builds with `-DCMAKE_CXX_COMPILER=clang++`, runs tests.
+- **clang-optimized**: the same with `-DCMAKE_BUILD_TYPE=RelWithDebInfo`. Clang at -O2
+  lays the instrumented code out differently from GCC at -O2 and from Clang at -O0
+  (tail-called exit hooks, its own inlining and landing pads, no exit hook on the
+  unwind path); the reconciliation and the LOG_EXCEPTIONS paths meet that combination
+  only here — the inlined driver is built at -O2 in every job, the rest of the suite
+  is not. Locally the `test-clang-optimized` compose service.
+- **disabled-instrumentation**: `-DDISABLE_INSTRUMENTATION=ON` with every `LOG_*`
+  option on, build plus the unit tests (the integration tests are skipped at
+  configure time by design). Nothing else builds that configuration, whose `#ifdef`
+  seams between the options and the kill switch would otherwise rot unnoticed.
+  Locally the `test-disabled` compose service.
 - **sanitize-asan**: builds with `SANITIZE=address+undefined`, runs tests under ASan + UBSan + LSan (libbfd suppression via `${{ github.workspace }}/tests/lsan-suppressions.txt`).
 - **sanitize-tsan**: builds with `SANITIZE=thread`, runs tests under TSan.
 

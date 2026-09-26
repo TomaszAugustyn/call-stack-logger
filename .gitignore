@@ -30,12 +30,7 @@
 *.exe
 *.out
 *.app
-build/*
-build-clang/*
-build-disabled/*
-build-elapsed/*
-build-elapsed-asan/*
-build-elapsed-tsan/*
+build*/
 
 # IDE specific dirs
 .vscode

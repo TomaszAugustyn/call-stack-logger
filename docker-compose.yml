@@ -48,6 +48,34 @@ services:
         cd build-optimized && ctest --output-on-failure
       "
 
+  # Build and run all tests with Clang under the optimized build type: Clang
+  # at -O2 places the hooks differently (tail-called exit hooks, its own
+  # inlining and landing pads) and runs no exit hook on the unwind path.
+  test-clang-optimized:
+    build: .
+    volumes:
+      - .:/workspace
+    command: >
+      bash -c "
+        cmake -B build-clang-optimized -DBUILD_TESTS=ON -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo &&
+        cmake --build build-clang-optimized -j$$(nproc) &&
+        cd build-clang-optimized && ctest --output-on-failure
+      "
+
+  # Build with the instrumentation compiled out and every LOG_* option on (the
+  # #ifdef seams between the options and the kill switch), run the unit tests;
+  # the integration tests are skipped at configure time by design.
+  test-disabled:
+    build: .
+    volumes:
+      - .:/workspace
+    command: >
+      bash -c "
+        cmake -B build-disabled -DBUILD_TESTS=ON -DDISABLE_INSTRUMENTATION=ON -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
+        cmake --build build-disabled -j$$(nproc) &&
+        cd build-disabled && ctest --output-on-failure
+      "
+
   # Build with tests + coverage, run tests, generate HTML coverage report
   coverage:
     build: .
