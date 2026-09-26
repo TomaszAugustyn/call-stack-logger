@@ -301,16 +301,10 @@ struct PerThreadState {
 static thread_local PerThreadState t_state;
 
 // Re-entrancy guard access for the public API entry points in callStack.cpp
-// (get_call_stack(), instrumentation::resolve()). Those entry points run
-// resolver code that holds s_bfd_mutex while executing std container/string
-// template code. Under Clang, the COMDAT instantiations of those templates can
-// be the copies compiled in the USER's instrumented TU (any TU that includes
-// callStack.h emits them), so __cyg_profile_func_enter can fire in the middle
-// of the resolver and re-lock s_bfd_mutex on the same thread — a guaranteed
-// self-deadlock. The entry points set this per-thread guard for their whole
-// duration so the hook no-ops, exactly as the hook does for its own pipeline.
-// Save/restore semantics keep nesting correct (the enter hook already holds
-// the guard when it calls instrumentation::resolve()).
+// and for the LOG_EXCEPTIONS interposers, through TracerScope in
+// tracerScope.h (the rationale is on that struct). Save/restore semantics
+// keep nesting correct (the enter hook already holds the guard when it calls
+// instrumentation::resolve()).
 namespace instrumentation {
 
 NO_INSTRUMENT

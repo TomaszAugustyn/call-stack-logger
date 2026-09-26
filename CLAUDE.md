@@ -669,9 +669,9 @@ the bridge between the two files is the internal `include/exceptionEvents.h`).
   &object, 1)` — libstdc++'s own handler-matching virtual — adjusts the pointer
   to the `std::exception` subobject correctly under multiple inheritance, then
   `what()`, which is `noexcept`), sanitized into a stack buffer. The `what()`
-  call runs under the re-entrancy guard (`TracerScope`, built on the
-  `enter_no_instrument_scope()` / `exit_no_instrument_scope()` pair declared in
-  `exceptionEvents.h`): an override compiled with instrumentation, and whatever
+  call runs under the re-entrancy guard (`TracerScope` from `tracerScope.h`,
+  the RAII scope the public API entry points hold too): an override compiled
+  with instrumentation, and whatever
   it calls, would otherwise write a trace line attributed to `exceptions.cpp`
   on every throw and every catch. Pinned by
   `LogExceptionsTest.InstrumentedWhatOverrideLeavesNoLinesOfItsOwn`. `__cxa_rethrow`:
@@ -845,6 +845,7 @@ call-stack-logger/
 |   |-- prettyTime.h            # utils::pretty_time() + PRETTY_TIME_LENGTH constant
 |   |-- stdSymbolFilter.h       # is_std_library_symbol() — Clang runtime std filter
 |   |-- traceFilePath.h         # utils::resolve_base_trace_path + make_absolute_trace_path + build_trace_filename
+|   |-- tracerScope.h           # Internal: the re-entrancy guard's save/restore pair (trace.cpp) + TracerScope RAII; not public API
 |   |-- types.h                 # ResolvedFrame struct definition
 |-- src/
 |   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, library + executable)
@@ -941,9 +942,10 @@ Declares the `bfdResolver` struct with:
 
 **Public-API re-entrancy guard (load-bearing):** both free functions hold the
 per-thread `t_in_instrumentation` guard for their whole duration (RAII
-`ScopedNoInstrument` in `callStack.cpp`, backed by
+`TracerScope` in `include/tracerScope.h`, backed by
 `enter_no_instrument_scope()` / `exit_no_instrument_scope()` exported from
-`trace.cpp`; no-op definitions exist for `DISABLE_INSTRUMENTATION` builds).
+`trace.cpp`; no-op definitions exist for `DISABLE_INSTRUMENTATION` builds; the
+LOG_EXCEPTIONS interposers hold the same scope around their `what()` calls).
 Without it, calling `get_call_stack()` from a **Clang-instrumented** program
 self-deadlocks: the resolver holds `s_bfd_mutex` while running std
 container/string template code, and the linker may resolve those COMDAT
@@ -1585,7 +1587,7 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
 
 - `instrumentation::` - All symbol resolution and call stack logic
 - `utils::` - Formatting and time utilities
-- Anonymous namespace in `callStack.cpp` for `demangle_cxa()` and `ScopedNoInstrument`;
+- Anonymous namespace in `callStack.cpp` for `demangle_cxa()` and `own_frame()`;
   `is_std_library_symbol()` lives in `include/stdSymbolFilter.h` (namespace
   `instrumentation`, consulted only under Clang)
 

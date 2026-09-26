@@ -11,6 +11,7 @@
 #include "frameReconcile.h"
 #include "prettyTime.h"
 #include "stdSymbolFilter.h"
+#include "tracerScope.h"
 
 // Workaround for deliberately incompatible bfd.h header files on some systems.
 // Same define/undef pattern as include/callStack.h (see the comment there);
@@ -46,34 +47,7 @@
 #include <stdexcept>
 #include <unistd.h>
 
-namespace instrumentation {
-// Defined in trace.cpp: save-set / restore the per-thread t_in_instrumentation
-// re-entrancy guard. Used by the public API entry points below via
-// ScopedNoInstrument — see that struct's comment for why this is load-bearing.
-NO_INSTRUMENT bool enter_no_instrument_scope();
-NO_INSTRUMENT void exit_no_instrument_scope(bool prev);
-} // namespace instrumentation
-
 namespace {
-
-// RAII: while alive, the per-thread re-entrancy guard is set, so
-// __cyg_profile_func_enter no-ops. The public API entry points
-// (get_call_stack(), instrumentation::resolve()) hold one for their whole
-// duration: the resolver holds s_bfd_mutex while running std container/string
-// template code, and under Clang the linker may pick those templates' COMDAT
-// instantiations from the USER's instrumented TU — a hook firing there would
-// re-lock s_bfd_mutex on the same thread (self-deadlock, observed via
-// unordered_map::find inside resolve_no_unwind). Saving/restoring the previous
-// value keeps the wrapper correct when the enter hook (guard already set)
-// calls instrumentation::resolve(). The destructor also restores the guard if
-// the wrapped code throws (get_call_stack's backtrace-failure path).
-struct ScopedNoInstrument {
-    bool prev;
-    NO_INSTRUMENT ScopedNoInstrument() : prev(instrumentation::enter_no_instrument_scope()) {}
-    NO_INSTRUMENT ~ScopedNoInstrument() { instrumentation::exit_no_instrument_scope(prev); }
-    ScopedNoInstrument(const ScopedNoInstrument&) = delete;
-    ScopedNoInstrument& operator=(const ScopedNoInstrument&) = delete;
-};
 
 // Takes const char* directly to avoid constructing a temporary std::string at each
 // call site — all callers pass const char* from BFD/dladdr.
@@ -759,9 +733,8 @@ bool bfdResolver::resolve(void* callee_address, void* caller_address, ResolvedFr
 
 std::vector<std::optional<ResolvedFrame>> get_call_stack() {
     // Public API entry point — hold the re-entrancy guard for the whole capture
-    // (deadlock rationale on ScopedNoInstrument). Also keeps the resolver's own
-    // std internals out of the trace when the calling program is instrumented.
-    ScopedNoInstrument guard;
+    // (rationale on TracerScope in tracerScope.h).
+    TracerScope guard;
     const size_t MAX_FRAMES = 1000;
     std::vector<void*> stack(MAX_FRAMES);
     int num = backtrace(&stack[0], MAX_FRAMES);
@@ -804,14 +777,14 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
 bool resolve(void* callee_address, void* caller_address, ResolvedFrameView& out) {
     // Entry point for the enter hook — same guard as get_call_stack(). The hook
     // already holds the guard, so this saves/restores it unchanged.
-    ScopedNoInstrument guard;
+    TracerScope guard;
     return bfdResolver::resolve(callee_address, caller_address, out);
 }
 
 std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address) {
     // Public, owning API entry point — same guard as get_call_stack(). The copy
     // into a ResolvedFrame happens outside s_bfd_mutex.
-    ScopedNoInstrument guard;
+    TracerScope guard;
     ResolvedFrameView view;
     if (!bfdResolver::resolve(callee_address, caller_address, view)) {
         return std::nullopt;
@@ -822,7 +795,7 @@ std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address)
 void resolve_site(void* address, ResolvedFrameView& out) {
     // Same guard as the other entry points (the interposers call this from
     // inside their own guard, so it saves/restores it unchanged).
-    ScopedNoInstrument guard;
+    TracerScope guard;
     bfdResolver::resolve_location(address, out);
 }
 
@@ -832,7 +805,7 @@ std::string demangle_symbol(const char* mangled) {
 
 const std::vector<std::string>* inline_chain_at(void* address) {
     // Same guard as the other entry points; the hooks already hold it.
-    ScopedNoInstrument guard;
+    TracerScope guard;
     return bfdResolver::resolve_inline_chain(address);
 }
 

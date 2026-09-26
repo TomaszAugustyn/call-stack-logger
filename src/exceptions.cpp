@@ -35,6 +35,7 @@
 #if defined(LOG_EXCEPTIONS) && !defined(DISABLE_INSTRUMENTATION)
 
     #include "eventFormat.h"
+    #include "tracerScope.h"
     #include <cstdint>
     #include <cstdio>
     #include <cstdlib>
@@ -48,6 +49,7 @@
 
 namespace {
 
+using instrumentation::TracerScope;
 using instrumentation::events::EventType;
 using instrumentation::events::inside_tracer;
 using instrumentation::events::on_catch;
@@ -116,19 +118,6 @@ void sanitizer_no_return() {
         __asan_handle_no_return();
     }
 }
-
-// RAII: while alive, the calling thread counts as inside the tracer, so the
-// hooks stay silent. The interposers hold one around their calls into the
-// program's own code — the thrown object's what(), possibly an override the
-// program compiled with instrumentation, whose enter hook would otherwise write
-// a line attributed to this file for every throw and catch.
-struct TracerScope {
-    bool previous;
-    NO_INSTRUMENT TracerScope() : previous(instrumentation::enter_no_instrument_scope()) {}
-    NO_INSTRUMENT ~TracerScope() { instrumentation::exit_no_instrument_scope(previous); }
-    TracerScope(const TracerScope&) = delete;
-    TracerScope& operator=(const TracerScope&) = delete;
-};
 
 // The what() text of a thrown object of dynamic type `type`, or null when the
 // type does not derive from std::exception. Asks libstdc++'s own handler-matching
@@ -307,7 +296,9 @@ extern "C" NO_INSTRUMENT __attribute__((noreturn)) void cslg_cxa_throw(void* obj
         char buffer[utils::WHAT_TEXT_CAPACITY];
         const char* what = nullptr;
         {
-            TracerScope inside; // what() may be the program's own instrumented override
+            // what() may be the program's own instrumented override: no lines of
+            // its own (see TracerScope in tracerScope.h).
+            TracerScope inside;
             what = sanitized_what(std_exception_what(type, object), buffer);
         }
         on_throw(ThrowKind::primary, EventType{ type, nullptr }, what,
