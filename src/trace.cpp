@@ -15,9 +15,11 @@
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <cstdint>
 #include <cstdlib>
 #include <fcntl.h>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <pthread.h>
 #include <stdio.h>
@@ -235,7 +237,11 @@ struct HookSiteHash {
 // such frames always keep a frame pointer. Measured once per site by
 // measure_level_rule().
 struct LevelRule {
-    std::ptrdiff_t distance;
+    // 32 bits hold any frame a thread's stack can contain; a frame beyond 2 GB
+    // (no realistic stack is that large) keeps the minimum distance, the safe
+    // direction. Narrow so that a front cache slot stays 16 bytes (see
+    // PerThreadState::LevelCacheSlot).
+    std::int32_t distance;
     bool from_saved_frame_pointer;
 };
 
@@ -267,7 +273,7 @@ struct PerThreadState {
     // Direct-mapped front cache of level_rules, indexed by site address: one
     // compare on a hit, so the hot path never pays the hash map's machinery
     // (which, with the library built at -O0, costs more than everything else the
-    // reconciliation adds per call). 256 slots x 24 bytes per thread.
+    // reconciliation adds per call). 256 slots x 16 bytes per thread.
     struct LevelCacheSlot {
         const void* site;
         LevelRule rule;
@@ -486,13 +492,16 @@ _Unwind_Reason_Code level_search_step(_Unwind_Context* context, void* argument) 
 
 // The frame pointer the calling frame saved in the hook's frame: the first
 // word the hook pushed. On x86 and AArch64 that word is the previous frame
-// pointer whenever the calling frame keeps one.
-NO_INSTRUMENT
+// pointer whenever the calling frame keeps one. always_inline, as is
+// apply_level_rule below: the library is built without optimization by
+// default, where a call costs about as much as the rest of a cached level
+// lookup — measured as 50 ns per traced call.
+NO_INSTRUMENT __attribute__((always_inline))
 inline const void* saved_frame_pointer(const void* frame) {
     return *static_cast<const void* const*>(frame);
 }
 
-NO_INSTRUMENT
+NO_INSTRUMENT __attribute__((always_inline))
 inline const void* apply_level_rule(const LevelRule& rule, const void* frame) {
     const void* base = rule.from_saved_frame_pointer ? saved_frame_pointer(frame) : frame;
     return static_cast<const char*>(base) + rule.distance;
@@ -534,12 +543,16 @@ LevelRule measure_level_rule(const void* site, const void* frame) {
     // precisely that address is the only way this can misfire.
     const std::uintptr_t two_words = 2 * sizeof(void*);
     if (search.cfa == reinterpret_cast<std::uintptr_t>(saved_frame_pointer(frame)) + two_words) {
-        rule.distance = static_cast<std::ptrdiff_t>(two_words);
+        rule.distance = static_cast<std::int32_t>(two_words);
         rule.from_saved_frame_pointer = true;
         return rule;
     }
 #endif
-    rule.distance = static_cast<std::ptrdiff_t>(search.cfa - frame_address);
+    const std::uintptr_t measured = search.cfa - frame_address;
+    if (measured > static_cast<std::uintptr_t>(std::numeric_limits<std::int32_t>::max())) {
+        return rule; // a frame the rule cannot represent: the minimum distance (see LevelRule)
+    }
+    rule.distance = static_cast<std::int32_t>(measured);
     return rule;
 }
 
