@@ -46,6 +46,7 @@
     #include <link.h>
     #include <typeinfo>
     #include <unwind.h>
+    #include <utility>
 
 namespace {
 
@@ -345,7 +346,9 @@ extern "C" NO_INSTRUMENT __attribute__((noreturn)) void cslg_rethrow_exception(s
                  static_cast<const char*>(__builtin_return_address(0)) - 1);
     }
     sanitizer_no_return();
-    real(pointer);
+    // Moved, not copied: the copy took and released a reference on the
+    // exception for nothing.
+    real(std::move(pointer));
     __builtin_unreachable();
 }
 
