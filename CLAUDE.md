@@ -197,6 +197,9 @@ it deliberately opens no file. This matters because `trace_begin` also runs in
 programs that link the plain library just for `get_call_stack()` (callStack.cpp
 references the re-entrancy guard functions, pulling trace.o from the archive) —
 an eager open used to create a stray `trace.out` for such API-only consumers.
+(With `LOG_EXCEPTIONS` the interposers are linked into such a program too, and
+its first throw opens the file for the event lines — documented in README's
+"Available CMake targets".)
 Instrumented programs are unaffected: their first hook fires no later than
 `main()`'s own enter. Pinned by the no-trace-file assertion in
 `CallStackApiTest.GetCallStackResolvesAncestors`.
@@ -393,8 +396,9 @@ site — useful debugging signal that's hard to get otherwise. See README's
 
 **Per-frame state.** `FrameRecord` (the element type of the per-thread
 `frames` stack) always carries the `logged` flag and the frame's `callee`,
-`caller`, `level` and `name_base` for the reconciliation (40 bytes per record;
-it was one byte before the reconciliation ran in every build). With LOG_ELAPSED
+`caller`, `level` and `name_base` for the reconciliation (40 bytes per record
+in the default build, 72 with every option on; it was one byte before the
+reconciliation ran in every build). With LOG_ELAPSED
 it also carries `std::chrono::steady_clock::time_point enter_time`, and —
 shared with LOG_EXCEPTIONS under `CSLG_LINE_PATCHING` — the line's `off_t
 line_start` (-1 when the cursor was untrusted) and `int depth`. The record is pushed by the enter hook and copied

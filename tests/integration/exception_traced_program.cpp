@@ -16,9 +16,10 @@
  * enter/exit stay paired and the depth counter is intact after the catch —
  * post_catch_marker() must trace at the same depth as exception_catcher.
  *
- * On Clang the exit hooks of unwound frames are silently skipped (documented
- * limitation, see README "Compiler-specific instrumentation"), so the
- * corresponding integration test only asserts under GCC.
+ * On Clang the exit hooks of unwound frames never run; the frame
+ * reconciliation (include/frameReconcile.h, on in every build) reclaims their
+ * stale records at the marker's enter, so the integration test asserts the
+ * same depth on both compilers.
  */
 
 #include <cstdio>

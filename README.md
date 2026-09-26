@@ -271,7 +271,9 @@ caller locations at every optimization level.
 
 Trace files are opened lazily on each thread's first traced call, so a program
 that links the plain library only for `get_call_stack()` never creates a trace
-file as a side effect.
+file as a side effect. (With `LOG_EXCEPTIONS` the exception events are traced
+in every program that links the library, so such a program's first `throw`
+does create the file, holding the event lines only.)
 
 ### Disabling tracing in a build ###
 

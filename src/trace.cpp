@@ -64,12 +64,13 @@
 // Initial capacity (in frames) of the per-thread frame stack. NOT a depth limit: the
 // stack is a std::vector that doubles whenever it fills up, so depth accounting stays
 // exact at any call depth and the hot path is allocation-free once the current
-// capacity covers the program's deepest call chain. A FrameRecord is 1 byte in the
-// default build and up to 56 bytes with every option on (the frame's site identity
-// and level, the enter timestamp, the line offset and depth), so the first
-// reservation costs a tracing thread between 2 KB and 112 KB of heap. Growth can
-// only fail under OOM — see frame_overflow_count for how that fallback keeps
-// enter/exit pairing exact.
+// capacity covers the program's deepest call chain. A FrameRecord is 40 bytes in the
+// default build (the logged flag, the frame's site identity and level, its base
+// name) and 72 bytes with every option on (plus the uncaught-exception count, the
+// enter timestamp, the line offset and depth), so the first reservation costs a
+// tracing thread between 80 KB and 144 KB of heap. Growth can only fail under
+// OOM — see frame_overflow_count for how that fallback keeps enter/exit pairing
+// exact.
 static constexpr std::size_t INITIAL_FRAME_CAPACITY = 2048;
 
 // One record per instrumented frame currently on a thread's stack, pushed by every
@@ -390,7 +391,8 @@ static constexpr std::size_t PLACEHOLDER_OFFSET_IN_LINE = utils::PRETTY_TIME_LEN
 // intentionally unchecked: the only failure modes are racing shutdown closing
 // pfd (EBADF, no recovery possible) or a disk-I/O hardware error — in either
 // case the line keeps what was written, the documented degraded-but-readable
-// mode.
+// mode. (Assigned rather than cast away: pwrite carries warn_unused_result,
+// which a (void) cast does not silence under _FORTIFY_SOURCE at -O2.)
 NO_INSTRUMENT
 void patch_line_bytes(off_t line_start, std::size_t offset_in_line, const char* bytes,
                       std::size_t count) {
@@ -398,7 +400,8 @@ void patch_line_bytes(off_t line_start, std::size_t offset_in_line, const char* 
     if (pfd < 0 || line_start < 0) {
         return;
     }
-    (void)pwrite(pfd, bytes, count, line_start + static_cast<off_t>(offset_in_line));
+    const ssize_t written = pwrite(pfd, bytes, count, line_start + static_cast<off_t>(offset_in_line));
+    (void)written;
 }
 #endif
 

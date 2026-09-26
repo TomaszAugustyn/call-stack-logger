@@ -363,10 +363,10 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     TRACED_PROGRAM_LOG_EXCEPTIONS_INLINED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_inlined>"
 )
 
-# When the user passes -DLOG_ADDR=ON or -DLOG_ELAPSED=ON globally, the
-# default callstacklogger target also defines that macro PUBLIC —
-# so tests that expect the DEFAULT build to NOT have the macro must skip themselves
-# to avoid false failures.
+# When the user passes -DLOG_ADDR=ON or -DLOG_ELAPSED=ON globally, the default
+# callstacklogger target is built with that macro too (PRIVATE to the library,
+# so the runner cannot see it) — tests that expect the DEFAULT build to NOT have
+# the macro must skip themselves to avoid false failures.
 if(LOG_ADDR)
     target_compile_definitions(cslg_integration_tests PRIVATE CSLG_DEFAULT_HAS_LOG_ADDR)
 endif()

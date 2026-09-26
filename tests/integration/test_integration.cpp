@@ -983,11 +983,13 @@ TEST(FilteredOverflowTest, UnloggedFramesBeyondInitialCapacityKeepDepthExact) {
 }
 
 // ============================================================================
-// Exception-unwind pairing test (GCC only). GCC's -finstrument-functions
-// emits __cyg_profile_func_exit on the exceptional path too (as a cleanup),
-// so a throw through instrumented frames leaves the depth counter intact.
-// Clang skips those exit hooks (documented limitation — README
-// "Compiler-specific instrumentation"), so the test is compiled out there.
+// Exception-unwind pairing test, both compilers. GCC's -finstrument-functions
+// emits __cyg_profile_func_exit on the exceptional path too (as a cleanup), so
+// a throw through instrumented frames leaves the depth counter intact by
+// itself. Clang runs no exit hook for the unwound frames; the frame
+// reconciliation (include/frameReconcile.h, on in every build) reclaims their
+// stale records at the next hook, so the marker after the catch sits at its
+// true depth there too.
 // ============================================================================
 
 TEST(ExceptionUnwindTest, DepthConsistentAfterCatch) {
