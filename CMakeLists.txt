@@ -33,8 +33,8 @@ option(LOG_ELAPSED "Record and display per-function duration in trace output" OF
 # becomes a line in the tree and the lines of frames that an exception or a
 # longjmp() left are marked in place. (The tree itself stays exact after such
 # exits in every build: the hooks key frame records by stack level and reclaim
-# the records of frames that left without their exit hook — see "Repairing the
-# tree after non-local exits" in README.md.) When OFF (default), the event and
+# the records of frames that left without their exit hook — see "Keeping the
+# tree exact after non-local exits" in README.md.) When OFF (default), the event and
 # marking code is not compiled: it is inside #ifdef LOG_EXCEPTIONS blocks.
 option(LOG_EXCEPTIONS "Trace exception events and mark the frames they left in the call tree" OFF)
 

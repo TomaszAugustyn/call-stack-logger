@@ -1,7 +1,7 @@
 # Call Stack Logger #
 
 ![GCC](https://github.com/TomaszAugustyn/call-stack-logger/actions/workflows/ci.yml/badge.svg?branch=master&event=push)
-<!-- Badges show GCC (build+test+coverage) and Clang (build+test) CI status -->
+<!-- The badge shows the status of the whole CI workflow (see CI/CD below) -->
 
 Call Stack Logger uses function instrumentation to facilitate logging of
 every function call. Each nesting adds an ident, whereas returning from a
@@ -99,19 +99,17 @@ ordinary user code but can differ at the edges:
   compiler's system include paths, and `/usr/include` is one of them — so GCC never
   instruments it. Clang instruments it and, because the names are not `std::`, traces it.
 
-**Exceptions under Clang, `longjmp` on both compilers — repaired.** Clang's
+**Exceptions under Clang, `longjmp` on both compilers.** Clang's
 `-finstrument-functions` does not call `__cyg_profile_func_exit` for frames unwound by a
 thrown exception, while GCC emits the exit call on the exceptional path too (like a
 cleanup). `longjmp` restores the stack without running any cleanups, so the exit hooks of
-the jumped-over instrumented frames never fire on either compiler. Both used to leave one
-unmatched enter per skipped frame: tree indentation drifted one level deeper for the rest
-of that thread's trace, and with `LOG_ELAPSED` later exits patched durations onto the
-wrong lines. The tracer now keys every frame record by its stack level and reclaims the
-records of frames that are gone at the next hook, in every build, so the calls that follow
-a catch or a jump sit at their true depth; the mechanism is described under
-[Repairing the tree after non-local exits](#repairing-the-tree-after-non-local-exits).
-What the unwound frames' own lines show still differs by compiler: on GCC their exit hooks
-ran, so with `LOG_ELAPSED` they carry measured durations, while on Clang they keep
+the jumped-over instrumented frames never fire on either compiler. Neither affects the
+tree: the tracer keys every frame record by its stack level and reclaims the records of
+frames that are gone at the next hook, in every build, so the calls that follow a catch or
+a jump sit at their true depth; the mechanism is described under
+[Keeping the tree exact after non-local exits](#keeping-the-tree-exact-after-non-local-exits).
+What the unwound frames' own lines show differs by compiler: on GCC their exit hooks ran,
+so with `LOG_ELAPSED` they carry measured durations, while on Clang they keep
 `[  pending ]`. `LOG_EXCEPTIONS` marks such lines on both compilers (`!_`, `~_`,
 `[! unwound ]`, `[~ unwound ]`, see the section linked above).
 
@@ -565,17 +563,18 @@ frames that returned normally keep `|_`.
   inside the tracer itself are never traced. AddressSanitizer's own interception
   of `__cxa_throw` keeps working with either compiler.
 
-### Repairing the tree after non-local exits ###
+### Keeping the tree exact after non-local exits ###
 
 This part is on in every build; `LOG_EXCEPTIONS` only adds the marks below.
 
 The tracer pairs enters and exits positionally: every enter pushes a record on a
-per-thread stack, every exit pops one. Two things break that pairing silently.
-Clang emits no exit hook for frames an exception unwinds through, and `longjmp`
-skips the exit hooks of every frame it jumps over on both compilers. A stale
-record would then make each later exit pop the wrong record: the tree would
-drift one level deeper per skipped frame for the rest of the thread, and with
-`LOG_ELAPSED` durations would land on the wrong lines.
+per-thread stack, every exit pops one. Two things would break that pairing
+silently if records were popped blindly. Clang emits no exit hook for frames an
+exception unwinds through, and `longjmp` skips the exit hooks of every frame it
+jumps over on both compilers. A stale record would then make each later exit pop
+the wrong record: the tree would drift one level deeper per skipped frame for
+the rest of the thread, and with `LOG_ELAPSED` durations would land on the wrong
+lines.
 
 So every record also carries the frame's **level**, its canonical frame
 address: the stack pointer's value just before the call that created the
@@ -678,13 +677,13 @@ frames up, including those two calls.
 | RelWithDebInfo | `LOG_EXCEPTIONS`              | 2.06 µs     | 10.4 µs       |
 | RelWithDebInfo | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 5.3 µs   | 17.0 µs       |
 
-The repair of the tree after non-local exits runs in every build and is what
-the "none" rows pay for it: one level lookup in each hook (a direct-mapped
+Keeping the tree exact after non-local exits runs in every build and is part
+of what the "none" rows measure: one level lookup in each hook (a direct-mapped
 cache in front of a per-thread hash map) and a handful of compares, about
 0.3 µs per traced call with the library at -O0 and under 0.1 µs at
-RelWithDebInfo on this host (2.44 µs and 1.98 µs before it); the first hook at each call site also pays one two-frame unwind
-to measure that site's level distance. The option adds nothing measurable per
-call. A throw or catch adds the event line itself: a memoized site resolution,
+RelWithDebInfo on this host; the first hook at each call site also pays one
+two-frame unwind to measure how that site's level derives from its frame. The
+option adds nothing measurable per call. A throw or catch adds the event line itself: a memoized site resolution,
 a memoized type name, the formatting and the write, plus a
 `std::uncaught_exceptions()` read at each exit an exception passes through.
 The `LOG_ELAPSED` rows carry that option's own cost (two clock reads and a
@@ -700,9 +699,10 @@ What this does not cover, and what happens instead:
   frame containing the loop returns, with one extra indentation level per
   iteration meanwhile.
 - **Fibers and stackful coroutines** switch stacks within one thread. The
-  tracer's frame stack interleaves their frames today, and the reconciliation
-  leaves them exactly as they are: the level rules only ever compare frames on
-  the thread's own stack (found with `pthread_getattr_np`).
+  tracer's frame stack interleaves their frames, and the level rules never
+  touch them: they only ever compare frames on the thread's own stack (found
+  with `pthread_getattr_np`), so a frame running off it gets the plain
+  positional pairing.
 - Code compiled **without unwind tables** cannot be measured by the unwinder;
   such a hook site gets the smallest distance any frame can have, which keeps
   its level at or below the true one and the ordering rules sound.
@@ -764,8 +764,10 @@ everything they call) with `__attribute__((no_instrument_function))`.
 
 ## :test_tube: Testing ##
 
-The project includes unit tests (for formatting and timestamp functions) and integration tests
-(that compile an instrumented program, execute it, and verify the trace output). Tests use
+The project includes unit tests (for the pure helpers: line and event formatting, timestamps,
+the duration field, the std-library filter, the trace path helpers and the frame reconciliation
+rules) and integration tests (that compile an instrumented program, execute it, and verify the
+trace output). Tests use
 the [Google Test](https://github.com/google/googletest) framework, fetched automatically via
 CMake FetchContent on first build.
 
