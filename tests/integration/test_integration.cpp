@@ -2784,6 +2784,10 @@ protected:
     std::string trace_content;
     std::vector<std::string> trace_lines;
     std::string trace_file_path;
+    // The trace file(s) of worker threads, next to the main file (the "thread"
+    // mode starts one); `worker_lines` holds the last one found.
+    std::vector<std::string> worker_paths;
+    std::vector<std::string> worker_lines;
     std::map<std::string, int> site_lines;
     int run_status = -1;
 
@@ -2806,6 +2810,14 @@ protected:
 
         trace_content = read_file(trace_file_path);
         trace_lines = split_lines(trace_content);
+        const std::string dir = trace_file_path.substr(0, trace_file_path.rfind('/'));
+        const std::string base = trace_file_path.substr(trace_file_path.rfind('/') + 1);
+        for (const auto& name : list_files_in(dir)) {
+            if (name.rfind(base + "_tid_", 0) == 0) {
+                worker_paths.push_back(dir + "/" + name);
+                worker_lines = split_lines(read_file(worker_paths.back()));
+            }
+        }
         for (const auto& line : split_lines(read_file(stdout_path))) {
             const size_t eq = line.find('=');
             if (eq == std::string::npos) continue;
@@ -2841,6 +2853,9 @@ protected:
     void TearDown() override {
         if (!trace_file_path.empty()) {
             unlink(trace_file_path.c_str());
+        }
+        for (const auto& path : worker_paths) {
+            unlink(path.c_str());
         }
     }
 };
@@ -2971,6 +2986,43 @@ TEST_F(LogExceptionsUncaughtTest, HandlerCallingTerminateEndsInTheTerminateLineW
     EXPECT_EQ(field_of_line(events[2]), "[ terminate]") << events[2];
     EXPECT_EQ(count_indentation_depth(events[1]), 2) << events[1];
     EXPECT_EQ(count_indentation_depth(events[2]), 2) << events[2];
+}
+
+// A std::thread whose function throws: nothing on that thread catches, so the
+// runtime terminates from there and the events belong to the worker's own
+// trace file — the throw line and, as its last line, the terminate line. It
+// reads "(no handler found)" where the thread routine has no handler of its
+// own (the runtime gives up inside __cxa_throw, with no unwinding, so the
+// worker's frames stay pending), or "(std::terminate called at: ...)" where
+// an older runtime catches and terminates itself. The main file, blocked in
+// join(), carries no event and keeps its frames pending.
+TEST_F(LogExceptionsUncaughtTest, ThreadFunctionThrowingEndsInTheTerminateLineOfItsOwnFile) {
+    ASSERT_NO_FATAL_FAILURE(run("thread"));
+    ASSERT_EQ(worker_paths.size(), 1u) << "expected exactly one worker trace file";
+    std::string worker_content;
+    for (const auto& line : worker_lines) worker_content += line + "\n";
+    ASSERT_FALSE(worker_lines.empty());
+    const std::string& last = worker_lines.back();
+    EXPECT_TRUE(has(last, "!! terminate std::logic_error \"nobody catches this\"  (")) << worker_content;
+    EXPECT_TRUE(has(last, "(no handler found)") || has(last, "(std::terminate called at: ")) << last;
+    EXPECT_EQ(field_of_line(last), "[ terminate]") << last;
+    const std::string throw_line =
+            unique_event_line(worker_lines, "!! throw std::logic_error \"nobody catches this\"  (thrown at: ");
+    ASSERT_FALSE(throw_line.empty()) << worker_content;
+    EXPECT_TRUE(has(throw_line, site_of("THROW_UNCAUGHT"))) << throw_line;
+    if (has(last, "(no handler found)")) {
+        EXPECT_EQ(count_indentation_depth(last), count_indentation_depth(throw_line))
+                << "both children of uncaught_leaf:\n" << worker_content;
+        for (const char* fn : { "uncaught_outer", "uncaught_leaf" }) {
+            const std::string line = find_unique_line(worker_lines, fn);
+            ASSERT_FALSE(line.empty()) << fn << " line missing or not unique:\n" << worker_content;
+            EXPECT_NE(line.find("[  pending ]"), std::string::npos) << line;
+        }
+    }
+    EXPECT_EQ(trace_content.find("!! "), std::string::npos) << "an event in the main file:\n" << trace_content;
+    const std::string joiner = find_unique_line(trace_lines, "thread_function_throws");
+    ASSERT_FALSE(joiner.empty()) << trace_content;
+    EXPECT_NE(joiner.find("[  pending ]"), std::string::npos) << joiner;
 }
 
 // std::terminate() with no exception at all still leaves a line saying so,

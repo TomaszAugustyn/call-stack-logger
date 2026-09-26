@@ -877,7 +877,7 @@ call-stack-logger/
 |       |-- longjmp_traced_program.cpp # Instrumented; longjmp over two frames and out of a retry loop (reconciliation)
 |       |-- exceptions_traced_program.cpp # Instrumented LOG_EXCEPTIONS driver: every kind of non-local exit + markers
 |       |-- throwing_lib.cpp      # Shared lib built without instrumentation whose only function throws
-|       |-- uncaught_traced_program.cpp # Instrumented, LOG_EXCEPTIONS + LOG_ELAPSED; every path to std::terminate, one per mode (terminate line)
+|       |-- uncaught_traced_program.cpp # Instrumented, LOG_EXCEPTIONS + LOG_ELAPSED; every path to std::terminate, one per mode (terminate line), incl. a std::thread
 |       |-- inlined_traced_program.cpp # Instrumented at -O2, LOG_EXCEPTIONS; always_inline thrower chain and retry leaf (inline chains)
 |       |-- crash_traced_program.cpp # Instrumented, LOG_ELAPSED; abort()s mid-chain (pending-placeholder crash diagnostics)
 |       |-- global_dtor_traced_program.cpp # Instrumented; global object dtor calls traced code during exit()
@@ -1463,7 +1463,12 @@ Test pure/deterministic functions from the include headers:
   function (`(thrown across a noexcept boundary)` as a child of that function on
   both compilers, the unwound frames marked `!`, no catch line); a handler calling
   `std::terminate()` (its catch, then `(std::terminate called at: file:line)` with
-  the what()); and `std::terminate()` with no exception (`(no active exception)`).
+  the what()); `std::terminate()` with no exception (`(no active exception)`); and
+  a `std::thread` whose function throws (the events land in the worker's own
+  trace file, found next to the main one: the throw line and, last, the terminate
+  line — `(no handler found)` with a current libstdc++ thread routine, which has
+  no handler of its own, so the worker's frames stay `[  pending ]`; the main
+  file, blocked in `join()`, carries no event).
   The driver sets stdout unbuffered, since the abort would discard its reported lines.
 - `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the both-flags
   variant `cslg_traced_test_program_log_elapsed_addr`. Asserts the

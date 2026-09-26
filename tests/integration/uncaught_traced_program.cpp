@@ -25,6 +25,9 @@
  *                    stub in the executable — the runtime never searches further
  *   catch_terminate  a handler calls std::terminate() itself
  *   no_exception     std::terminate() with no exception at all
+ *   thread           a std::thread whose function throws and nobody catches:
+ *                    the runtime terminates on that thread, so the events land
+ *                    in the worker's own trace file
  *
  * std::terminate aborts the process without unwinding, so no exit hook runs:
  * every frame active at that point keeps its "[  pending ]" placeholder. The
@@ -42,6 +45,7 @@
 #include <stdexcept>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <thread>
 #include <unistd.h>
 
 #define NOINLINE __attribute__((noinline))
@@ -104,6 +108,14 @@ NOINLINE void terminate_without_exception() {
 }
 // clang-format on
 
+// A current libstdc++ thread routine has no handler of its own, so the runtime
+// gives up inside __cxa_throw on the worker (the plain no-handler path); an
+// older one catches everything and calls std::terminate() itself.
+NOINLINE void thread_function_throws() {
+    std::thread worker([] { uncaught_outer(); });
+    worker.join();
+}
+
 int main(int argc, char** argv) {
     // Same no-core-dump setup as crash_traced_program.cpp: the abort is the
     // point of this program, the crash report is not (see the comment there).
@@ -128,6 +140,8 @@ int main(int argc, char** argv) {
         handler_calls_terminate();
     } else if (std::strcmp(mode, "no_exception") == 0) {
         terminate_without_exception();
+    } else if (std::strcmp(mode, "thread") == 0) {
+        thread_function_throws();
     } else {
         std::fprintf(stderr, "unknown mode: %s\n", mode);
         return 2;
