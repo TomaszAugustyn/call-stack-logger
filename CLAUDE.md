@@ -657,7 +657,13 @@ the bridge between the two files is the internal `include/exceptionEvents.h`).
   the `what()` of the thrown object (`typeid(std::exception).__do_catch(type,
   &object, 1)` — libstdc++'s own handler-matching virtual — adjusts the pointer
   to the `std::exception` subobject correctly under multiple inheritance, then
-  `what()`, which is `noexcept`), sanitized into a stack buffer. `__cxa_rethrow`:
+  `what()`, which is `noexcept`), sanitized into a stack buffer. The `what()`
+  call runs under the re-entrancy guard (`TracerScope`, built on the
+  `enter_no_instrument_scope()` / `exit_no_instrument_scope()` pair declared in
+  `exceptionEvents.h`): an override compiled with instrumentation, and whatever
+  it calls, would otherwise write a trace line attributed to `exceptions.cpp`
+  on every throw and every catch. Pinned by
+  `LogExceptionsTest.InstrumentedWhatOverrideLeavesNoLinesOfItsOwn`. `__cxa_rethrow`:
   `abi::__cxa_current_exception_type()`, no text. `std::rethrow_exception`:
   `exception_ptr::__cxa_exception_type()`, no text (the object is private to
   `exception_ptr`), suffix "via std::rethrow_exception". `__cxa_begin_catch`:

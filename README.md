@@ -486,7 +486,9 @@ frames that returned normally keep `|_`.
   and, when that type derives from `std::exception`, its `what()` text. Control
   characters in the text become spaces and a text longer than 127 bytes is cut
   with `...`, so one event stays on one line. A `throw 42;` shows `throw int`
-  with no text.
+  with no text. The tracer's own calls to `what()` leave no trace lines, even
+  when `what()` is an override compiled with instrumentation; only the
+  program's calls to it are traced.
 - **Site.** `thrown at`, `rethrown at` and `caught at` are resolved exactly like
   `called from`: file and line of the statement (the `catch` clause's line for a
   catch). A throw born inside libstdc++ (`vector::at`, `new` failing) or inside a

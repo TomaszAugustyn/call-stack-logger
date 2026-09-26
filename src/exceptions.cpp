@@ -116,6 +116,19 @@ void sanitizer_no_return() {
     }
 }
 
+// RAII: while alive, the calling thread counts as inside the tracer, so the
+// hooks stay silent. The interposers hold one around their calls into the
+// program's own code — the thrown object's what(), possibly an override the
+// program compiled with instrumentation, whose enter hook would otherwise write
+// a line attributed to this file for every throw and catch.
+struct TracerScope {
+    bool previous;
+    NO_INSTRUMENT TracerScope() : previous(instrumentation::enter_no_instrument_scope()) {}
+    NO_INSTRUMENT ~TracerScope() { instrumentation::exit_no_instrument_scope(previous); }
+    TracerScope(const TracerScope&) = delete;
+    TracerScope& operator=(const TracerScope&) = delete;
+};
+
 // The what() text of a thrown object of dynamic type `type`, or null when the
 // type does not derive from std::exception. Asks libstdc++'s own handler-matching
 // virtual whether a `catch (std::exception&)` would catch `type`: on success it
@@ -270,7 +283,11 @@ extern "C" NO_INSTRUMENT __attribute__((noreturn)) void cslg_cxa_throw(void* obj
     }
     if (!inside_tracer() && !t_terminating) {
         char buffer[utils::WHAT_TEXT_CAPACITY];
-        const char* what = sanitized_what(std_exception_what(type, object), buffer);
+        const char* what = nullptr;
+        {
+            TracerScope inside; // what() may be the program's own instrumented override
+            what = sanitized_what(std_exception_what(type, object), buffer);
+        }
         on_throw(ThrowKind::primary, type, what, static_cast<const char*>(__builtin_return_address(0)) - 1);
     }
     sanitizer_no_return();
@@ -328,6 +345,7 @@ extern "C" NO_INSTRUMENT void* cslg_cxa_begin_catch(void* exception_object) noex
         const char* what = nullptr;
         if (is_native_primary_exception(exception_object)) {
             void* thrown = static_cast<char*>(exception_object) + sizeof(_Unwind_Exception);
+            TracerScope inside; // see cslg_cxa_throw
             what = sanitized_what(std_exception_what(type, thrown), buffer);
         }
         const void* return_address = __builtin_return_address(0);

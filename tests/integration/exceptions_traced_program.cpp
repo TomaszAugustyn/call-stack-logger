@@ -251,6 +251,26 @@ NOINLINE void exc_marker_m() {
     std::puts("exc_marker_m");
 }
 
+// --- N. an exception type whose what() is an instrumented override ---
+// The tracer calls what() for the throw and catch lines; the override and the
+// helper it calls are instrumented like everything else here, and those calls
+// must leave no lines of their own — only the handler's own e.what() is traced.
+
+NOINLINE const char* exc_custom_text() {
+    return "custom what";
+}
+
+struct ExcCustom : std::runtime_error {
+    using std::runtime_error::runtime_error;
+    NOINLINE const char* what() const noexcept override { return exc_custom_text(); }
+};
+
+NOINLINE void exc_custom_what() {
+    try {
+        REPORT_LINE("THROW_N"); throw ExcCustom("ignored text");
+    } catch (const std::exception& e) { REPORT_LINE("CATCH_N"); std::puts(e.what()); }
+}
+
 // --- L. an exception caught inside a worker thread (its own trace file) ---
 
 NOINLINE void exc_thread_thrower() {
@@ -289,6 +309,7 @@ int main() {
     exc_void_rec(3);
     exc_vla_host();
     exc_marker_m();
+    exc_custom_what();
     exc_messages();
     std::thread worker([] {
         exc_thread_body();

@@ -23,6 +23,14 @@
 #endif
 
 namespace instrumentation {
+
+// Save-set / restore the per-thread re-entrancy guard the hooks consult (defined
+// in trace.cpp; the same pair the public API entry points in callStack.cpp use).
+// The interposers hold it while they call into the program — a what() override
+// may be instrumented — so those calls leave no trace lines of their own.
+NO_INSTRUMENT bool enter_no_instrument_scope();
+NO_INSTRUMENT void exit_no_instrument_scope(bool previous);
+
 namespace events {
 
 enum class ThrowKind {

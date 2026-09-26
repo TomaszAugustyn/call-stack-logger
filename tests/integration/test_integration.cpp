@@ -2667,6 +2667,21 @@ TEST_F(LogExceptionsTest, CatchInAVariableSizeFrameKeepsTheCatcherAlive) {
     }
 }
 
+// The tracer reads the thrown object's what() for the throw and catch lines.
+// An instrumented what() override (and the helper it calls) must leave no lines
+// of its own: the only traced call is the handler's own e.what().
+TEST_F(LogExceptionsTest, InstrumentedWhatOverrideLeavesNoLinesOfItsOwn) {
+    ASSERT_FALSE(unique_event_line(trace_lines, "!! throw ExcCustom \"custom what\"").empty()) << trace_content;
+    ASSERT_FALSE(unique_event_line(trace_lines, "!! catch ExcCustom \"custom what\"").empty()) << trace_content;
+    const auto what_lines = lines_of(trace_lines, "ExcCustom::what()");
+    ASSERT_EQ(what_lines.size(), 1u) << "what() must be traced only where the program calls it:\n" << trace_content;
+    EXPECT_NE(what_lines[0].find("exceptions_traced_program.cpp:" + std::to_string(site_lines["CATCH_N"]) + ")"),
+              std::string::npos) << what_lines[0];
+    EXPECT_EQ(lines_of(trace_lines, "exc_custom_text()").size(), 1u) << trace_content;
+    EXPECT_EQ(trace_content.find("src/exceptions.cpp"), std::string::npos)
+            << "a call attributed to the tracer's own source:\n" << trace_content;
+}
+
 // With LOG_ELAPSED an event line carries its column word instead of a duration.
 TEST_F(LogExceptionsElapsedTest, EventLinesCarryTheirColumnWord) {
     for (const auto& line : event_lines(trace_lines, "throw")) {
