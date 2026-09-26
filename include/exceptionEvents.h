@@ -46,6 +46,19 @@ enum class TerminateReason {
     terminate_called,  // std::terminate() was called (by the program or by the runtime)
 };
 
+// How an event names its exception: the type_info of an exception the C++
+// runtime threw (`info`; null when the runtime knows none), or — for an
+// exception it did not throw, which the interposers recognize by the class
+// its _Unwind_Exception carries — a `label` saying what it was:
+// "(forced unwind)" for the unwinding that pthread_cancel and pthread_exit
+// perform, which a catch(...) handler sees and rethrows like an exception,
+// "(foreign exception)" for one of another language runtime. A label takes
+// precedence over the type_info on the line.
+struct EventType {
+    const std::type_info* info = nullptr;
+    const char* label = nullptr;
+};
+
 // True while the calling thread is inside the tracer (a hook, a public API
 // entry point, or the exit-time windows where tracing is off). The interposers
 // then forward to the runtime without logging: the tracer's own exceptions and
@@ -53,12 +66,12 @@ enum class TerminateReason {
 NO_INSTRUMENT
 bool inside_tracer();
 
-// Records a throw event as a child of the innermost logged frame. `type` is the
-// thrown type (null when unknown), `what` its sanitized what() text or null,
-// `site` an address INSIDE the throwing instruction (the interposer's return
-// address minus one), resolved to file:line like a call site.
+// Records a throw event as a child of the innermost logged frame. `what` is the
+// exception's sanitized what() text or null, `site` an address INSIDE the
+// throwing instruction (the interposer's return address minus one), resolved
+// to file:line like a call site.
 NO_INSTRUMENT
-void on_throw(ThrowKind kind, const std::type_info* type, const char* what, const void* site);
+void on_throw(ThrowKind kind, EventType type, const char* what, const void* site);
 
 // Records a catch: first reclaims the records of every frame the exception
 // unwound (they lie below the catcher's level, see frameReconcile.h), marking
@@ -74,17 +87,17 @@ void on_throw(ThrowKind kind, const std::type_info* type, const char* what, cons
 // landing pads call — and a terminate line was written instead: the caller
 // then treats the thread as terminating.
 NO_INSTRUMENT
-bool on_catch(const std::type_info* type, const char* what, bool dependent, const void* wrapper_site,
+bool on_catch(EventType type, const char* what, bool dependent, const void* wrapper_site,
               const void* wrapper_frame);
 
 // Records that the program is terminating: a "terminate" line under the
 // innermost logged frame, labeled by `reason`. `type` is the exception being
-// handled (null when there is none), `what` its sanitized text or null (then
+// handled (none when there is none), `what` its sanitized text or null (then
 // read from the current exception here), `site` an address inside the
 // std::terminate() call for `terminate_called`, null otherwise. Nothing else
 // is traced on the thread afterwards.
 NO_INSTRUMENT
-void on_terminate(TerminateReason reason, const std::type_info* type, const char* what, const void* site);
+void on_terminate(TerminateReason reason, EventType type, const char* what, const void* site);
 
 // Called once from trace_begin(): checks that the tracer's definitions of the
 // five runtime entry points are the active ones in this process and can forward

@@ -31,9 +31,11 @@
 #include <csetjmp>
 #include <cstdio>
 #include <exception>
+#include <pthread.h>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #define NOINLINE __attribute__((noinline))
@@ -271,6 +273,29 @@ NOINLINE void exc_custom_what() {
     } catch (const std::exception& e) { REPORT_LINE("CATCH_N"); std::puts(e.what()); }
 }
 
+// --- P. a thread cancelled inside a try block whose catch(...) rethrows ---
+// pthread_cancel unwinds the thread with a forced unwind: libstdc++ lets a
+// catch(...) handler see it as an exception (and requires the handler to
+// rethrow), but the C++ runtime never threw it and names no type for it. The
+// events must say what it was instead of calling it unknown. The worker is a
+// plain pthread so that no std::thread wrapper takes part.
+
+NOINLINE void exc_cancel_body() {
+    try {
+        for (;;) {
+            pthread_testcancel();
+            usleep(1'000);
+        }
+    } catch (...) { REPORT_LINE("CATCH_P");
+        REPORT_LINE("RETHROW_P"); throw;
+    }
+}
+
+void* exc_cancel_worker(void*) {
+    exc_cancel_body();
+    return nullptr;
+}
+
 // --- L. an exception caught inside a worker thread (its own trace file) ---
 
 NOINLINE void exc_thread_thrower() {
@@ -316,6 +341,12 @@ int main() {
         exc_thread_marker();
     });
     worker.join();
+    pthread_t cancelled;
+    if (pthread_create(&cancelled, nullptr, exc_cancel_worker, nullptr) == 0) {
+        usleep(20'000); // let the worker reach its loop before the request
+        pthread_cancel(cancelled);
+        pthread_join(cancelled, nullptr);
+    }
     exc_final_marker();
     return 0;
 }

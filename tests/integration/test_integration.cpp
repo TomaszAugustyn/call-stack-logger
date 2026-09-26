@@ -2115,9 +2115,11 @@ TEST(ChdirTest, RelativeOutputPathIsAnchoredToStartupDirectory) {
 namespace {
 
 // Runs one of the LOG_EXCEPTIONS variants of the driver in a fresh directory
-// (it spawns a worker thread, so a second trace file appears), captures its
-// stdout and parses the "<TAG>=<line>" pairs the driver prints for its throw
-// and catch sites.
+// (it spawns worker threads, so more trace files appear), captures its stdout
+// and parses the "<TAG>=<line>" pairs the driver prints for its throw and
+// catch sites. `worker_content` / `worker_lines` are the file of the thread
+// that catches an exception of its own (scenario L); the other workers' files
+// are reached through worker_lines_with().
 class LogExceptionsRunner : public ::testing::Test {
 protected:
     std::string dir;
@@ -2125,6 +2127,8 @@ protected:
     std::vector<std::string> trace_lines;
     std::string worker_content;
     std::vector<std::string> worker_lines;
+    // Every worker file's lines, by file name.
+    std::map<std::string, std::vector<std::string>> worker_files;
     std::map<std::string, int> site_lines;
 
     void run_driver(const char* program_path) {
@@ -2145,8 +2149,12 @@ protected:
 
         for (const auto& name : list_files_in(dir)) {
             if (name.rfind("trace.out_tid_", 0) == 0) {
-                worker_content = read_file(dir + "/" + name);
-                worker_lines = split_lines(worker_content);
+                const std::string content = read_file(dir + "/" + name);
+                worker_files[name] = split_lines(content);
+                if (content.find("exc_thread_body") != std::string::npos) {
+                    worker_content = content;
+                    worker_lines = worker_files[name];
+                }
             }
         }
 
@@ -2166,6 +2174,17 @@ protected:
         if (!dir.empty()) {
             remove_dir_tree(dir);
         }
+    }
+
+    // The lines of the worker file that mentions `needle` (empty when none does).
+    const std::vector<std::string>& worker_lines_with(const std::string& needle) const {
+        static const std::vector<std::string> none;
+        for (const auto& [name, lines] : worker_files) {
+            for (const auto& line : lines) {
+                if (line.find(needle) != std::string::npos) return lines;
+            }
+        }
+        return none;
     }
 
     // Depth of the unique entry line naming `function` (-1 when missing or ambiguous).
@@ -2682,6 +2701,27 @@ TEST_F(LogExceptionsTest, InstrumentedWhatOverrideLeavesNoLinesOfItsOwn) {
     EXPECT_EQ(lines_of(trace_lines, "exc_custom_text()").size(), 1u) << trace_content;
     EXPECT_EQ(trace_content.find("src/exceptions.cpp"), std::string::npos)
             << "a call attributed to the tracer's own source:\n" << trace_content;
+}
+
+// A thread cancelled inside a try block: pthread_cancel's forced unwind runs
+// the catch(...) handler and its rethrow like an exception, but the C++ runtime
+// never threw it and has no type for it. The events say what it was, at the
+// handler's exact lines, in the cancelled thread's own file.
+TEST_F(LogExceptionsTest, ForcedUnwindOfACancelledThreadIsLabeledAtItsCatchAndRethrow) {
+    const std::vector<std::string>& lines = worker_lines_with("exc_cancel_body");
+    ASSERT_FALSE(lines.empty()) << "no trace file of the cancelled worker";
+    std::string content;
+    for (const auto& line : lines) content += line + "\n";
+    const std::string c = unique_event_line(lines, "!! catch (forced unwind)  (caught at: ");
+    ASSERT_FALSE(c.empty()) << content;
+    EXPECT_NE(c.find(":" + std::to_string(site_lines["CATCH_P"]) + ")"), std::string::npos) << c;
+    EXPECT_EQ(count_indentation_depth(c), 2) << "a child of exc_cancel_body:\n" << c;
+    const std::string r = unique_event_line(lines, "!! rethrow (forced unwind)  (rethrown at: ");
+    ASSERT_FALSE(r.empty()) << content;
+    EXPECT_NE(r.find(":" + std::to_string(site_lines["RETHROW_P"]) + ")"), std::string::npos) << r;
+    EXPECT_EQ(count_indentation_depth(r), 2) << r;
+    EXPECT_EQ(content.find("<unknown type>"), std::string::npos) << content;
+    EXPECT_EQ(depth_of(lines, "exc_cancel_body"), 1) << content;
 }
 
 // With LOG_ELAPSED an event line carries its column word instead of a duration.

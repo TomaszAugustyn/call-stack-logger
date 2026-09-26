@@ -688,10 +688,20 @@ the bridge between the two files is the internal `include/exceptionEvents.h`).
   nothing is logged for that rethrow). The exception class is compared
   as the 64-bit INTEGER libstdc++ builds from "GNUCC++" + 0 / 1 — its bytes are
   reversed in memory on little-endian machines, a byte comparison never matches
-  (the first attempt's bug). The site passed to trace.cpp is the interposer's
-  return address minus one, resolved by the new `instrumentation::resolve_site()`
-  (the location half of `resolve_no_unwind`, same caches, same lock order) and
-  the type name by `instrumentation::demangle_symbol()`.
+  (the first attempt's bug). An exception object whose class is neither of the
+  two was not thrown by the C++ runtime: the interposers label it instead of a
+  type (`events::EventType`, a type_info or a label) — `(forced unwind)` for a
+  class of 0, which is what glibc's `pthread_cancel` / `pthread_exit` unwind
+  with (libstdc++ lets `catch(...)` see and rethrow it, naming no type), and
+  `(foreign exception)` for any other class. `__cxa_rethrow` has no object at
+  hand, so the catch interposer keeps the label of the last catch in
+  `t_last_caught_label` for the rethrow line, which consumes it. Pinned by
+  `LogExceptionsTest.ForcedUnwindOfACancelledThreadIsLabeledAtItsCatchAndRethrow`
+  (a plain pthread worker cancelled inside a try block). The site passed to
+  trace.cpp is the interposer's return address minus one, resolved by the new
+  `instrumentation::resolve_site()` (the location half of `resolve_no_unwind`,
+  same caches, same lock order) and the type name by
+  `instrumentation::demangle_symbol()`.
 - **Terminate.** Three detectors, each writing one terminate line
   (`events::on_terminate` with a `TerminateReason`) and setting the per-thread
   `t_terminating` flag first, so that the terminate handler's own rethrow and

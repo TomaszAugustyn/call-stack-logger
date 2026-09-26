@@ -535,6 +535,14 @@ frames that returned normally keep `|_`.
   way but was not caught first, which older compilers do for `noexcept`
   violations. The terminate handler's own rethrow and catch, which the default
   one does to print its message, are not traced.
+- **Cancellation and foreign exceptions.** `pthread_cancel` and `pthread_exit`
+  unwind the thread with a forced unwind, which a `catch (...)` handler sees
+  like an exception and must rethrow; the C++ runtime never threw it and has
+  no type for it, so its lines read `!! catch (forced unwind)` and
+  `!! rethrow (forced unwind)`. An exception of another language runtime
+  passing through C++ frames reads `(foreign exception)`. The frames such an
+  unwind leaves show as left by an exception where their exit hooks ran (GCC)
+  and stay unmarked on Clang, whose thread ends before another hook runs.
 - **With `LOG_ELAPSED`** the duration column of an event line holds a word
   instead of a duration: `[  throw   ]`, `[ rethrow  ]`, `[  catch   ]`,
   `[ terminate]`. **With `LOG_ADDR`** the address column holds the event's site

@@ -1155,20 +1155,23 @@ constexpr const char* EVENT_COLUMN_TERMINATE = "";
 // Demangled exception type names, memoized per type_info (demangling allocates
 // and costs microseconds; a program throws the same few types over and over).
 // Leaked like the resolver's caches; its own small mutex since events are rare.
+// An exception the runtime did not throw carries a label instead of a type.
 NO_INSTRUMENT
-const std::string& exception_type_name(const std::type_info* type) {
-    static const std::string unknown("<unknown type>");
-    if (type == nullptr) {
-        return unknown;
+const char* exception_type_name(const instrumentation::events::EventType& type) {
+    if (type.label != nullptr) {
+        return type.label;
+    }
+    if (type.info == nullptr) {
+        return "<unknown type>";
     }
     static std::mutex* const mutex = new std::mutex;
     static auto* const cache = new std::unordered_map<const std::type_info*, std::string>();
     std::lock_guard<std::mutex> lock(*mutex);
-    auto it = cache->find(type);
+    auto it = cache->find(type.info);
     if (it == cache->end()) {
-        it = cache->emplace(type, instrumentation::demangle_symbol(type->name())).first;
+        it = cache->emplace(type.info, instrumentation::demangle_symbol(type.info->name())).first;
     }
-    return it->second;
+    return it->second.c_str();
 }
 
 // The resolved location of an event's site: an address inside the throwing,
@@ -1243,7 +1246,7 @@ bool inside_tracer() {
 }
 
 NO_INSTRUMENT
-void on_throw(ThrowKind kind, const std::type_info* type, const char* what, const void* site) {
+void on_throw(ThrowKind kind, EventType type, const char* what, const void* site) {
     if (t_in_instrumentation) {
         return;
     }
@@ -1254,7 +1257,7 @@ void on_throw(ThrowKind kind, const std::type_info* type, const char* what, cons
     t_in_instrumentation = true;
     try {
         const EventSite at = resolve_event_site(site);
-        const char* type_name = exception_type_name(type).c_str();
+        const char* type_name = exception_type_name(type);
         switch (kind) {
         case ThrowKind::primary:
             write_event_line("throw", "thrown at", "", EVENT_COLUMN_THROW, type_name, what, at);
@@ -1306,7 +1309,7 @@ constexpr const char* CLANG_TERMINATE_STUB = "__clang_call_terminate";
 } // namespace
 
 NO_INSTRUMENT
-void on_terminate(TerminateReason reason, const std::type_info* type, const char* what, const void* site) {
+void on_terminate(TerminateReason reason, EventType type, const char* what, const void* site) {
     if (t_in_instrumentation) {
         return;
     }
@@ -1315,7 +1318,7 @@ void on_terminate(TerminateReason reason, const std::type_info* type, const char
     try {
         const EventSite at = resolve_event_site(site);
         const char* label = "no handler found";
-        const char* type_name = exception_type_name(type).c_str();
+        const char* type_name = exception_type_name(type);
         char buffer[utils::WHAT_TEXT_CAPACITY];
         switch (reason) {
         case TerminateReason::no_handler:
@@ -1325,7 +1328,7 @@ void on_terminate(TerminateReason reason, const std::type_info* type, const char
             break;
         case TerminateReason::terminate_called:
             label = "std::terminate called at";
-            if (type == nullptr) {
+            if (type.info == nullptr && type.label == nullptr) {
                 // Nothing is being handled: either a plain std::terminate() call, or
                 // an exception still in flight that the caller did not catch first
                 // (a noexcept violation compiled by GCC before 13).
@@ -1333,7 +1336,7 @@ void on_terminate(TerminateReason reason, const std::type_info* type, const char
             }
             break;
         }
-        if (type != nullptr && what == nullptr) {
+        if (type.info != nullptr && what == nullptr) {
             // A dependent exception, or a std::terminate() call: the interposer had
             // no object to read; the exception being handled is the one to name.
             what = current_exception_what(buffer);
@@ -1346,7 +1349,7 @@ void on_terminate(TerminateReason reason, const std::type_info* type, const char
 }
 
 NO_INSTRUMENT
-bool on_catch(const std::type_info* type, const char* what, bool dependent, const void* wrapper_site,
+bool on_catch(EventType type, const char* what, bool dependent, const void* wrapper_site,
               const void* wrapper_frame) {
     if (t_in_instrumentation) {
         return false;
@@ -1356,7 +1359,7 @@ bool on_catch(const std::type_info* type, const char* what, bool dependent, cons
     t_in_instrumentation = true;
     try {
         const EventSite at = resolve_event_site(static_cast<const char*>(wrapper_site) - 1);
-        const char* type_name = exception_type_name(type).c_str();
+        const char* type_name = exception_type_name(type);
         char buffer[utils::WHAT_TEXT_CAPACITY];
         if (dependent && what == nullptr) {
             what = current_exception_what(buffer);

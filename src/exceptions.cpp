@@ -48,6 +48,7 @@
 
 namespace {
 
+using instrumentation::events::EventType;
 using instrumentation::events::inside_tracer;
 using instrumentation::events::on_catch;
 using instrumentation::events::on_terminate;
@@ -192,6 +193,27 @@ bool is_native_dependent_exception(const void* exception_object) {
     return exception_class(exception_object) == DEPENDENT_EXCEPTION_CLASS;
 }
 
+// The label of an exception the C++ runtime did not throw (see EventType), or
+// null for a native one. glibc's pthread_cancel and pthread_exit unwind the
+// thread with a forced unwind whose _Unwind_Exception carries a class of 0;
+// libstdc++ lets a catch(...) handler see and rethrow it as if it were an
+// exception, with no type_info to name. Any other class is an exception of
+// another language runtime passing through C++ frames.
+NO_INSTRUMENT
+const char* foreign_exception_label(const void* exception_object) {
+    const _Unwind_Exception_Class cls = exception_class(exception_object);
+    if (cls == PRIMARY_EXCEPTION_CLASS || cls == DEPENDENT_EXCEPTION_CLASS) {
+        return nullptr;
+    }
+    return cls == 0 ? "(forced unwind)" : "(foreign exception)";
+}
+
+// The label of the exception this thread caught last, null for a native one.
+// A `throw;` rethrows the exception being handled, and for one the runtime did
+// not throw, __cxa_current_exception_type() has nothing to say: the rethrow
+// line takes its label from here instead. Consumed by that rethrow.
+thread_local const char* t_last_caught_label = nullptr;
+
 // The code range [begin, end) of one function of the C++ runtime, from its
 // dynamic symbol's size; empty when the function is not found.
 struct CodeRange {
@@ -288,7 +310,8 @@ extern "C" NO_INSTRUMENT __attribute__((noreturn)) void cslg_cxa_throw(void* obj
             TracerScope inside; // what() may be the program's own instrumented override
             what = sanitized_what(std_exception_what(type, object), buffer);
         }
-        on_throw(ThrowKind::primary, type, what, static_cast<const char*>(__builtin_return_address(0)) - 1);
+        on_throw(ThrowKind::primary, EventType{ type, nullptr }, what,
+                 static_cast<const char*>(__builtin_return_address(0)) - 1);
     }
     sanitizer_no_return();
     real(object, type, destructor);
@@ -303,8 +326,12 @@ extern "C" NO_INSTRUMENT __attribute__((noreturn)) void cslg_cxa_rethrow() {
     if (!inside_tracer() && !t_terminating) {
         // `throw;` rethrows the exception being handled: its type is known, its
         // object is not reachable through public interfaces (the catch line
-        // that follows names the what() again).
-        on_throw(ThrowKind::rethrow, abi::__cxa_current_exception_type(), nullptr,
+        // that follows names the what() again). No type means the handled
+        // exception is one the runtime did not throw, labeled at its catch.
+        const std::type_info* type = abi::__cxa_current_exception_type();
+        const char* label = type == nullptr ? t_last_caught_label : nullptr;
+        t_last_caught_label = nullptr;
+        on_throw(ThrowKind::rethrow, EventType{ type, label }, nullptr,
                  static_cast<const char*>(__builtin_return_address(0)) - 1);
     }
     sanitizer_no_return();
@@ -323,7 +350,7 @@ extern "C" NO_INSTRUMENT __attribute__((noreturn)) void cslg_rethrow_exception(s
     #else
         const std::type_info* type = nullptr;
     #endif
-        on_throw(ThrowKind::exception_ptr, type, nullptr,
+        on_throw(ThrowKind::exception_ptr, EventType{ type, nullptr }, nullptr,
                  static_cast<const char*>(__builtin_return_address(0)) - 1);
     }
     sanitizer_no_return();
@@ -340,13 +367,14 @@ extern "C" NO_INSTRUMENT void* cslg_cxa_begin_catch(void* exception_object) noex
     // __cxa_current_exception_type() names it, whatever kind of exception it is.
     void* const handler_object = real(exception_object);
     if (!inside_tracer() && !t_terminating) {
-        const std::type_info* type = abi::__cxa_current_exception_type();
+        const EventType type{ abi::__cxa_current_exception_type(), foreign_exception_label(exception_object) };
+        t_last_caught_label = type.label;
         char buffer[utils::WHAT_TEXT_CAPACITY];
         const char* what = nullptr;
         if (is_native_primary_exception(exception_object)) {
             void* thrown = static_cast<char*>(exception_object) + sizeof(_Unwind_Exception);
             TracerScope inside; // see cslg_cxa_throw
-            what = sanitized_what(std_exception_what(type, thrown), buffer);
+            what = sanitized_what(std_exception_what(type.info, thrown), buffer);
         }
         const void* return_address = __builtin_return_address(0);
         TerminateReason reason;
@@ -375,8 +403,8 @@ extern "C" NO_INSTRUMENT __attribute__((noreturn)) void cslg_terminate() {
     }
     if (!inside_tracer() && !t_terminating) {
         t_terminating = true;
-        on_terminate(TerminateReason::terminate_called, abi::__cxa_current_exception_type(), nullptr,
-                     static_cast<const char*>(__builtin_return_address(0)) - 1);
+        on_terminate(TerminateReason::terminate_called, EventType{ abi::__cxa_current_exception_type(), nullptr },
+                     nullptr, static_cast<const char*>(__builtin_return_address(0)) - 1);
     }
     real();
     __builtin_unreachable();
