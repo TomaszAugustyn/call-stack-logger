@@ -1600,6 +1600,33 @@ TEST(LogElapsedDefaultBuildTest, NoDurationFieldWithoutFlag) {
 #endif
 }
 
+// Negative test: the DEFAULT build (no LOG_EXCEPTIONS) neither traces exception
+// events nor marks the lines of the frames an exception left — the interposers
+// and the in-place marks exist only with the option. The exception driver
+// throws and catches through instrumented frames; its trace must show plain
+// call lines only. Guards against the option accidentally becoming always-on,
+// like the LOG_ADDR / LOG_ELAPSED negative tests. Skipped when the build was
+// configured with -DLOG_EXCEPTIONS=ON.
+TEST(LogExceptionsDefaultBuildTest, NoEventLinesOrMarksWithoutFlag) {
+#ifdef CSLG_DEFAULT_HAS_LOG_EXCEPTIONS
+    GTEST_SKIP() << "Skipped: configured with -DLOG_EXCEPTIONS=ON, so the default "
+                    "callstacklogger target also defines LOG_EXCEPTIONS.";
+#else
+    std::string content = run_and_capture_trace(EXCEPTION_TRACED_PROGRAM_PATH);
+    ASSERT_FALSE(content.empty()) << "trace file is empty";
+    ASSERT_NE(content.find("exception_thrower"), std::string::npos)
+            << "the driver's throw did not run. Trace:\n" << content;
+    EXPECT_EQ(content.find("!! "), std::string::npos)
+            << "Default build unexpectedly carries an exception event line — LOG_EXCEPTIONS "
+               "may be leaking into the default callstacklogger target.\n" << content;
+    for (const auto& line : split_lines(content)) {
+        const char glyph = tree_glyph_of(line);
+        EXPECT_TRUE(glyph == '\0' || glyph == '|')
+                << "Default build unexpectedly marked a frame's line:\n" << line;
+    }
+#endif
+}
+
 // Multi-run append: a second run appends past the first run's content, so the
 // per-thread byte cursor is seeded from lseek(SEEK_END) on a NON-empty file.
 // Every placeholder in BOTH runs must still be patched at the correct offset —

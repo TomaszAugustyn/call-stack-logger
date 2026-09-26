@@ -1377,7 +1377,11 @@ Test pure/deterministic functions from the include headers:
   pwrite never spills past its 12-byte window).
   `LogElapsedDefaultBuildTest.NoDurationFieldWithoutFlag` is a negative test
   on the default build (skipped when the build is configured with
-  `-DLOG_ELAPSED=ON`, via `CSLG_DEFAULT_HAS_LOG_ELAPSED`).
+  `-DLOG_ELAPSED=ON`, via `CSLG_DEFAULT_HAS_LOG_ELAPSED`);
+  `LogExceptionsDefaultBuildTest.NoEventLinesOrMarksWithoutFlag` is the same
+  kind of guard for `LOG_EXCEPTIONS`: the default-build exception driver's
+  trace must carry no `!! ` event line and no `!_` / `~_` mark (skipped via
+  `CSLG_DEFAULT_HAS_LOG_EXCEPTIONS`).
 - `LogElapsedCrashTest` (2 tests) — drives `cslg_crash_traced_program_log_elapsed`
   (built from `crash_traced_program.cpp` against the same
   `callstacklogger_log_elapsed` variant library): calls a helper that completes
