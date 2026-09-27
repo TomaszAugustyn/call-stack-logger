@@ -7,7 +7,7 @@ Call Stack Logger uses function instrumentation to facilitate logging of
 every function call. Each nesting adds an ident, whereas returning from a
 function removes it. As the result call stack tree is produced at the runtime
 giving knowledge of the actual program's flow of execution.
-## :seedling: Outcome ##
+## :seedling: Outcome (61s demo) ##
 
 ![Call Stack logger capture](misc/call-stack-logger-capture-new.gif)
 ## :book: Article ##
@@ -78,9 +78,9 @@ Both GCC and Clang use `-finstrument-functions` for user code. The `callstacklog
 itself is compiled without instrumentation flags (all its functions have the `NO_INSTRUMENT`
 attribute). Standard library exclusion differs by compiler:
 
-|                                    | GCC                                                       | Clang                                                      |
-| ---------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------- |
-| **Std library exclusion**          | Compile-time (`-finstrument-functions-exclude-file-list`) | Runtime (mangled name filter in `resolve_function_name()`) |
+|                                    | GCC                                                       | Clang                                                                                 |
+| ---------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **Std library exclusion**          | Compile-time (`-finstrument-functions-exclude-file-list`) | Runtime (mangled name filter in `resolve_function_name()`)                            |
 | **Exit hooks on exception unwind** | Emitted — the unwound frames' exits are traced            | **Not emitted** — the tracer reclaims the unwound frames at the next hook (see below) |
 
 GCC auto-discovers std library header paths and excludes them at compile time. Clang does
@@ -309,20 +309,20 @@ from the wrong file.
 
 ### CMake Options ###
 
-| Option                    | Default | Description                                                                                                                                 |
-| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LOG_ADDR`                | `OFF`   | Include function addresses in trace output                                                                                                  |
-| `LOG_ELAPSED`             | `OFF`   | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed).                        |
+| Option                    | Default | Description                                                                                                                                                                                                                                            |
+| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LOG_ADDR`                | `OFF`   | Include function addresses in trace output                                                                                                                                                                                                             |
+| `LOG_ELAPSED`             | `OFF`   | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed).                                                                                                                                   |
 | `LOG_EXCEPTIONS`          | `OFF`   | Trace every throw, rethrow, catch and terminate in the call tree and mark the lines of the frames an exception or a `longjmp` left. Needs the shared libstdc++. See [Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions). |
-| `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks                                                                                                   |
-| `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test). Honored only when Call Stack Logger is the top-level project, never when consumed via `add_subdirectory` / FetchContent. |
-| `COVERAGE`                | `OFF`   | Enable code coverage via GCC `--coverage` flag                                                                                              |
-| `SANITIZE`                | (empty) | Enable a sanitizer for all cslg-owned targets: `address`, `undefined`, `address+undefined`, or `thread`. See [Sanitizers](#bug-sanitizers). |
+| `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks                                                                                                                                                                                                              |
+| `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test). Honored only when Call Stack Logger is the top-level project, never when consumed via `add_subdirectory` / FetchContent.                                                                       |
+| `COVERAGE`                | `OFF`   | Enable code coverage via GCC `--coverage` flag                                                                                                                                                                                                         |
+| `SANITIZE`                | (empty) | Enable a sanitizer for all cslg-owned targets: `address`, `undefined`, `address+undefined`, or `thread`. See [Sanitizers](#bug-sanitizers).                                                                                                            |
 
 ### Environment Variables ###
 
-| Variable           | Default     | Description                                                                                                                                  |
-| ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Variable           | Default     | Description                                                                                                                                                                                                                                                                                               |
+| ------------------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CSLG_OUTPUT_FILE` | `trace.out` | Path to the trace output file for the main thread. Worker threads append `_tid_<gettid>` to this path (e.g., `/tmp/my_trace.out_tid_12345`). A relative path is resolved against the working directory at program start, so a later `chdir()` never splits one run's per-thread files across directories. |
 
 Example:
@@ -636,7 +636,7 @@ alignment while telling you how each frame ended:
 | ----- | ------------------------------------------------------------------------------------------------- |
 | `\|_` | Returned normally                                                                                 |
 | `!_`  | An exception left the frame (GCC runs the exit hook while the exception is in flight and sees it) |
-| `~_`  | The frame left without running its exit hook and no exception was in flight: `longjmp`           |
+| `~_`  | The frame left without running its exit hook and no exception was in flight: `longjmp`            |
 
 ```
 [25-09-2026 10:41:07.118] |_ exc_jump_root()  (called from: main.cpp:236)
@@ -649,14 +649,14 @@ With `LOG_ELAPSED` the duration field carries the same mark in its second byte,
 which every rendering of the field leaves blank otherwise, so the field keeps
 its width and its columns:
 
-| Field          | Meaning                                                                          |
-| -------------- | -------------------------------------------------------------------------------- |
-| `[   1.234ms]` | Returned normally after 1.234 ms                                                 |
-| `[!  1.234ms]` | Left by an exception after 1.234 ms (GCC measured it on the unwind path)         |
-| `[! unwound ]` | Left by an exception; no exit hook ran, so no duration exists (Clang, reclaimed at the catch) |
-| `[~ unwound ]` | Skipped by `longjmp`; no exit hook ran, so no duration exists                    |
-| `[  pending ]` | Still running: the program crashed, called `exit()`, or the line was never patched |
-| `[  throw   ]` `[ rethrow  ]` `[  catch   ]` `[ terminate]` | An event line, see above                            |
+| Field                                                       | Meaning                                                                                       |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `[   1.234ms]`                                              | Returned normally after 1.234 ms                                                              |
+| `[!  1.234ms]`                                              | Left by an exception after 1.234 ms (GCC measured it on the unwind path)                      |
+| `[! unwound ]`                                              | Left by an exception; no exit hook ran, so no duration exists (Clang, reclaimed at the catch) |
+| `[~ unwound ]`                                              | Skipped by `longjmp`; no exit hook ran, so no duration exists                                 |
+| `[  pending ]`                                              | Still running: the program crashed, called `exit()`, or the line was never patched            |
+| `[  throw   ]` `[ rethrow  ]` `[  catch   ]` `[ terminate]` | An event line, see above                                                                      |
 
 A line at depth 0 has no glyph, so only its duration field can carry the mark.
 
@@ -668,14 +668,14 @@ with the trace written to `/dev/null`. "Traced call" is one instrumented call
 of a leaf function; "throw + catch" is one `throw` caught two instrumented
 frames up, including those two calls.
 
-| Build type     | Options                       | Traced call | Throw + catch |
-| -------------- | ----------------------------- | ----------- | ------------- |
-| default (-O0)  | none                          | 2.72 µs     | 7.0 µs        |
-| default (-O0)  | `LOG_EXCEPTIONS`              | 2.76 µs     | 13.2 µs       |
-| default (-O0)  | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 6.0 µs   | 20.1 µs       |
-| RelWithDebInfo | none                          | 2.02 µs     | 5.4 µs        |
-| RelWithDebInfo | `LOG_EXCEPTIONS`              | 2.06 µs     | 10.4 µs       |
-| RelWithDebInfo | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 5.3 µs   | 17.0 µs       |
+| Build type     | Options                          | Traced call | Throw + catch |
+| -------------- | -------------------------------- | ----------- | ------------- |
+| default (-O0)  | none                             | 2.72 µs     | 7.0 µs        |
+| default (-O0)  | `LOG_EXCEPTIONS`                 | 2.76 µs     | 13.2 µs       |
+| default (-O0)  | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 6.0 µs      | 20.1 µs       |
+| RelWithDebInfo | none                             | 2.02 µs     | 5.4 µs        |
+| RelWithDebInfo | `LOG_EXCEPTIONS`                 | 2.06 µs     | 10.4 µs       |
+| RelWithDebInfo | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 5.3 µs      | 17.0 µs       |
 
 Keeping the tree exact after non-local exits runs in every build and is part
 of what the "none" rows measure: one level lookup in each hook (a direct-mapped

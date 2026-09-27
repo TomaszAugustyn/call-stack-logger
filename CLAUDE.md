@@ -896,7 +896,8 @@ call-stack-logger/
 |   |-- gif_generator/          # Rebuilds the demo GIF from the current codebase
 |       |-- README.md           # How to recapture inputs and render the GIF
 |       |-- capture_inputs.sh   # Rebuilds the demo and captures real cmake/make/trace output
-|       |-- render.py           # Renders VS Code-style frames and assembles the GIF
+|       |-- demo_source.py      # Derives each version of src/main.cpp the GIF types and builds
+|       |-- render.py           # Renders VS Code-style frames and encodes the GIF
 |       |-- .gitignore          # Ignores the generated inputs/ and out/ directories
 |-- .github/
     |-- workflows/

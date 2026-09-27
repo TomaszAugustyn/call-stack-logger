@@ -2,10 +2,11 @@
 """Regenerate the README demo GIF for call-stack-logger.
 
 Renders VS Code look-alike frames as HTML, screenshots them with headless
-Chrome, and assembles an animated GIF with ImageMagick. All pane content is
-real: the editor shows the repo's current src/main.cpp, the terminal shows
-captured cmake/make output, and the trace.out views show captured trace
-files (see inputs/ and capture_inputs.sh).
+Chrome, and encodes the animated GIF with ffmpeg. All pane content is
+real: the editor shows the repo's current src/main.cpp and the versions of it
+that demo_source.py derives for each moment of the story, the terminal shows
+captured cmake/make output, and the trace.out views show captured trace files
+(see inputs/ and capture_inputs.sh).
 
 Storyline:
   1. main.cpp opens WITHOUT class A and WITHOUT the fibonacci function.
@@ -16,26 +17,42 @@ Storyline:
   3. trace.out tab: the call tree of that intermediate build (short view).
   4. Back in the editor the fibonacci function and its fibonacci(6); call
      are typed in; the result is byte-identical to the real src/main.cpp,
-     so the main.cpp:NN line numbers in the final trace stay truthful.
+     so the main.cpp:NN line numbers in the trace stay truthful.
   5. Terminal: cmake -DLOG_ELAPSED=ON .. && make run is typed; before
      Enter a purple frame glow-pulses three times around -DLOG_ELAPSED=ON.
   6. trace.out tab: the full tree with the duration column; ~2 s in, a
-     purple rectangle glow-pulses three times around the column, then the
-     GIF loops.
+     purple rectangle glow-pulses three times around the column.
+  7. Back in the editor the exception demo is typed above main() (a throw
+     caught two frames up, a throw nobody catches), with a quick scroll
+     after exc_mid() so the rest is typed mid-screen. fibonacci(6) is
+     commented out and calls to both are typed right below it, before
+     print() and cube(), which therefore never run.
+  8. Terminal: cmake -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON .. && make run,
+     with a green frame glow-pulsing three times around the two options.
+     The demo ends in std::terminate, so make fails (real output).
+  9. trace.out tab: the tree with the exception events. The marks of the
+     caught exception glow green three times, then those of the uncaught
+     one, then the GIF loops.
 
 Usage:
   python3 render.py         # full render -> out/call-stack-logger-capture-new.gif
   python3 render.py test    # render landmark frames only -> out/testframes/
 
-If src/main.cpp is restructured, the STRUCTURE ASSERTS below fail with a
-message telling you which constants to update.
+The typed code and the scroll positions follow the anchors demo_source.py
+finds in src/main.cpp; asserts stop the render if a typed version ever
+differs from the version capture_inputs.sh built.
 """
+import concurrent.futures
 import html as html_mod
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+
+import demo_source
+from demo_source import EXC_CALLS, EXC_FUNCS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -47,10 +64,12 @@ W, H = 1200, 912
 TERM_COLS = 168          # terminal wrap width (14px Ubuntu Mono, 7px advance)
 TERM_MAX_ROWS = 11       # fewer than fit: leaves breathing room at the bottom
 CHUNK = 8                # frames per Chrome screenshot page
+WORKERS = min(6, os.cpu_count() or 1)  # Chrome instances rendering in parallel
 ED_ADV = 7.5             # editor char advance (15px Ubuntu Mono)
 ED_TOP = 46              # editor area top y
+ED_ROWS = 38             # editor lines in view (main.cpp)
 ROW17 = 17               # editor line height (main.cpp view)
-ROW16 = 16.25            # editor line height (trace.out view, 40 lines fit)
+ROW16 = 16               # editor line height (trace.out view, 40 lines fit)
 
 # ---------------------------------------------------------------- palette
 # Slightly darker than stock VS Code Dark+ (user preference).
@@ -69,6 +88,13 @@ SEG_LANG_BG = "#458588"   # color_blue — language modules (empty, arrow only)
 SEG_BG3 = "#665c54"       # color_bg3 — docker/conda (empty, arrow only)
 SEG_TIME_BG = "#3c3836"   # color_bg1 — time
 CHAR_GREEN = "#98971a"    # color_green — the ❯ prompt character
+CHAR_RED = "#cc241d"      # color_red — the ❯ after a command that failed
+
+# Glow highlights: purple for the LOG_ELAPSED act, green for LOG_EXCEPTIONS.
+RECT_COLOR = "#B15EDE"
+RECT_BORDER = 3          # px; duration-column frame
+GLOW_GREEN = "#00FA9A"
+GLOW_GREEN_RGB = (0x00, 0xFA, 0x9A)
 
 CSS = """
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -92,7 +118,7 @@ body { background:""" + BG + """; }
 .editor { position:absolute; top:46px; left:0; right:0; height:649px; overflow:hidden; }
 .eline { position:relative; height:17px; line-height:17px; font-size:15px;
          white-space:pre; color:#d4d4d4; }
-.eline16 { position:relative; height:16.25px; line-height:16.25px; font-size:15px;
+.eline16 { position:relative; height:%(row16)spx; line-height:%(row16)spx; font-size:15px;
            white-space:pre; color:#d4d4d4; }
 .ln { position:absolute; left:0; width:41px; text-align:right; color:#858585;
       font-size:13px; }
@@ -116,7 +142,8 @@ body { background:""" + BG + """; }
 .trow { height:14px; line-height:14px; font-size:14px; color:#cccccc; white-space:pre; }
 .tg{color:#23d18b;font-weight:bold} .tb{color:#3b8eea;font-weight:bold}
 .tyw{color:#f5f543}
-.parrow { color:""" + CHAR_GREEN + """; font-weight:bold; }
+.parrow { color:%(char_green)s; font-weight:bold; }
+.parrow-err { color:%(char_red)s; font-weight:bold; }
 .sg { display:inline-block; height:14px; line-height:14px; padding:0 7px;
       font-size:12.5px; vertical-align:top; }
 .nf { font-family:'FiraMono Nerd Font','Ubuntu Mono',monospace; font-size:11.5px; }
@@ -128,9 +155,9 @@ body { background:""" + BG + """; }
 .mouse { position:absolute; z-index:99; }
 .durrect { position:absolute; border:3px solid; border-radius:4px; z-index:50;
            box-shadow:0 0 9px 2px rgba(177,94,222,.5); }
-.cmdrect { position:absolute; border:3px solid #B15EDE; border-radius:4px;
-           z-index:60; box-shadow:0 0 8px 1px rgba(177,94,222,.55); }
-"""
+.cmdrect { position:absolute; border:3px solid; border-radius:4px; z-index:60; }
+.hl { border-radius:3px; }
+""" % {"row16": ROW16, "char_green": CHAR_GREEN, "char_red": CHAR_RED}
 
 ARROW_SVG = ("data:image/svg+xml;utf8,"
     "<svg xmlns='http://www.w3.org/2000/svg' width='12' height='19'>"
@@ -141,18 +168,17 @@ IBEAM_SVG = ("data:image/svg+xml;utf8,"
     "<path d='M1.5 1.5 H7.5 M4.5 1.5 V15.5 M1.5 15.5 H7.5' stroke='%23dcdcdc' "
     "stroke-width='1.5' fill='none'/></svg>")
 
-# Purple frames (glow highlights).
-RECT_COLOR = "#B15EDE"
-RECT_BORDER = 3          # px; duration-column frame
-DUR_CHAR_START = 26      # '[' of the 12-char duration field ("[ts] " = 26 chars)
+# Trace line layout: "[DD-MM-YYYY HH:MM:SS.mmm] " is 26 chars, then the
+# 12-char duration field, a space, and the tree.
+DUR_CHAR_START = 26      # '[' of the duration field
 DUR_CHAR_END = 38        # one past ']'
-DUR_ROW_FIRST = 5        # first trace line (after blank + 3 separator rows)
-DUR_ROW_LAST = 39        # last trace line with a duration
+TREE_START = DUR_CHAR_END + 1
+DUR_ROW_FIRST = 5        # first trace entry (after the blank + 3 header lines)
 
 # ---------------------------------------------------------------- highlighter
-KW = r"class|public|static|void|constexpr|unsigned|int|bool|auto|double|template|typename|inline|char|const"
-CTL = r"if|return|else"
-TY = r"A|B|std|vector|T|Types"
+KW = r"class|struct|public|static|void|constexpr|unsigned|int|bool|auto|double|template|typename|inline|char|const|volatile"
+CTL = r"if|return|else|try|catch|throw"   # keyword.control: purple in Dark+
+TY = r"A|B|std|vector|T|Types|ExcGuard|runtime_error|logic_error|exception"
 
 TOKEN_RE = re.compile(
     r'(?P<st>"(?:[^"\\]|\\.)*")'
@@ -160,7 +186,7 @@ TOKEN_RE = re.compile(
     r'|(?P<kw>\b(?:' + KW + r')\b)'
     r'|(?P<ctl>\b(?:' + CTL + r')\b)'
     r'|(?P<ty>\b(?:' + TY + r')\b)'
-    r'|(?P<fn>\b[A-Za-z_]\w*(?=\s*\())'
+    r'|(?P<fn>~?\b[A-Za-z_]\w*(?=\s*\())'
     r'|(?P<var>\b[A-Za-z_]\w*\b)'
 )
 
@@ -183,42 +209,14 @@ def cxx_hl(line):
     return "".join(out)
 
 # ---------------------------------------------------------------- real content
-MAIN_CPP = open(os.path.join(REPO, "src", "main.cpp")).read().rstrip("\n").split("\n")
+DEMO = demo_source.Demo(os.path.join(REPO, "src", "main.cpp"))
+MAIN_CPP = DEMO.full_version()
+INTERMEDIATE = DEMO.intermediate()
+EXCEPTIONS = DEMO.exceptions()
 
-# STRUCTURE ASSERTS — the typing scenes insert class A (lines 13-17 incl. the
-# leading blank), the A::foo() call in B::foo() (line 26), the A::foo() call
-# in main() (lines 51-52 incl. comment), the fibonacci function (lines 29-34
-# incl. the leading blank) and its call (lines 64-65 incl. comment). If
-# main.cpp is restructured, update these constants, the typing scenes in
-# build_frames(), and the line deletions in capture_inputs.sh.
-A_BLANK, A_FIRST, A_LAST = 13, 14, 17
-A_CALL_B = 26
-A_CALL_COMMENT, A_CALL_MAIN = 51, 52
-FIB_BLANK, FIB_FIRST, FIB_LAST = 29, 30, 34
-CALL_COMMENT, CALL_LINE = 64, 65
-assert MAIN_CPP[A_BLANK - 1] == "" and MAIN_CPP[A_FIRST - 1] == "class A {", \
-    "class A moved — update A_* constants"
-assert MAIN_CPP[A_LAST - 1] == "};", "class A closing moved"
-assert MAIN_CPP[A_CALL_B - 1].strip() == "A::foo();", "A::foo() call in B::foo() moved"
-assert MAIN_CPP[A_CALL_COMMENT - 1].lstrip().startswith("// Test logging static"), \
-    "A::foo() call comment in main() moved"
-assert MAIN_CPP[A_CALL_MAIN - 1].strip() == "A::foo();", "A::foo() call in main() moved"
-assert MAIN_CPP[FIB_BLANK - 1] == "", "expected blank line above fibonacci"
-assert MAIN_CPP[FIB_FIRST - 1].startswith("constexpr unsigned fibonacci"), \
-    "fibonacci signature moved — update FIB_* constants"
-assert MAIN_CPP[FIB_LAST - 1] == "}", "fibonacci closing brace moved"
-assert MAIN_CPP[CALL_COMMENT - 1].lstrip().startswith("// Test logging constexpr"), \
-    "fibonacci call comment moved — update CALL_* constants"
-assert MAIN_CPP[CALL_LINE - 1].strip() == "fibonacci(6);", "fibonacci call moved"
-
-# The file state after the class-A act but before the fibonacci act — must
-# match what capture_inputs.sh built for act1/act2.
-INTERMEDIATE = list(MAIN_CPP)
-del INTERMEDIATE[CALL_COMMENT - 1:CALL_LINE]
-del INTERMEDIATE[FIB_BLANK - 1:FIB_LAST]
-
-_INPUT_FILES = ("act1-cmake.txt", "act1-makerun.txt", "act3-cmake.txt",
-                "act3-makerun.txt", "act2-trace.txt", "act4-trace.txt")
+_INPUT_FILES = ("act1-cmake.txt", "act1-makerun.txt", "act2-trace.txt",
+                "act3-cmake.txt", "act3-makerun.txt", "act4-trace.txt",
+                "act5-cmake.txt", "act5-makerun.txt", "act6-trace.txt")
 _missing = [f for f in _INPUT_FILES
             if not os.path.exists(os.path.join(INPUTS, f))]
 if _missing:
@@ -229,10 +227,16 @@ def read_lines(p):
 
 ACT1_CMAKE = read_lines("act1-cmake.txt")
 ACT1_MAKERUN = read_lines("act1-makerun.txt")
+ACT2_TRACE = read_lines("act2-trace.txt")
 ACT3_CMAKE = read_lines("act3-cmake.txt")
 ACT3_MAKERUN = read_lines("act3-makerun.txt")
-ACT2_TRACE = read_lines("act2-trace.txt")
 ACT4_TRACE = read_lines("act4-trace.txt")
+ACT5_CMAKE = read_lines("act5-cmake.txt")
+ACT5_MAKERUN = read_lines("act5-makerun.txt")
+ACT6_TRACE = read_lines("act6-trace.txt")
+
+DUR_ROW_LAST = len(ACT4_TRACE)   # the purple rectangle ends at the last entry
+assert DUR_ROW_LAST * ROW16 + 3 <= 649, "LOG_ELAPSED trace too long for the view"
 
 def parse_clock(trace_lines):
     """HH:MM from the trace run separator — feeds the prompt's time segment."""
@@ -241,6 +245,67 @@ def parse_clock(trace_lines):
 
 CLOCK1 = parse_clock(ACT2_TRACE)
 CLOCK2 = parse_clock(ACT4_TRACE)
+CLOCK3 = parse_clock(ACT6_TRACE)
+
+# ---------------------------------------------------------------- exception marks
+# What the green glow picks out in the exceptions trace: a duration field
+# that is an event word, [  pending ] or carries the ! / ~ flag; the !_ / ~_
+# glyph of a frame an exception or a longjmp left; the !! keyword of an
+# event line.
+SPECIAL_FIELDS = {"[  pending ]", "[  throw   ]", "[ rethrow  ]", "[  catch   ]",
+                  "[ terminate]"}
+GLYPH_RE = re.compile(r"(?:\|  )*([!~]_) ")
+EVENT_RE = re.compile(r"!! (?:throw|rethrow|catch|terminate)\b")
+
+def special_spans(line):
+    spans = []
+    field = line[DUR_CHAR_START:DUR_CHAR_END]
+    if len(field) == 12 and field[0] == "[" and field[-1] == "]" and (
+            field in SPECIAL_FIELDS or field[1] in "!~"):
+        spans.append((DUR_CHAR_START, DUR_CHAR_END))
+    m = GLYPH_RE.match(line, TREE_START)
+    if m:
+        spans.append(m.span(1))
+    m = EVENT_RE.search(line, TREE_START)
+    if m:
+        spans.append(m.span())
+    return spans
+
+def trace_index(lines, needle, start=0):
+    for i in range(start, len(lines)):
+        if needle in lines[i]:
+            return i
+    raise SystemExit("render.py: %r not found in inputs/act6-trace.txt" % needle)
+
+def exception_highlights(lines):
+    """{group: {line index: spans}}. Group 1 is the caught exception
+    (exc_catcher's line through the catch line); group 2 the uncaught one
+    (uncaught_outer's line to the end, plus main's line, still pending)."""
+    g1 = trace_index(lines, "|_ exc_catcher()")
+    g1_end = trace_index(lines, "!! catch", g1)
+    g2 = trace_index(lines, "|_ uncaught_outer()")
+    groups = {1: range(g1, g1_end + 1),
+              2: [DUR_ROW_FIRST - 1] + list(range(g2, len(lines)))}
+    return {g: {i: special_spans(lines[i]) for i in rows if special_spans(lines[i])}
+            for g, rows in groups.items()}
+
+EXC_HL = exception_highlights(ACT6_TRACE)
+
+def hl_style(t):
+    """Neon green at intensity t (0..1): text color, glow and a faint pill."""
+    r, g, b = (round(0xD4 + (c - 0xD4) * t) for c in GLOW_GREEN_RGB)
+    return ("color:rgb(%d,%d,%d);text-shadow:0 0 %.1fpx rgba(0,250,154,%.2f);"
+            "background:rgba(0,250,154,%.3f)" % (r, g, b, 2 + 5 * t, 0.9 * t, 0.15 * t))
+
+def hl_html(text, spans, t):
+    style = hl_style(t)
+    out, pos = [], 0
+    for a, b in sorted(spans):
+        out.append(esc(text[pos:a]))
+        out.append('<span class="hl" style="%s">%s</span>' % (style, esc(text[a:b])))
+        pos = b
+    out.append(esc(text[pos:]))
+    return "".join(out)
 
 # ---------------------------------------------------------------- terminal model
 def wrap_row(spans, cols=TERM_COLS):
@@ -266,10 +331,11 @@ def plain_rows(lines):
         rows.extend(wrap_row([(None, ln)] if ln else [(None, "")]))
     return rows
 
-def prompt_block(modified, clock, typed="", cursor=False):
+def prompt_block(modified, clock, typed="", cursor=False, failed=False):
     """Starship-style prompt: blank line, segment bar, a spacer line (extra
-    readability so the glow frame never overlaps the bar), then the ❯ line."""
-    spans = [("parrow", "❯"), (None, " " + typed)]
+    readability so the glow frame never overlaps the bar), then the ❯ line.
+    The ❯ turns red after a command that failed, as Starship's error_symbol."""
+    spans = [("parrow-err" if failed else "parrow", "❯"), (None, " " + typed)]
     if cursor:
         spans.append(("CURSOR", ""))
     return ([[(None, "")], [("BAR", (modified, clock))], [(None, "")]]
@@ -300,17 +366,27 @@ def bar_html(modified, clock):
 
 CMD1 = "cmake .. && make run"
 CMD2 = "cmake -DLOG_ELAPSED=ON .. && make run"
+CMD3 = "cmake -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON .. && make run"
 OUT1 = plain_rows(ACT1_CMAKE + ACT1_MAKERUN)
 OUT2 = plain_rows(ACT3_CMAKE + ACT3_MAKERUN)
+OUT3 = plain_rows(ACT5_CMAKE + ACT5_MAKERUN)
 
-# Geometry of the glow frame around "-DLOG_ELAPSED=ON" in the typed command.
-# The input line is "<arrow><space><command>", so 2 prefix characters.
-CMD2_PARAM = "-DLOG_ELAPSED=ON"
+# Glow frames around the options in a typed command. The input line is
+# "<arrow><space><command>", so 2 prefix characters; the frame keeps a gap
+# to the words before and after the options.
 TERM_X0, TERM_ADV, TERM_TOP, TERM_ROW = 16, 7, 728, 14
-CMDRECT_X = TERM_X0 + (2 + CMD2.index(CMD2_PARAM)) * TERM_ADV - 4
-CMDRECT_W = len(CMD2_PARAM) * TERM_ADV + 8
 CMDRECT_Y = TERM_TOP + (TERM_MAX_ROWS - 1) * TERM_ROW - 3
 CMDRECT_H = TERM_ROW + 6
+
+def cmd_rect(cmd, options, color, glow):
+    return {"x": TERM_X0 + (2 + cmd.index(options)) * TERM_ADV - 4,
+            "w": len(options) * TERM_ADV + 8, "color": color, "glow": glow}
+
+CMDRECTS = {
+    "elapsed": cmd_rect(CMD2, "-DLOG_ELAPSED=ON", RECT_COLOR, "rgba(177,94,222,.55)"),
+    "exceptions": cmd_rect(CMD3, "-DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON", GLOW_GREEN,
+                           "rgba(0,250,154,.55)"),
+}
 
 # ---------------------------------------------------------------- components
 TABS = [("trace.cpp", 104, "cpp"), ("callStack.cpp", 128, "cpp"),
@@ -340,7 +416,7 @@ def breadcrumb(view):
 
 def editor_main(doc, first, caret=None, blame=None):
     rows = []
-    for i in range(38):
+    for i in range(ED_ROWS):
         n = first + i
         if n > len(doc):
             break
@@ -358,14 +434,16 @@ def editor_main(doc, first, caret=None, blame=None):
                     '<span class="lc">%s%s</span></div>' % (cls, n, content, extra))
     return '<div class="editor">%s</div>' % "".join(rows)
 
-def editor_trace(lines, rect=False):
+def editor_trace(lines, rect=False, hl=None):
     n_real = len(lines)
     disp = lines + [""] * max(0, 40 - n_real)
+    marks = EXC_HL[hl[0]] if hl else {}
     rows = []
     for i, text in enumerate(disp[:40]):
         num = str(i + 1) if i < n_real + 1 else ""
+        content = hl_html(text, marks[i], hl[1]) if i in marks else esc(text)
         rows.append('<div class="eline16"><span class="ln">%s</span>'
-                    '<span class="lc">%s</span></div>' % (num, esc(text)))
+                    '<span class="lc">%s</span></div>' % (num, content))
     rect_html = ""
     if rect:
         left = 60 + DUR_CHAR_START * ED_ADV - 4
@@ -407,23 +485,27 @@ def mouse(x, y, kind):
     src = ARROW_SVG if kind == "arrow" else IBEAM_SVG
     return '<img class="mouse" style="left:%dpx;top:%dpx" src="%s">' % (x, y, src)
 
+TRACES = {"trace1": ACT2_TRACE, "trace2": ACT4_TRACE, "trace3": ACT6_TRACE}
+
 def frame_html(state):
     view = state["view"]
     active = "trace.out" if view.startswith("trace") else "main.cpp"
     if view == "main":
         ed = editor_main(state["doc"], state["first"],
                          state.get("caret"), state.get("blame"))
-    elif view == "trace1":
-        ed = editor_trace(ACT2_TRACE)
     else:
-        ed = editor_trace(ACT4_TRACE, rect=state.get("rect", False))
+        ed = editor_trace(TRACES[view], rect=state.get("rect", False),
+                          hl=state.get("hl"))
     mx, my, mk = state["mouse"]
     cmdrect = ""
-    if state.get("cmdrect") is not None:
+    if state.get("cmdrect"):
+        kind, opacity = state["cmdrect"]
+        r = CMDRECTS[kind]
         cmdrect = ('<div class="cmdrect" style="left:%dpx;top:%dpx;width:%dpx;'
-                   'height:%dpx;opacity:%.2f"></div>'
-                   % (CMDRECT_X, CMDRECT_Y, CMDRECT_W, CMDRECT_H,
-                      state["cmdrect"]))
+                   'height:%dpx;border-color:%s;box-shadow:0 0 8px 1px %s;'
+                   'opacity:%.2f"></div>'
+                   % (r["x"], CMDRECT_Y, r["w"], CMDRECT_H, r["color"], r["glow"],
+                      opacity))
     return ('<div class="frame">' + tabbar(active) + breadcrumb(view) + ed +
             panel() + terminal(state["term"]) + cmdrect + mouse(mx, my, mk) +
             '</div>')
@@ -447,16 +529,10 @@ def build_frames():
     def mark(name):
         landmarks[name] = len(frames)
 
-    # Editable document: real main.cpp minus class A (with its blank line),
-    # minus both A::foo() calls, minus the fibonacci function and its call.
-    # The typing scenes re-insert everything; intermediate and final states
-    # are asserted against INTERMEDIATE and MAIN_CPP.
-    doc = list(MAIN_CPP)
-    del doc[CALL_COMMENT - 1:CALL_LINE]
-    del doc[A_CALL_COMMENT - 1:A_CALL_MAIN]
-    del doc[FIB_BLANK - 1:FIB_LAST]
-    del doc[A_CALL_B - 1:A_CALL_B]
-    del doc[A_BLANK - 1:A_LAST]
+    # Editable document, starting as demo_source's initial version. The typing
+    # scenes put the removed parts back; the results are asserted against the
+    # versions capture_inputs.sh built and ran.
+    doc = DEMO.initial()
 
     def snap():
         return list(doc)
@@ -488,22 +564,43 @@ def build_frames():
         caret_line, caret_col = line, col
         Fmain(12, caret=(caret_line, caret_col))
 
+    def scroll_to(target, delay=6, lines=3):
+        """Wheel-scroll `lines` per frame (3: one notch of a calm wheel); the
+        frame after the call shows the target line at the top."""
+        step = lines if target > view["first"] else -lines
+        f = view["first"] + step
+        while (f < target) if step > 0 else (f > target):
+            Fmain(delay, first=f)
+            f += step
+        view["first"] = target
+
     def enter(indent, d=5):
         nonlocal caret_line, caret_col
         doc.insert(caret_line, " " * indent)
         caret_line += 1
         caret_col = indent
+        if caret_line >= view["first"] + ED_ROWS:   # VS Code keeps the caret in view
+            view["first"] = caret_line - ED_ROWS + 1
         Fmain(d, caret=(caret_line, caret_col))
 
     def type_chars(text, chunk, dscale=1.0):
         nonlocal caret_col
         for i in range(0, len(text), chunk):
             piece = text[i:i + chunk]
-            doc[caret_line - 1] += piece
+            line = doc[caret_line - 1]
+            doc[caret_line - 1] = line[:caret_col] + piece + line[caret_col:]
             caret_col += len(piece)
             Fmain(max(3, round(typing_delays[(i // chunk) % len(typing_delays)]
                                * dscale)),
                   caret=(caret_line, caret_col))
+
+    def type_line(text, chunk, dscale=1.0):
+        """Enter, then type one line; its indentation comes from VS Code's
+        auto-indent, so only the text after it is typed."""
+        body = text.lstrip()
+        enter(len(text) - len(body))
+        if body:
+            type_chars(body, chunk, dscale)
 
     # ---- opening: no class A, no fibonacci; mouse drifts in
     mark("open")
@@ -512,25 +609,20 @@ def build_frames():
 
     # ---- act A: type class A, then A::foo() in B::foo() and in main()
     mark("type_A")
-    click(12, len(doc[11]))                      # end of "#include <vector>"
-    enter(0, 5); enter(0, 5)
-    type_chars("class A {", 4, 0.8)
-    enter(0); type_chars("public:", 4, 0.8)
-    enter(4); type_chars('static void foo() { std::cout << "static foo \\n"; }',
-                         4, 0.8)
-    enter(0); type_chars("};", 2, 0.8)
+    click(DEMO.a_blank - 1, len(DEMO.line(DEMO.a_blank - 1)))  # end of "#include <vector>"
+    for text in DEMO.lines(DEMO.a_blank, DEMO.a_last):
+        type_line(text, 4, 0.8)
     Fmain(28, caret=(caret_line, caret_col), blame=blame_now)
-    click(25, len(MAIN_CPP[A_CALL_B - 2]))       # end of the std::sort(...) line
-    enter(8); type_chars("A::foo();", 4, 0.8)
+    click(DEMO.a_call_b - 1, len(DEMO.line(DEMO.a_call_b - 1)))  # end of std::sort(...)
+    type_line(DEMO.line(DEMO.a_call_b), 4, 0.8)
     Fmain(22, caret=(caret_line, caret_col), blame=blame_now)
-    # scroll down until the whole main() body is on screen, then edit it
-    for f in (13, 16, 19, 22, 25):
-        Fmain(6, first=f)
-    view["first"] = 27
+    # scroll down until the whole main() body stays on screen, then edit it
+    scroll_to(max(view["first"], len(INTERMEDIATE) - ED_ROWS + 1))
     Fmain(16)
-    click(44, len("int main() {"))               # main() { in the fib-less file
-    enter(4); type_chars("// Test logging static member methods.", 4, 0.8)
-    enter(4); type_chars("A::foo();", 4, 0.8)
+    fib_lines = DEMO.fib_last - DEMO.fib_blank + 1   # fibonacci is not typed yet
+    click(DEMO.main_first - fib_lines, len("int main() {"))
+    type_line(DEMO.line(DEMO.a_call_comment), 4, 0.8)
+    type_line(DEMO.line(DEMO.a_call_main), 4, 0.8)
     mark("a_done")
     Fmain(35, caret=(caret_line, caret_col), blame=blame_now)
     Fmain(25, caret=(caret_line, caret_col), blame=blame_now, term=t0_off)
@@ -579,27 +671,25 @@ def build_frames():
     view["mpos"] = tab_main
     Fmain(25, term=after1, mpos=tab_main, mkind="arrow")
     mark("type_fib")
-    click(28, len(doc[27]), moves=3)             # end of class B's "};"
-    enter(0); enter(0)
-    type_chars("constexpr unsigned fibonacci(unsigned n) {", 2)
-    enter(4); type_chars("if (n <= 1)", 3)
-    enter(8); type_chars("return n;", 3)
-    enter(4); type_chars("return fibonacci(n - 1) + fibonacci(n - 2);", 3)
-    enter(0); type_chars("}", 1)
+    anchor = DEMO.fib_blank - 1                  # class B's closing "};"
+    if view["first"] > anchor - 1:               # one wheel notch up if out of view
+        scroll_to(anchor - 1)
+    click(anchor, len(DEMO.line(anchor)), moves=3)
+    for k, text in enumerate(DEMO.lines(DEMO.fib_blank, DEMO.fib_last)):
+        type_line(text, 2 if k == 1 else 3)
     mark("fib_done")
     Fmain(45, caret=(caret_line, caret_col), blame=blame_now, term=after1)
     Fmain(35, caret=(caret_line, caret_col), blame=blame_now, term=after1_off)
 
     # ---- scroll calmly down to main() (3 lines per step, like a mouse wheel)
     mark("scroll")
-    for f in (30, 33):
-        Fmain(6, first=f, term=after1)
-    view["first"] = 35
+    scroll_to(len(MAIN_CPP) - ED_ROWS + 1)       # whole main() in view
     Fmain(16, term=after1)
     mark("type_call")
-    click(63, len(MAIN_CPP[CALL_COMMENT - 2]), moves=3)  # end of "b.foo();"
-    enter(4); type_chars("// Test logging constexpr function", 3)
-    enter(4); type_chars("fibonacci(6);", 2)
+    click(DEMO.fib_call_comment - 1, len(DEMO.line(DEMO.fib_call_comment - 1)),
+          moves=3)                               # end of "b.foo();"
+    type_line(DEMO.line(DEMO.fib_call_comment), 3)
+    type_line(DEMO.line(DEMO.fib_call), 2)
     mark("call_done")
     Fmain(45, caret=(caret_line, caret_col), blame=blame_now, term=after1)
     Fmain(30, caret=(caret_line, caret_col), blame=blame_now, term=after1_off)
@@ -619,9 +709,9 @@ def build_frames():
     cmd_off = base1 + prompt_block(True, CLOCK1, CMD2, cursor=False)
     for _ in range(3):
         for op, d in ((0.3, 8), (0.65, 8), (1.0, 50)):
-            Fmain(d, term=cmd_on, cmdrect=op)
+            Fmain(d, term=cmd_on, cmdrect=("elapsed", op))
         for op, d in ((0.6, 8), (0.25, 8)):
-            Fmain(d, term=cmd_off, cmdrect=op)
+            Fmain(d, term=cmd_off, cmdrect=("elapsed", op))
         Fmain(8, term=cmd_off)
     Fmain(12, term=cmd_off)
     hist2 = base1 + prompt_block(True, CLOCK1, CMD2)
@@ -653,6 +743,111 @@ def build_frames():
         F(10, view="trace2", term=terms, mouse=aside + ("arrow",))
     F(140, view="trace2", term=after2, mouse=aside + ("arrow",))
 
+    # ---- act 6: back in the editor, type the exception demo above main()
+    mark("exc_edit")
+    for i in range(1, 4):
+        F(5, view="trace2", term=after2,
+          mouse=lerp(aside, tab_main, i / 3) + ("arrow",))
+    view["mpos"] = tab_main
+    view["term"] = after2
+    Fmain(25, mkind="arrow")
+    click(DEMO.cube_last, len(DEMO.line(DEMO.cube_last)), moves=3)  # after cube()
+    block = [""] + EXC_FUNCS
+    mid_start = block.index("void exc_mid() {")
+    mid_end = block.index("}", mid_start)
+    for k, text in enumerate(block):
+        type_line(text, 5, 0.8)
+        if k == mid_end:
+            # A quick flick down once exc_mid() is done, so the functions
+            # still to come are typed in the middle of the screen.
+            rest_first, rest_last = caret_line + 1, caret_line + len(block) - 1 - k
+            scroll_to(round((rest_first + rest_last) / 2 - (ED_ROWS - 1) / 2),
+                      delay=5, lines=4)
+            mark("exc_centered")
+            Fmain(10, caret=(caret_line, caret_col))
+    mark("exc_funcs_done")
+    Fmain(45, caret=(caret_line, caret_col), blame=blame_now)
+    Fmain(30, caret=(caret_line, caret_col), blame=blame_now, term=after2_off)
+
+    # scroll down to main() — the whole body, calls included, fits the view
+    scroll_to(len(EXCEPTIONS) - ED_ROWS + 1)
+    Fmain(16)
+    fib_call = DEMO.fib_call + DEMO.exc_shift
+    fib_text = DEMO.line(DEMO.fib_call)
+    click(fib_call, len(fib_text) - len(fib_text.lstrip()), moves=3)
+    mark("exc_comment")
+    type_chars("// ", 2)                         # comment out fibonacci(6);
+    aside_mpos = (640, view["mpos"][1])          # mouse off the new "//"
+    Fmain(10, caret=(caret_line, caret_col), mpos=lerp(view["mpos"], aside_mpos, 0.5))
+    view["mpos"] = aside_mpos
+    Fmain(10, caret=(caret_line, caret_col))
+    caret_col = len(doc[caret_line - 1])         # End: the calls go right below,
+    Fmain(8, caret=(caret_line, caret_col))      # before print() and cube()
+    type_line(EXC_CALLS[0], 4)
+    type_line(EXC_CALLS[1], 3)
+    Fmain(30, caret=(caret_line, caret_col))
+    type_line(EXC_CALLS[2], 4)
+    type_line(EXC_CALLS[3], 3)
+    mark("exc_calls_done")
+    Fmain(45, caret=(caret_line, caret_col), blame=blame_now)
+    Fmain(30, caret=(caret_line, caret_col), blame=blame_now, term=after2_off)
+
+    assert doc == EXCEPTIONS, \
+        "typed document does not match the exceptions version of main.cpp"
+
+    # ---- act 7: cmake -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON .. && make run
+    base2 = hist2 + OUT2
+    for i in range(1, 4):
+        Fmain(5, mpos=lerp(view["mpos"], tpos, i / 3))
+    view["mpos"] = tpos
+    for i, _ in enumerate(CMD3):
+        Fmain(max(3, typing_delays[(i * 3) % len(typing_delays)] - 1),
+              term=base2 + prompt_block(True, CLOCK2, CMD3[:i + 1], cursor=True))
+    cmd3_on = base2 + prompt_block(True, CLOCK2, CMD3, cursor=True)
+    cmd3_off = base2 + prompt_block(True, CLOCK2, CMD3, cursor=False)
+    for k in range(3):
+        for op, d in ((0.3, 8), (0.65, 8), (1.0, 50)):
+            if k == 0 and op == 1.0:
+                mark("cmd3_glow")
+            Fmain(d, term=cmd3_on, cmdrect=("exceptions", op))
+        for op, d in ((0.6, 8), (0.25, 8)):
+            Fmain(d, term=cmd3_off, cmdrect=("exceptions", op))
+        Fmain(8, term=cmd3_off)
+    Fmain(12, term=cmd3_off)
+    hist3 = base2 + prompt_block(True, CLOCK2, CMD3)
+    for fr, d in steps:
+        n = max(1, int(len(OUT3) * fr))
+        Fmain(d, term=hist3 + OUT3[:n])
+    # make failed (the demo ended in std::terminate): Starship's ❯ turns red
+    after3 = hist3 + OUT3 + prompt_block(True, CLOCK3, "", cursor=True, failed=True)
+    after3_off = hist3 + OUT3 + prompt_block(True, CLOCK3, "", cursor=False,
+                                             failed=True)
+    view["term"] = after3
+    mark("cascade3")
+    Fmain(35)             # short: the terminal stays in view under trace.out
+
+    # ---- act 8: trace.out with the exception events, glow their marks
+    for i in range(1, 5):
+        Fmain(5, mpos=lerp(tpos, tab_trace, i / 4), mkind="arrow")
+    mark("trace3")
+    F(30, view="trace3", term=after3, mouse=tab_trace + ("arrow",))
+    F(80, view="trace3", term=after3_off, mouse=tab_trace + ("arrow",))
+    for p, d in zip([(470, 260), (520, 380)], (25, 25)):
+        F(d, view="trace3", term=after3, mouse=p + ("ibeam",))
+    park = (760, 540)                            # below the trace, clear of the marks
+    F(20, view="trace3", term=after3, mouse=park + ("arrow",))
+    for group in (1, 2):
+        for k, terms in enumerate((after3, after3_off, after3)):
+            for t, d in ((0.3, 8), (0.65, 8), (1.0, 60)):
+                if k == 0 and t == 1.0:
+                    mark("hl%d" % group)
+                F(d, view="trace3", term=terms, mouse=park + ("arrow",), hl=(group, t))
+            for t, d in ((0.65, 8), (0.3, 8)):
+                F(d, view="trace3", term=terms, mouse=park + ("arrow",), hl=(group, t))
+            F(10, view="trace3", term=terms, mouse=park + ("arrow",))
+        F(20 if group == 1 else 130, view="trace3", term=after3,
+          mouse=park + ("arrow",))
+
     return frames, landmarks
 
 # ---------------------------------------------------------------- rendering
@@ -662,48 +857,111 @@ def check_fonts():
         if fam not in out:
             sys.exit("%s not installed — see README.md (fonts section)" % fam)
 
-def render_frames(frames, framedir):
-    os.makedirs(framedir, exist_ok=True)
-    total = len(frames)
-    for c0 in range(0, total, CHUNK):
-        chunk = frames[c0:c0 + CHUNK]
-        page = ("<!doctype html><html><head><meta charset='utf-8'>"
-                "<style>" + CSS + "</style></head><body>" +
-                "".join(frame_html(s) for s, _ in chunk) + "</body></html>")
-        hpath = os.path.join(framedir, "page.html")
-        with open(hpath, "w") as f:
-            f.write(page)
-        shot = os.path.join(framedir, "page.png")
+def render_chunk(frames, framedir, c0):
+    """Screenshot frames[c0:c0+CHUNK] stacked on one page, then cut it up."""
+    chunk = frames[c0:c0 + CHUNK]
+    page = ("<!doctype html><html><head><meta charset='utf-8'>"
+            "<style>" + CSS + "</style></head><body>" +
+            "".join(frame_html(s) for s, _ in chunk) + "</body></html>")
+    hpath = os.path.join(framedir, "page_%04d.html" % c0)
+    shot = os.path.join(framedir, "page_%04d.png" % c0)
+    with open(hpath, "w") as f:
+        f.write(page)
+    profile = tempfile.mkdtemp(prefix="gifgen-chrome-")
+    try:
         subprocess.run(["google-chrome", "--headless", "--disable-gpu",
                         "--no-sandbox", "--hide-scrollbars",
                         "--force-device-scale-factor=1",
+                        "--user-data-dir=" + profile,
                         "--window-size=%d,%d" % (W, H * len(chunk)),
                         "--screenshot=" + shot, "file://" + hpath],
                        check=True, capture_output=True)
-        subprocess.run(["magick", shot, "-crop", "%dx%d" % (W, H), "+repage",
-                        os.path.join(framedir, "tmp_%d.png")], check=True)
-        for i in range(len(chunk)):
-            os.replace(os.path.join(framedir, "tmp_%d.png" % i),
-                       os.path.join(framedir, "f_%03d.png" % (c0 + i)))
-        print("chunk %d/%d" % (c0 // CHUNK + 1, (total + CHUNK - 1) // CHUNK),
-              flush=True)
-    for p in (os.path.join(framedir, "page.html"), os.path.join(framedir, "page.png")):
-        if os.path.exists(p):
-            os.remove(p)
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+    subprocess.run(["magick", shot, "-crop", "%dx%d" % (W, H), "+repage",
+                    os.path.join(framedir, "tmp_%04d_%%d.png" % c0)], check=True)
+    for i in range(len(chunk)):
+        os.replace(os.path.join(framedir, "tmp_%04d_%d.png" % (c0, i)),
+                   os.path.join(framedir, "f_%03d.png" % (c0 + i)))
+    os.remove(hpath)
+    os.remove(shot)
+
+def render_frames(frames, framedir):
+    os.makedirs(framedir, exist_ok=True)
+    starts = range(0, len(frames), CHUNK)
+    with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
+        jobs = [pool.submit(render_chunk, frames, framedir, c0) for c0 in starts]
+        for n, job in enumerate(concurrent.futures.as_completed(jobs), 1):
+            job.result()
+            print("chunk %d/%d" % (n, len(jobs)), flush=True)
+
+def gif_blocks(data):
+    """Offsets of the graphic control extensions and the image descriptors of
+    a GIF, walking its block structure."""
+    pos = 13
+    if data[10] & 0x80:                          # global color table
+        pos += 3 * (2 << (data[10] & 7))
+    gces, images = [], []
+    while pos < len(data) and data[pos] != 0x3B:
+        if data[pos] == 0x21:                    # extension: label + sub-blocks
+            if data[pos + 1] == 0xF9:
+                gces.append(pos)
+            pos += 2
+        elif data[pos] == 0x2C:                  # image: descriptor + LZW data
+            images.append(pos)
+            flags = data[pos + 9]
+            pos += 10 + (3 * (2 << (flags & 7)) if flags & 0x80 else 0) + 1
+        else:
+            raise SystemExit("render.py: unexpected GIF block at byte %d" % pos)
+        while data[pos]:
+            pos += data[pos] + 1
+        pos += 1
+    return gces, images
 
 def assemble(frames, framedir, gif_path):
-    args = ["magick", "-loop", "0"]
-    for i, (_, delay) in enumerate(frames):
-        args += ["-delay", str(delay), os.path.join(framedir, "f_%03d.png" % i)]
-    # keep a .gif extension — ImageMagick infers the format from it
-    full = os.path.join(os.path.dirname(gif_path),
-                        "_full_" + os.path.basename(gif_path))
-    subprocess.run(args + [full], check=True)
-    # fuzz: treat near-identical antialiased pixels as unchanged — cuts the
-    # file size to a fraction with no visible quality loss (checked at 6%)
-    subprocess.run(["magick", full, "-fuzz", "6%", "-layers", "OptimizePlus",
-                    gif_path], check=True)
-    os.remove(full)
+    """Encode the frames against ONE palette for the whole animation and
+    without dithering. A pixel that does not change then keeps its exact
+    color index, so each GIF frame stores only the rectangle that really
+    changed. (Quantizing every frame separately with dithering, as a plain
+    ImageMagick conversion does, made each frame re-store most of the
+    screen: 13 MB instead of about 3.3 MB, with no visible difference.)"""
+    tmp = tempfile.mkdtemp(prefix="gifgen-encode-")
+    try:
+        listing = os.path.join(tmp, "frames.ffconcat")
+        with open(listing, "w") as f:
+            f.write("ffconcat version 1.0\n")
+            for i, (_, delay) in enumerate(frames):
+                # A 1/100 s time base per frame: GIF delays are centiseconds,
+                # and ffmpeg's default 25 fps would snap them to 4 cs steps.
+                f.write("file '%s'\noption framerate 100\nduration %.2f\n"
+                        % (os.path.join(framedir, "f_%03d.png" % i), delay / 100))
+        palette = os.path.join(tmp, "palette.png")
+        ffmpeg = ["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0",
+                  "-i", listing]
+        subprocess.run(ffmpeg + ["-vf", "palettegen=max_colors=256:stats_mode=full",
+                                 palette], check=True)
+        subprocess.run(ffmpeg + ["-i", palette, "-lavfi",
+                                 "[0:v][1:v]paletteuse=dither=none:diff_mode=rectangle",
+                                 "-fps_mode", "passthrough", "-loop", "0", gif_path],
+                       check=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # The concat demuxer ignores the last file's duration (the last frame
+    # gets 1 cs), so write that delay into the last frame's control block.
+    data = bytearray(open(gif_path, "rb").read())
+    gces, images = gif_blocks(data)
+    if len(images) != len(frames) or len(gces) != len(frames):
+        raise SystemExit("render.py: encoded %d frames, expected %d"
+                         % (len(images), len(frames)))
+    data[gces[-1] + 4:gces[-1] + 6] = frames[-1][1].to_bytes(2, "little")
+    with open(gif_path, "wb") as f:
+        f.write(data)
+    # Every delay must survive the encoding exactly (typing rhythm, glows).
+    got = [int(d) for d in subprocess.run(["identify", "-format", "%T\n", gif_path],
+                                          capture_output=True, text=True,
+                                          check=True).stdout.split()]
+    if got != [d for _, d in frames]:
+        raise SystemExit("render.py: frame delays changed during encoding")
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -712,10 +970,13 @@ def main():
     total_s = sum(d for _, d in frames) / 100.0
     print("frames: %d, duration: %.1f s" % (len(frames), total_s))
     if mode == "test":
-        sel = [frames[min(i, len(frames) - 1)]
-               for i in sorted(set(landmarks.values()))]
-        print("landmarks:", {v: k for k, v in landmarks.items()})
-        render_frames(sel, os.path.join(OUT, "testframes"))
+        idx = sorted(set(landmarks.values()))
+        names = {v: k for k, v in landmarks.items()}
+        print("landmarks:", ", ".join("%d=%s" % (n, names[i])
+                                      for n, i in enumerate(idx)))
+        testdir = os.path.join(OUT, "testframes")
+        shutil.rmtree(testdir, ignore_errors=True)
+        render_frames([frames[min(i, len(frames) - 1)] for i in idx], testdir)
         return
     framedir = os.path.join(OUT, "frames")
     if os.path.isdir(framedir):
