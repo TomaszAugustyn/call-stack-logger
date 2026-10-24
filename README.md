@@ -18,24 +18,21 @@ behind it: \
 
 ## :scroll: Requirements ##
 
-### GNU Binutils ###
+- Linux (the library reads `/proc/self/maps` and `/proc/self/exe` and uses `dladdr`)
+- CMake 3.14 or newer
+- GCC or Clang with C++17 support, and glibc
 
-It is required in order to get access to BFD (Binary File Descriptor
-library) necessary to get information about object files and manipulate them.
+Nothing else has to be installed. Addresses are resolved with
+[libbacktrace](https://github.com/ianlancetaylor/libbacktrace) (BSD-3-Clause), whose
+sources CMake downloads at configure time from a pinned commit and compiles into the
+library; [THIRD_PARTY.md](./THIRD_PARTY.md) lists it with its license. For a build
+without network access, unpack that commit somewhere and pass
+`-DFETCHCONTENT_SOURCE_DIR_LIBBACKTRACE=<directory>`.
 
-```bash
-sudo apt-get install binutils-dev
-```
-
-On Fedora the package is called `binutils-devel`. With binutils ≥ 2.46
-(Fedora 41+), the static `libbfd.a` additionally depends on libzstd for
-zstd-compressed debug sections, while the distro's `-lbfd` linker script does
-not pull it in — so `libzstd-devel` is needed as well. The build detects this
-at configure time and links `zstd` automatically when required:
-
-```bash
-sudo dnf install binutils-devel libzstd-devel
-```
+Optional: the debug symbols of the C library (`libc6-dbg` on Debian and Ubuntu,
+`glibc-debuginfo` on Fedora) give the frames inside libc — the caller of `main`, for
+example — a file and a line instead of `:???`. The test suite also uses `objcopy` and
+`strip`, which come with the compiler.
 
 ## :wrench: Building and running ##
 
@@ -142,9 +139,10 @@ running: from the library's own startup constructor (`trace_begin`, which runs b
 ## :jigsaw: Integrating into your own project ##
 
 Call Stack Logger ships a CMake target (`callstacklogger::instrumented`) that carries
-every flag needed for tracing — `-finstrument-functions`, `-g`, `-rdynamic`, the GCC
-std-library exclude-file-list, and the library itself (`-ldl -lbfd`). A user project
-only needs to link against it; no per-target `target_compile_options` boilerplate.
+every flag needed for tracing — `-finstrument-functions`, `-g`, the exported hook
+symbols, the GCC std-library exclude-file-list, and the library itself (with the symbol
+resolver inside, plus `-ldl`). A user project only needs to link against it; no
+per-target `target_compile_options` boilerplate.
 
 Consuming the project this way stays side-effect free: the demo executable and the
 test tree are built only for a standalone (top-level) build, so your own
@@ -157,9 +155,10 @@ library — they are never defined in your translation units.
 ### Prerequisites ###
 
 Same as building Call Stack Logger standalone:
-- Linux, GCC or Clang with C++17 support
-- `binutils-dev` installed (`sudo apt-get install binutils-dev`)
-- `libc6-dbg` recommended (fast BFD symbol resolution for libc frames)
+- Linux, CMake 3.14 or newer, GCC or Clang with C++17 support
+- network access at configure time for the pinned libbacktrace download, or
+  `FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE` pointing at a local copy (see Requirements)
+- `libc6-dbg` recommended (file and line for the frames inside libc)
 
 ### Method 1 — FetchContent (recommended) ###
 
@@ -188,7 +187,8 @@ target_link_libraries(my_app PRIVATE callstacklogger::instrumented)
 
 ### Method 2 — Git submodule ###
 
-For projects that prefer to vendor the source (pinned version, offline builds):
+For projects that prefer to vendor the source (pinned version; for offline builds add
+`FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE`, see Requirements):
 
 ```bash
 git submodule add https://github.com/TomaszAugustyn/call-stack-logger.git third_party/call-stack-logger
@@ -233,7 +233,7 @@ See [Environment Variables](#gear-configuration) for multi-threaded output namin
 ### Tip: build with `RelWithDebInfo` or `Debug` for best caller resolution ###
 
 Each trace line ends with `(called from: <file>:<line>)`. Call Stack Logger resolves this
-via BFD, which needs DWARF debug info (`-g`) in the CALLER's object file. The
+from the DWARF debug info (`-g`) in the CALLER's object file. The
 `callstacklogger::instrumented` target adds `-g` to targets that link against it, but
 third-party libraries you depend on (e.g. spdlog, fmt, boost) are compiled by their own
 CMake rules — and most C++ libraries default to `CMAKE_BUILD_TYPE=Release`, which omits
@@ -260,12 +260,37 @@ the *enclosing* physical frame, so `(called from: ...)` reports that frame's
 call site, one level up. Functions the compiler keeps out-of-line get exact
 caller locations at every optimization level.
 
+### Shipping a stripped binary ###
+
+The resolver reads names from the symbol table and lines from the DWARF data of each
+loaded object file. If a diagnostic build is stripped before it ships, keep its debug
+information in a separate file and link it back in — the usual distribution recipe:
+
+```bash
+objcopy --only-keep-debug my_app my_app.debug
+strip --strip-all my_app
+objcopy --add-gnu-debuglink=my_app.debug my_app
+```
+
+The resolver follows the link (same directory, a `.debug/` subdirectory, or the
+`/usr/lib/debug` tree, also by build ID), and the trace is complete. A binary stripped
+without such a file has no names left for the resolver, and its trace stays empty;
+shared libraries without debug information still show their function names, with
+`:???` for the line.
+
 ### Available CMake targets ###
 
 | Target                             | What it adds to your executable                                                                                                                                                                                      |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `callstacklogger::instrumented`    | `-finstrument-functions` (with GCC's exclude-file-list), `-g`, `-rdynamic`, library, `-ldl -lbfd`, include path. **Use this for per-call tracing (the common case).**                                                |
-| `callstacklogger::callstacklogger` | Library only: `-g`, `-rdynamic`, `-ldl -lbfd`, include path — no `-finstrument-functions`. Use this when you want just the on-demand [`get_call_stack()`](#on-demand-call-stack-capture) API without per-call hooks. |
+| `callstacklogger::instrumented`    | `-finstrument-functions` (with GCC's exclude-file-list), `-g`, the exported hook symbols, the library (symbol resolver included), `-ldl`, include path. **Use this for per-call tracing (the common case).**                   |
+| `callstacklogger::callstacklogger` | Library only: `-g`, the exported hook symbols, the library, `-ldl`, include path — no `-finstrument-functions`. Use this when you want just the on-demand [`get_call_stack()`](#on-demand-call-stack-capture) API without per-call hooks. |
+
+The exported symbols are the two hooks, `__cyg_profile_func_enter` and
+`__cyg_profile_func_exit` (plugins loaded with `dlopen()` bind to them, see below),
+plus the five interposed runtime entry points with `LOG_EXCEPTIONS`. They are exported
+one by one with `--export-dynamic-symbol`; with a linker that lacks the option (GNU ld
+before binutils 2.35) or with `-DCSLG_EXPORT_ALL_SYMBOLS=ON`, `-rdynamic` exports every
+symbol instead, as earlier versions did.
 
 Trace files are opened lazily on each thread's first traced call, so a program
 that links the plain library only for `get_call_stack()` never creates a trace
@@ -281,9 +306,13 @@ To compile your project without any instrumentation hooks (e.g. for release buil
 cmake -B build -DDISABLE_INSTRUMENTATION=ON
 ```
 
-This clears the instrumentation flags from `callstacklogger::instrumented` and defines
-`DISABLE_INSTRUMENTATION` across the tree, so the `__cyg_profile_func_enter/exit`
-hooks compile out entirely.
+With the option on, `callstacklogger::instrumented` contributes nothing to your
+executable: no `-finstrument-functions`, no `-g`, no exported symbols and no library — a
+release build with the target in its link line is the same binary as one that never knew
+the library (the test suite compares the two). The `__cyg_profile_func_enter/exit` hooks
+compile out entirely. A program that calls the on-demand
+[`get_call_stack()`](#on-demand-call-stack-capture) API in such a build links
+`callstacklogger::callstacklogger` for it explicitly.
 
 ### Selective instrumentation ###
 
@@ -431,7 +460,7 @@ Adds two `steady_clock::now()` reads (~20 ns each with a TSC clocksource; over
 1 µs per read on VMs that fall back to `hpet`/`acpi_pm`) and one `pwrite()` syscall
 (~0.5–1 µs) per traced function call. Trace file size grows by ~13 bytes per
 line (the placeholder + separator space). For a debug-time tool this is
-negligible compared with the existing BFD symbol resolution. With
+small next to the resolver's first lookup of each address. With
 `LOG_ELAPSED=OFF` the produced binary is byte-identical to a build without
 the option — the entire feature is gated behind compile-time `#ifdef`s.
 
@@ -609,20 +638,14 @@ it runs inside its host's physical frame: same level, same caller. The level
 rules alone cannot tell a dead inlined frame (unwound by an exception under
 Clang, skipped by `longjmp`) from a live inline host, so the tracer asks DWARF.
 The inline chain at a site, the list of functions inlined into each other
-there, comes from the same debug information BFD already reads for line
+there, comes from the same debug information the resolver already reads for line
 numbers: at a catch, its innermost entry is the function that caught, and every
 record above that function's record at the same level is dead; at an enter,
 the entry after the innermost is the entering function's host, with the same
 rule; and the function containing a call site names a normal call's parent, so
 dead inlined frames above the parent's record are reclaimed before the call's
-line is written. The chains are resolved once per site and cached. Clang emits
-DWARF 5 by default, and BFD does not walk Clang's DWARF 5 inline chains
-(elfutils and llvm-symbolizer do), so with `LOG_EXCEPTIONS` the
-`callstacklogger::instrumented` target compiles your code with `-gdwarf-4`
-under Clang; that changes only the debug-info format of your objects. A Clang
-build without the option keeps DWARF 5, and so does one that overrides the flag
-with `-gdwarf-5`: both degrade to reclaiming such frames when their host
-returns, with one extra indentation level meanwhile.
+line is written. The chains are resolved once per site and cached, from DWARF 4
+and DWARF 5 alike, so Clang's default debug format needs no option.
 
 ### Marking the frames that did not return ###
 
@@ -662,32 +685,47 @@ A line at depth 0 has no glyph, so only its duration field can carry the mark.
 
 ### Cost ###
 
-Measured on the reference host (a Fedora 44 VM with the `hpet` clocksource,
-GCC 16) through an external CMake project that links `callstacklogger::instrumented`,
-with the trace written to `/dev/null`. "Traced call" is one instrumented call
-of a leaf function; "throw + catch" is one `throw` caught two instrumented
-frames up, including those two calls.
+Measured with the benchmark in `bench/` on the reference host: a Fedora 44 machine
+(AMD Ryzen 7 5700G, `hpet` clocksource, GCC 16.2, binutils 2.46), the library
+compiled by `bench/run_bench.sh` with the given build type and options, the trace
+written to `/dev/null`, median of three runs on 24 October 2026. The benchmark
+program calls 2000 small instrumented functions in each of two shared libraries,
+every one from its own call site, so that every address is new on the first pass.
+"Traced call" is the warm cost of one instrumented call once its callee and call
+site are in the caches; "new function" is the cold cost of the first call of a
+function (one new callee, one new call site: the symbol and line lookups plus the
+line write); "first call into a library" also registers the library's symbol
+table and debug information with the resolver (once per object file).
 
-| Build type     | Options                          | Traced call | Throw + catch |
-| -------------- | -------------------------------- | ----------- | ------------- |
-| default (-O0)  | none                             | 2.72 µs     | 7.0 µs        |
-| default (-O0)  | `LOG_EXCEPTIONS`                 | 2.76 µs     | 13.2 µs       |
-| default (-O0)  | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 6.0 µs      | 20.1 µs       |
-| RelWithDebInfo | none                             | 2.02 µs     | 5.4 µs        |
-| RelWithDebInfo | `LOG_EXCEPTIONS`                 | 2.06 µs     | 10.4 µs       |
-| RelWithDebInfo | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 5.3 µs      | 17.0 µs       |
+| Build type     | Options                          | Traced call (warm) | New function (cold) | First call into a library | RSS after tracing |
+| -------------- | -------------------------------- | ------------------ | ------------------- | ------------------------- | ----------------- |
+| default (-O0)  | none                             | 3.15 µs            | 21.9 µs             | 2.6 ms                    | 10.2 MB           |
+| default (-O0)  | `LOG_EXCEPTIONS`                 | 3.14 µs            | 22.1 µs             | 2.7 ms                    | 10.3 MB           |
+| default (-O0)  | `LOG_ELAPSED`                    | 6.69 µs            | 25.7 µs             | 2.6 ms                    | 10.2 MB           |
+| default (-O0)  | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 6.67 µs            | 26.2 µs             | 2.5 ms                    | 10.2 MB           |
+| RelWithDebInfo | none                             | 2.12 µs            | 15.1 µs             | 4.2 ms                    | 11.1 MB           |
+| RelWithDebInfo | `LOG_EXCEPTIONS`                 | 2.17 µs            | 15.8 µs             | 4.4 ms                    | 11.2 MB           |
+| RelWithDebInfo | `LOG_ELAPSED`                    | 5.48 µs            | 18.5 µs             | 4.2 ms                    | 11.2 MB           |
+| RelWithDebInfo | `LOG_EXCEPTIONS` + `LOG_ELAPSED` | 5.51 µs            | 18.8 µs             | 4.2 ms                    | 11.3 MB           |
+
+To reproduce, from a checkout:
+
+```bash
+bench/run_bench.sh . mine        # builds the eight configurations, prints the table
+```
 
 Keeping the tree exact after non-local exits runs in every build and is part
 of what the "none" rows measure: one level lookup in each hook (a direct-mapped
-cache in front of a per-thread hash map) and a handful of compares, about
-0.3 µs per traced call with the library at -O0 and under 0.1 µs at
-RelWithDebInfo on this host; the first hook at each call site also pays one
-two-frame unwind to measure how that site's level derives from its frame. The
-option adds nothing measurable per call. A throw or catch adds the event line itself: a memoized site resolution,
-a memoized type name, the formatting and the write, plus a
+cache in front of a per-thread hash map) and a handful of compares; the first
+hook at each call site also pays one two-frame unwind to measure how that
+site's level derives from its frame. `LOG_EXCEPTIONS` adds nothing measurable
+per call; a throw or catch adds the event line itself: a memoized site
+resolution, a memoized type name, the formatting and the write, plus a
 `std::uncaught_exceptions()` read at each exit an exception passes through.
 The `LOG_ELAPSED` rows carry that option's own cost (two clock reads and a
-`pwrite()` per call, expensive on an `hpet` clock).
+`pwrite()` per call, expensive on an `hpet` clock). The cold numbers depend
+on the amount of debug information the object files carry; the warm numbers
+do not, because a warm call never reaches the resolver.
 
 What this does not cover, and what happens instead:
 
@@ -726,8 +764,9 @@ Each file starts with a header that includes the owning thread's ID:
 
 Per-thread state (`thread_local` call stack, re-entrancy guard) and per-thread `FILE*`
 mean the hot write path has **zero cross-thread synchronization** — each thread writes
-to its own file descriptor. BFD symbol resolution is still serialized by a mutex (BFD is
-not thread-safe), but file I/O is fully parallel, and dynamic-linker lookups (`dladdr`)
+to its own file descriptor. Symbol resolution — the first sight of each address — is still
+serialized by a mutex (libbacktrace parses a compilation unit lazily, and two threads doing
+so at once would both parse it), but file I/O is fully parallel, and dynamic-linker lookups (`dladdr`)
 run outside that mutex — so a plugin whose constructors are instrumented can be
 `dlopen()`ed while other threads are tracing without deadlocking on the loader lock.
 
@@ -819,7 +858,7 @@ void my_function() {
 
 `get_call_stack()` returns a `std::vector<std::optional<ResolvedFrame>>` (innermost
 frame first). Unlike the automatic instrumentation, this does NOT require
-`-finstrument-functions` — it uses `backtrace()` + BFD resolution at the point of call.
+`-finstrument-functions` — it uses `backtrace()` plus the same symbol resolution at the point of call.
 Useful for logging a stack snapshot from an error handler or logging site.
 
 **Optimized builds:** `backtrace()` only sees *physical* stack frames. At `-O2`
@@ -864,16 +903,12 @@ docker compose run sanitize-tsan-clang   # Clang — TSan
 The GCC sanitizer services are also run in CI on every push and pull request so
 regressions in memory safety, UB, or thread safety fail the build automatically.
 The Clang services exist for local spot-checks — Clang's LSan is stricter than
-GCC's, so running them periodically validates the suppression file is accurate
-as toolchain versions drift.
+GCC's, so running them periodically is worth it as toolchain versions drift.
 
-The `tests/lsan-suppressions.txt` suppression file silences LeakSanitizer reports
-coming from inside `libbfd` (GNU binutils keeps its symbol-table / object-file caches
-live for the program lifetime — this isn't a leak in cslg's code, it's BFD's design).
-The patterns are anchored to libbfd's own symbol prefixes (`^bfd_*`, `^_bfd_*`) —
-LSan matches suppressions as substrings of frame names, so an unanchored `bfd_`
-would also cover cslg's `bfdResolver::ensure_bfd_loaded` and hide a real leak.
-Cslg-owned allocations are still caught by LSan.
+LeakSanitizer runs without a suppression file: the symbol resolver allocates through
+`mmap` and keeps what it reads for the lifetime of the process, which LSan does not
+report, and the library's own caches are reachable from static storage. Any allocation
+the library loses is reported.
 
 MSan is intentionally unsupported — it requires an MSan-instrumented libstdc++/libc,
 which is impractical without a full toolchain rebuild, and produces enormous noise
@@ -916,7 +951,7 @@ docker compose run sanitize-tsan-clang
 ```
 
 The Docker image is based on Ubuntu 24.04 with GCC, Clang, and all required dependencies,
-including `libc6-dbg` (debug symbols for libc, required for fast BFD symbol resolution).
+including `libc6-dbg` (debug symbols for libc, which give the frames inside libc a file and a line).
 
 ## :rocket: CI/CD ##
 
@@ -926,7 +961,7 @@ GitHub Actions runs on every push and pull request to `master`:
 - **Clang (build, test):** Builds and runs unit and integration tests.
 - **Clang RelWithDebInfo (optimized build, test):** The same suite with Clang at `-O2 -g`. Clang at -O2 lays the instrumented code out differently from GCC at -O2 and from Clang at -O0 (tail-called exit hooks, its own inlining and landing pads, and no exit hook on the exception-unwind path), so the frame reconciliation and the exception paths meet that combination only here.
 - **Instrumentation disabled (build, unit tests):** Configures with `-DDISABLE_INSTRUMENTATION=ON` and every `LOG_*` option on, builds, and runs the unit tests (the integration tests are skipped at configure time by design). Keeps the `#ifdef` seams between the options and the kill switch building; nothing else exercises that configuration.
-- **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and every `LOG_*` option on (`LOG_EXCEPTIONS`, `LOG_ELAPSED`, `LOG_ADDR`), and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer, so the exception interposers, the in-place patching and the address column run sanitized in the shipped library too, not only in the per-flag test variants. Fails on any memory error, UB, or non-suppressed leak.
+- **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and every `LOG_*` option on (`LOG_EXCEPTIONS`, `LOG_ELAPSED`, `LOG_ADDR`), and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer, so the exception interposers, the in-place patching and the address column run sanitized in the shipped library too, not only in the per-flag test variants. Fails on any memory error, UB, or leak.
 - **Sanitize (GCC, TSan):** Builds with `SANITIZE=thread` and the same options, and runs the full test suite under ThreadSanitizer.
 
 Clang sanitizer runs are intentionally NOT part of CI — GCC covers the core sweep, and Clang's LSan behaviour drifts across toolchain versions which would add maintenance noise. They remain available locally via `docker compose run sanitize-asan-clang` / `sanitize-tsan-clang`.
@@ -945,6 +980,8 @@ offers the following licenses for Call Stack Logger:
 If you license Call Stack Logger under AGPLv3, there is no license fee or signed license
 agreement: you just need to comply with the AGPLv3 terms and conditions. See
 [LICENSE_COMMERCIAL](./LICENSE_COMMERCIAL) and [LICENSE](./LICENSE) for further information.
+The third-party code a program built with Call Stack Logger contains, with each license and
+what it asks of a distributor, is listed in [THIRD_PARTY.md](./THIRD_PARTY.md).
 
 If you purchase a commercial or closed-source license for Call Stack Logger, you must comply
 with the terms and conditions listed in the associated license agreement; the

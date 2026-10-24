@@ -75,13 +75,17 @@ target_include_directories(cslg_libbacktrace PUBLIC
 # table of the user's executable — another libbacktrace in the same process
 # (Boost.Stacktrace's, GCC's own in libgo/libphobos) must not bind to this
 # copy or the other way round. Warnings are silenced: the code is upstream's,
-# compiled with a configuration upstream did not generate.
+# compiled with a configuration upstream did not generate. -O2 in every build
+# type: the symbolizer is third-party code nobody steps through, and the
+# distribution's libbfd it replaced was an optimized build whatever the
+# consumer's build type — unoptimized, the first lookups in an object took
+# about twice as long (bench/).
 set_target_properties(cslg_libbacktrace PROPERTIES
     C_STANDARD 11
     C_EXTENSIONS ON
     POSITION_INDEPENDENT_CODE ON
     C_VISIBILITY_PRESET hidden)
-target_compile_options(cslg_libbacktrace PRIVATE -w)
+target_compile_options(cslg_libbacktrace PRIVATE -w -O2)
 # Same 64-bit off_t as the library (see src/CMakeLists.txt): file offsets in
 # the ELF reader are off_t.
 target_compile_definitions(cslg_libbacktrace PRIVATE _FILE_OFFSET_BITS=64)

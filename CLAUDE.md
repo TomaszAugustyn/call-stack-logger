@@ -13,7 +13,7 @@ file locations, line numbers, and visual nesting depth.
 **Article:** https://dev.to/taugustyn/call-stack-logger-function-instrumentation-as-a-way-to-trace-programs-flow-of-execution-419a
 **License:** Dual-licensed under GNU AGPLv3 (default) and commercial/closed-source (contact author)
 **Language Standard:** C++17
-**Target Platform:** Linux (relies on `/proc/self/cmdline`, `/proc/self/exe`, `/proc/self/maps`, `dladdr`, BFD library)
+**Target Platform:** Linux (relies on `/proc/self/cmdline`, `/proc/self/exe`, `/proc/self/maps`, `dladdr`; the symbolizer is libbacktrace, vendored)
 
 ## Architecture & How It Works
 
@@ -33,58 +33,143 @@ human-readable function names, source filenames, and line numbers.
 
 ### Symbol Resolution Pipeline
 
-Address resolution happens in multiple stages (implemented in `src/callStack.cpp`):
+Address resolution happens in stages (implemented in `src/callStack.cpp`):
 
-1. **`dladdr()`** (from `<dlfcn.h>`) - Retrieves basic symbol info from the dynamic linker,
-   including the shared object base address (`dli_fbase`) and symbol name (`dli_sname`).
-   `dli_sname` is null for every callee without a dynamic symbol — `static` functions,
-   anonymous-namespace functions, lambdas (their `operator()`), local classes. Such
-   callees are NOT dropped: stage 2 names them from the symbol table / DWARF, and the
-   per-address name cache makes that a one-time cost per callee.
+1. **`dladdr1()`** (from `<dlfcn.h>`, with `RTLD_DL_LINKMAP`) - Retrieves basic
+   symbol info from the dynamic linker: the shared object base address
+   (`dli_fbase`, the map start), the symbol name (`dli_sname`) and the object's
+   `link_map`, whose `l_addr` is the LOAD BIAS the loader applied to the file
+   (0 for a non-PIE executable, the map start for a PIE or a shared object).
+   `dli_sname` is null for every callee without a dynamic symbol — `static`
+   functions, anonymous-namespace functions, lambdas (their `operator()`), local
+   classes. Such callees are NOT dropped: stage 2 names them from the symbol
+   table / DWARF, and the per-address name cache makes that a one-time cost per
+   callee.
 
-2. **BFD Library** (`<bfd.h>` from GNU binutils) - Opens the object file and reads its symbol
-   table. Uses `bfd_find_nearest_line()` to map an address offset within a section to a source
-   filename, function name, and line number. BFD objects are cached in a static
-   `std::map<void*, storedBfd>` so each object file is loaded only once.
-   The file to open comes from `object_file_path()`: `/proc/self/exe` for the main
-   executable (`dli_fname` is argv[0] there, which is no valid path for a PATH-found
-   binary), otherwise the absolute path of the mapping containing `dli_fbase` read
-   from `/proc/self/maps` (one parse per new object, under the mutex), falling back
-   to `dli_fname` verbatim. The maps lookup is load-bearing: `dli_fname` is the exact
-   string the object was loaded by — for `dlopen("./plugin.so")` a relative path —
-   and the open happens lazily at first sight of an address, possibly after the
-   program `chdir()`ed, where that string names an unrelated file (symbol names and
-   lines from the wrong object) or nothing (`<could not open object file>`). The
-   kernel records the absolute path at mmap time, so maps is immune to chdir.
-   `/proc/self/map_files/<range>` would be the cleaner source but opening it needs
-   `CAP_SYS_ADMIN` / checkpoint-restore rights (EPERM for a normal user). A
-   since-deleted object's mapping carries a ` (deleted)` suffix; the open fails and
-   the object is negative-cached rather than silently reading a replacement file.
-   Pinned by `DlopenPluginTest.RelativeDlopenPathResolvesAfterChdir`.
+2. **libbacktrace** (BSD-3-Clause, vendored under `third_party/libbacktrace`,
+   pinned to one commit, see `THIRD_PARTY.md`) - Reads the ELF symbol table and
+   the DWARF debug information (versions 2 to 5, zlib- and zstd-compressed
+   sections, separate debug files through `.gnu_debuglink` and build IDs,
+   MiniDebugInfo). ONE threaded state for the process; every object file is
+   registered with it ONCE, at first sight of an address inside it, through
+   `cslg_backtrace_add_file(state, path, load_bias)` in
+   `src/backtraceExtension.c`. After that, `backtrace_pcinfo()` and
+   `backtrace_syminfo()` take RUNTIME addresses as they are and answer for every
+   registered object. The per-object cache `objects()` (keyed by `dli_fbase`)
+   remembers which objects are registered and whether they brought a symbol
+   table and DWARF; `object_load_failed()` is the negative cache.
+   Why the public API alone was not enough: `backtrace_create_state(filename, …)`
+   treats `filename` as THE EXECUTABLE and discovers every other module once,
+   on the first lookup, through `dl_iterate_phdr`, re-opening each by the name
+   the loader has for it. A plugin opened by a relative path and then `chdir`ed
+   away from cannot be re-opened by that name (`DlopenPluginTest`), a library
+   `dlopen()`ed after the first lookup is unknown to the state, and a PIE or a
+   plugin given as `filename` is not registered at its own base. The extension
+   therefore includes libbacktrace's `elf.c` (unmodified, compiled in its place)
+   to call the internal `elf_add()` — the per-file registration behind both the
+   executable path and the `dl_iterate_phdr` callback — with `exe = 0` and the
+   given base, then installs the chain walkers (`elf_syminfo`, the DWARF
+   `fileline_fn`) in the state the way `backtrace_initialize()` does. The state
+   is created with the two "nothing known" handlers pre-installed, so the lazy
+   executable discovery never runs. The dependency is on `elf_add()`'s
+   signature; the pinned copy never changes under us, and a later update that
+   changes it fails to compile instead of misbehaving. The cleaner route is a
+   public `backtrace_add_module()` upstream (a proposal is in the hand-over of
+   the change). The extension also rejects TRUNCATED files before `elf_add()`
+   sees them: libbacktrace maps file ranges with `mmap` and never checks the
+   file size, so the section headers of a half-copied plugin would be mapped
+   beyond EOF and fault with SIGBUS on first read (the loader itself only needs
+   the PT_LOAD segments, so such a file still `dlopen()`s). Pinned by
+   `DamagedObjectTest.TruncatedPluginFileIsRejectedNotMapped`.
+   The file to register comes from `object_file_path()`: `/proc/self/exe` for
+   the main executable (`dli_fname` is argv[0] there, which is no valid path
+   for a PATH-found binary; libbacktrace resolves the symlink itself when it
+   looks for a separate debug file next to the executable), otherwise the
+   absolute path of the mapping containing `dli_fbase` read from
+   `/proc/self/maps` (one parse per new object, under the mutex), falling back
+   to `dli_fname` verbatim. The maps lookup is load-bearing: `dli_fname` is the
+   exact string the object was loaded by — for `dlopen("./plugin.so")` a
+   relative path — and the registration happens lazily at first sight of an
+   address, possibly after the program `chdir()`ed, where that string names an
+   unrelated file (symbol names and lines from the wrong object) or nothing
+   (`<could not open object file>`). The kernel records the absolute path at
+   mmap time, so maps is immune to chdir. `/proc/self/map_files/<range>` would
+   be the cleaner source but opening it needs `CAP_SYS_ADMIN` /
+   checkpoint-restore rights (EPERM for a normal user). A since-deleted
+   object's mapping carries a ` (deleted)` suffix; the open fails and the object
+   is negative-cached rather than silently reading a replacement file. Pinned
+   by `DlopenPluginTest.RelativeDlopenPathResolvesAfterChdir` and
+   `DamagedObjectTest.DeletedPluginFileIsReportedNotRead`.
+   **The load-bias rule:** the base handed to `elf_add()` is `link_map::l_addr`,
+   never `dli_fbase`. The two coincide for PIEs and shared objects and differ
+   for a non-PIE executable (bias 0, map start 0x400000), where every lookup
+   with `dli_fbase` would miss. Pinned by `PieTest`.
+   **What libbacktrace reports, and the mapping onto the old BFD answers**
+   (`look_up()` + `function_name_of()`): `backtrace_pcinfo` calls back once per
+   function containing the address, innermost first (an inlined copy, then
+   each function it was inlined into; each entry's file:line is the position
+   inside that function — for the outer ones the call site of the inner one),
+   which is exactly the order `bfd_find_nearest_line` + `bfd_find_inliner_info`
+   gave. It has NO symbol-table fallback of its own: with a compilation unit
+   but no line row it reports the unit's file with line 0 and no function; with
+   no function it reports a null name; for an address no registered file
+   describes it reports null everything (no error); with no DWARF in any
+   registered file it reports the error "no debug info" (errnum -1). All of
+   these mean "no information", never an error. The name is then chosen as
+   BFD chose it: a DWARF linkage name (`_Z...`) is final; otherwise the symbol
+   table's name (`backtrace_syminfo`, the FUNC/OBJECT symbol whose range
+   contains the address, from `.symtab` or, without one, `.dynsym`) wins —
+   that is what gives GCC's static functions, anonymous-namespace functions
+   and lambdas their parameter lists (`file_static_func(int)`; DWARF has only
+   `file_static_func`) — unless it merely repeats the DWARF name or adds a
+   clone suffix (`foo.cold`, `foo.constprop.0`), where the DWARF name stays as
+   BFD kept it for languages without mangling. A location needs a file AND a
+   non-zero line; otherwise the frame degrades to the function name with
+   `:???`, then to the dynamic symbol's name, then to `<unknown function>`.
+   Nothing in the file names the address and no dynamic symbol → the callee is
+   not loggable (dropped), as before. Retired texts: `<bfd_error>`,
+   `name <bfd_error>`, `<no sections in object file>`, `<not sectioned
+   address>`. Where libbacktrace's symbol search differs from BFD's raw walk:
+   it only knows FUNC/OBJECT symbols with a size (a zero-size assembler label
+   is not found; BFD treated it as one byte), it ignores STT_FILE symbols (BFD
+   used them as the "file" of a static function without DWARF, so such a
+   frame used to read `file.cpp:???` and now reads `func:???`, which is what
+   the README always said), and it reads `.dynsym` when `.symtab` is absent
+   (BFD did not, hence the vanished ` <bfd_error>` suffix on names taken from
+   the dynamic symbol table) and MiniDebugInfo (`.gnu_debugdata`; libstdc++'s
+   local functions get names on Fedora).
 
 3. **`abi::__cxa_demangle()`** (from `<cxxabi.h>`) - Converts GCC-mangled C++ symbol names
    (e.g., `_ZN1A3fooEv`) into human-readable form (e.g., `A::foo()`).
 
 Results are **memoized per address**: `resolve_no_unwind()` consults two hash maps
 (callee address → demangled name, call-site address → file:line, both in
-`callStack.h`) before running the stages above, so the full dladdr + BFD + demangle
-pipeline executes only on first sight of each address — every repeat call is a hash
-lookup under the same mutex. On a miss, `dladdr()` runs with `s_bfd_mutex` RELEASED and
-only the BFD work plus the cache insertion re-take it. This is a lock-order rule, not a
-micro-optimization: glibc's `_dl_addr` takes the loader lock (`dl_load_lock`), and
-`dlopen()` holds that lock while it runs the loaded object's constructors — the static
-initializer of an instrumented plugin fires the enter hook on the `dlopen()` thread, and
-that hook takes `s_bfd_mutex`. Calling `dladdr()` with `s_bfd_mutex` held deadlocked
-exactly that way (thread A: mutex → loader lock; thread B: loader lock → mutex), pinned
-by `DlopenConstructorTest`. Nothing that takes the loader lock may run under
-`s_bfd_mutex`. A cached `nullopt` name records "filtered / not
+`callStack.h`) before running the stages above, so the full dladdr + lookup +
+demangle pipeline executes only on first sight of each address — every repeat
+call is a hash lookup under the same mutex. On a miss, `dladdr1()` runs with
+`s_resolver_mutex` RELEASED and only the libbacktrace work plus the cache
+insertion re-take it. This is a lock-order rule, not a micro-optimization:
+glibc's `_dl_addr` takes the loader lock (`dl_load_lock`), and `dlopen()` holds
+that lock while it runs the loaded object's constructors — the static
+initializer of an instrumented plugin fires the enter hook on the `dlopen()`
+thread, and that hook takes `s_resolver_mutex`. Calling `dladdr()` with the
+mutex held deadlocked exactly that way (thread A: mutex → loader lock; thread
+B: loader lock → mutex), pinned by `DlopenConstructorTest`. Nothing that takes
+the loader lock may run under `s_resolver_mutex`. Every call INTO libbacktrace
+runs under the mutex, on purpose: its lazy per-unit parsing in threaded mode
+lets two threads both parse a unit and leaks the loser's work, and cache hits
+never reach it, so the warm path would gain nothing from a narrower lock.
+Callbacks libbacktrace invokes are C functions: they copy every string before
+returning (the buffers may not outlive the callback) and catch everything (an
+allocation failure becomes "no information"; an exception must not unwind
+through C frames). A cached `nullopt` name records "filtered / not
 loggable", which also turns Clang's runtime std-library filter into a hash hit on
 repeat calls — permanently-filtered callees (internal-linkage `static` functions
 on both compilers, std-library instantiations on Clang) cost one hash lookup and
 return before the caller-location lookup. Cache growth is bounded by the program
 text (distinct instrumented functions + call sites), not by runtime input;
 `dlclose`+`dlopen` address reuse serves stale entries — the same accepted
-trade-off as the `bfds()` object cache.
+trade-off as the `objects()` cache.
 
 ### Caller Location From the Hook's Return Address
 
@@ -92,10 +177,10 @@ The `caller` argument of `__cyg_profile_func_enter` is the instrumented function
 own return address: GCC's gimplifier and Clang's codegen both emit the hook call as
 `__cyg_profile_func_enter(fn, __builtin_return_address(0))` at the top of the
 instrumented body. That address is the instruction right AFTER the call site in
-the real caller — no stack walk is needed to reach it. `bfdResolver::resolve()`
+the real caller — no stack walk is needed to reach it. `addressResolver::resolve()`
 subtracts one byte so the address lies INSIDE the call instruction (a call that
 ends a source line would otherwise be attributed to the next line) and hands both
-addresses to `resolve_no_unwind()`, which does the memoized dladdr + BFD +
+addresses to `resolve_no_unwind()`, which does the memoized dladdr + symbolizer +
 demangle work. `get_call_stack()` applies the same one-byte step-back to the
 return addresses `backtrace()` returns, so both entry points key the
 location cache with the same kind of address.
@@ -137,8 +222,8 @@ Instead, std library template instantiations compiled into the user's translatio
 hooks and trigger `__cyg_profile_func_enter` at runtime. The function `is_std_library_symbol()`
 in `include/stdSymbolFilter.h` (pure mangled-name parsing, compiled on both compilers so unit
 tests cover it everywhere, but consulted only under `#ifdef __clang__` in `callStack.cpp`)
-checks the Itanium C++ ABI mangled name for known std library prefixes before expensive BFD
-resolution:
+checks the Itanium C++ ABI mangled name for known std library prefixes before the
+symbol resolution:
 - `__cxa_*` — C++ ABI runtime functions
 - `_Z[N[cv][ref]]St*` — `std::` functions and members
 - `_Z[N[cv][ref]]S[absiod]*` — std substitutions (allocator, basic_string, string, etc.)
@@ -158,12 +243,12 @@ traced by GCC but dropped by Clang's name filter, while third-party header-only 
 under `/usr/include` is excluded on GCC (`/usr/include` itself is on the discovered
 list, and GCC matches entries as path substrings) but traced on Clang.
 
-This filter runs inside `resolve_function_name()` right after `dladdr()` and before BFD
-loading, so filtered functions avoid the expensive BFD symbol resolution entirely. It is
-applied a second time to the symtab name returned by `bfd_find_nearest_line()` — `dli_sname`
-can be null (no dynamic symbol) or a different, nearest-exported symbol, so a std frame
-could otherwise slip past the first check (internal-linkage std instantiations have no
-dynamic symbol at all).
+This filter runs inside `resolve_function_name()` right after `dladdr()` and before the
+object is registered with the symbolizer, so filtered functions avoid the symbol
+resolution entirely. It is applied a second time to the name the symbol table / DWARF
+lookup returns — `dli_sname` can be null (no dynamic symbol) or a different,
+nearest-exported symbol, so a std frame could otherwise slip past the first check
+(internal-linkage std instantiations have no dynamic symbol at all).
 
 ### The NO_INSTRUMENT Macro
 
@@ -266,7 +351,7 @@ for why that was changed.)
   instrumented destructors (a Clang concern) find the hooks already disabled.
   Statics first constructed DURING tracing would destruct BEFORE
   `trace_shutdown`, which is exactly why the resolver caches in `callStack.h`
-  are deliberately leaked (see the bfdResolver section below) — otherwise a
+  are deliberately leaked (see the addressResolver section below) — otherwise a
   worker still inside `resolve()` could race their destruction, since
   `shutdown_complete` is only set later.
 - `trace_shutdown()` acquires `open_files_mutex`, iterates the registry, calls
@@ -541,15 +626,15 @@ in `tests/unit/test_frame_reconcile.cpp`):
   it; otherwise the topmost candidate; no candidate at all → the positional
   pop of the default build. Records above the match are dead and popped.
 - **Inline chains** (`function_base_name`, `dead_records_above_match` in
-  `frameReconcile.h`; `bfdResolver::resolve_inline_chain` / `read_inline_chain`
+  `frameReconcile.h`; `addressResolver::resolve_inline_chain` / `read_inline_chain`
   with the leaked `inline_chain_cache()`; `reclaim_dead_inlined_records_on_enter`
   / `_on_catch` / `_above_parent` in `trace.cpp`). Frames inlined into a host
   share its level AND its caller, so the level rules cannot tell a dead inlined
-  frame from a live inline host. DWARF can: `bfd_find_nearest_line` followed by
-  `bfd_find_inliner_info` (state kept in the bfd, hence under `s_bfd_mutex`)
+  frame from a live inline host. DWARF can: `backtrace_pcinfo` (one callback
+  per inlined level, under `s_resolver_mutex` like every symbolizer call)
   gives the chain of functions inlined into each other at an address,
   innermost first, cached per address as BASE NAMES (last component, no scope
-  or parameter list — libbfd hands back linkage names where DWARF has them, so
+  or parameter list — libbacktrace hands back linkage names where DWARF has them, so
   both sides are demangled full names run through the same
   `function_base_name`; a local entity's scope includes the enclosing
   function's parameter list and, for a lambda, a brace block, both of which the
@@ -574,15 +659,14 @@ in `tests/unit/test_frame_reconcile.cpp`):
   of a retry loop before the next call). An empty chain (no DWARF location)
   means nothing is known and nothing is popped; a name that is not found means
   the same. None of the rules can pop a live record: a live host is always at
-  or below the first match. Clang emits DWARF 5, whose inline chains libbfd
-  2.46 does not walk (elfutils/llvm-symbolizer do; `-gdwarf-4` works), so
-  `src/CMakeLists.txt` adds `-gdwarf-4` to the library's INTERFACE compile
-  options under Clang when LOG_EXCEPTIONS is on (the test variant function
-  does the same); a plain Clang build keeps DWARF 5, and so does an override
-  to it: both fall back to the lazy behavior (a dead inlined frame is reclaimed
-  when its host exits, still far better than the old permanent drift). Pinned by `LogExceptionsInlinedTest`
-  (driver `inlined_traced_program.cpp`, `always_inline` frames, compiled at -O2
-  unconditionally).
+  or below the first match. libbacktrace walks the inline chains of DWARF 4 and
+  DWARF 5 alike, Clang's included, so no `-gdwarf-4` request exists any more
+  (libbfd 2.46 did not walk Clang's DWARF 5 chains, and the library used to add
+  `-gdwarf-4` to its INTERFACE compile options under Clang with LOG_EXCEPTIONS;
+  a plain Clang build then fell back to reclaiming a dead inlined frame when its
+  host exited). Pinned by `LogExceptionsInlinedTest` (driver
+  `inlined_traced_program.cpp`, `always_inline` frames, compiled at -O2
+  unconditionally), on Clang with its default DWARF 5.
 - **Thread-stack confinement**: `pthread_getattr_np` bounds, resolved once per
   thread inside the enter hook's barrier (the main thread's lookup reads
   /proc/self/maps). Records off the thread stack (fibers, sigaltstack) are
@@ -825,7 +909,9 @@ the timestamp and the rest (compatible with `LOG_ADDR`):
 
 ```
 call-stack-logger/
-|-- CMakeLists.txt              # Root CMake config (project definition, run target)
+|-- CMakeLists.txt              # Root CMake config (project definition, run target, symbol-export rule)
+|-- CHANGELOG.md                # Release notes, first entry v1.0.0
+|-- THIRD_PARTY.md              # Every third-party component of a built program, its license and notice obligation
 |-- Dockerfile                  # Ubuntu 24.04 build environment
 |-- docker-compose.yml          # Build, test, coverage services
 |-- README.md                   # Project overview, build instructions
@@ -836,7 +922,7 @@ call-stack-logger/
 |-- .clang-format               # Code formatting rules (WebKit-based, 110 col limit)
 |-- .gitignore                  # Ignores build artifacts, IDE files, *.out
 |-- include/
-|   |-- callStack.h             # bfdResolver struct, get_call_stack(), resolve() API
+|   |-- callStack.h             # addressResolver struct, get_call_stack(), resolve() API
 |   |-- durationFormat.h        # utils::format_duration_12chars (LOG_ELAPSED helper), flag byte, event words
 |   |-- eventFormat.h           # LOG_EXCEPTIONS: exception event lines (throw/rethrow/catch/terminate), what() sanitizer
 |   |-- exceptionEvents.h       # LOG_EXCEPTIONS: internal bridge, interposers (exceptions.cpp) -> trace state (trace.cpp); not public API
@@ -849,12 +935,28 @@ call-stack-logger/
 |   |-- types.h                 # ResolvedFrame struct definition
 |-- src/
 |   |-- CMakeLists.txt          # Build config (flags, std lib exclusion, library + executable)
-|   |-- callStack.cpp           # Core implementation: BFD loading, symbol resolution
+|   |-- backtraceExtension.c    # Includes libbacktrace's elf.c; registers one object file at its load bias (cslg_backtrace_add_file)
+|   |-- backtraceExtension.h    # Internal header for the two entry points above (needs libbacktrace's backtrace.h)
+|   |-- callStack.cpp           # Core implementation: object registration, symbol and line resolution
 |   |-- exceptions.cpp          # LOG_EXCEPTIONS: __cxa_throw/__cxa_rethrow/__cxa_begin_catch/std::rethrow_exception/std::terminate interposers
 |   |-- trace.cpp               # __cyg_profile_func_enter/exit, trace file I/O, exception event lines
 |   |-- main.cpp                # Demo program exercising various C++ features
+|-- third_party/
+|   |-- libbacktrace/
+|       |-- CMakeLists.txt      # FetchContent download of the pinned commit (SHA-256 checked), static library cslg_libbacktrace
+|       |-- LICENSE             # libbacktrace's BSD-3-Clause license text
+|       |-- config/config.h     # Hand-written configuration (replaces the configure script's output)
+|       |-- config/backtrace-supported.h
+|-- bench/
+|   |-- CMakeLists.txt          # Cost benchmark: two generated libraries with 2000 instrumented functions each; `bench` target
+|   |-- bench.cpp               # Measures warm per-call, cold per-address and first-call-per-library costs, RSS
+|   |-- run_bench.sh            # Builds and runs the benchmark in 8 option combinations against any checkout
 |-- tests/                      # Unit and integration tests (BUILD_TESTS=ON, top-level builds only)
-|   |-- CMakeLists.txt          # FetchContent for Google Test, add subdirs
+|   |-- CMakeLists.txt          # FetchContent for Google Test, add subdirs, the DISABLE_INSTRUMENTATION inertness test
+|   |-- disabled/
+|   |   |-- CMakeLists.txt      # Consumer project: one program with callstacklogger::instrumented, one without
+|   |   |-- program.cpp
+|   |   |-- compare_binaries.sh # NEEDED libraries, debug sections and exported symbols must match
 |   |-- unit/
 |   |   |-- CMakeLists.txt      # Unit test executable (no instrumentation)
 |   |   |-- test_duration_format.cpp # Tests for utils::format_duration_12chars()
@@ -889,6 +991,10 @@ call-stack-logger/
 |       |-- dlopen_ctor_traced_program.cpp # Instrumented; dlopen()s the plugin while another thread traces cold addresses
 |       |-- dlopen_plugin.cpp       # Instrumented shared lib, dlopen()ed by a relative path
 |       |-- dlopen_traced_program.cpp # Instrumented; dlopen("./plugin") then chdir before first call
+|       |-- separate_debug_lib.cpp  # Instrumented shared lib whose DWARF moves to a .gnu_debuglink file post-build
+|       |-- compressed_debug_lib.cpp # Instrumented shared lib built with -gz=zlib / -gz=zstd (CDL_NAME prefixes the symbols)
+|       |-- debug_objects_traced_program.cpp # Instrumented; calls into the two libraries above
+|       |-- damaged_objects_traced_program.cpp # Instrumented; a deleted plugin, a truncated plugin, addresses in no object
 |       |-- test_integration.cpp # All integration tests (single/multi-threaded + API)
 |-- misc/
 |   |-- call-stack-logger-capture.gif      # Original demo capture (kept for reference)
@@ -920,25 +1026,36 @@ header). Without the explicit declarations every frame the user's code destroyed
 produced a `ResolvedFrame::~ResolvedFrame()` noise line on both compilers.
 
 ### `include/callStack.h`
-Declares the `bfdResolver` struct with:
-- `storedBfd` inner struct wrapping a `bfd*` with unique_ptr and symbol table
-- Static methods: `ensure_bfd_loaded()`, `resolve()`, `resolve_function_name()`,
-  `resolve_filename_and_line()`, `check_bfd_initialized()`, `get_argv0()`,
-  `object_file_path()`, `mapped_object_path()`
+Declares the `addressResolver` struct (named `bfdResolver` until the libbfd
+replacement) with:
+- `ObjectFile` record per registered object (`load_bias`, `has_symtab`, `has_dwarf`),
+  `DwarfEntry` / `Lookup` (what libbacktrace reports for one address: the
+  innermost-first DWARF entries and the containing symbol) and `AddressInfo`
+  (a `dladdr1` result plus the load bias, taken outside the mutex)
+- Static methods: `ensure_object_loaded()`, `query_address()`, `resolve()`,
+  `resolve_function_name()`, `resolve_filename_and_line()`, `look_up()`,
+  `function_name_of()`, `state()`, `get_argv0()`, `object_file_path()`,
+  `mapped_object_path()`
 - Static state behind lazily-initialized function-local-static accessors —
-  `bfds()` (object-file cache), `bfd_load_failed()` (negative cache), `name_cache()` /
-  `location_cache()` (memoization), `argv0()` — so an instrumented static constructor
-  in a user TU can never reach them before their dynamic initialization has run
-  (same rationale as `g_trace()` in `trace.cpp`). Each instance is heap-allocated
-  and deliberately LEAKED, also mirroring `g_trace()`: the caches are first used
-  during tracing (after `trace_begin` registered `trace_shutdown` via atexit), so
-  plain function-local statics would be destroyed BEFORE `trace_shutdown` runs
-  (exit handlers are LIFO) — i.e. before `shutdown_complete` gates workers out of
-  `resolve()`, letting a worker mutate a map mid-destruction (UAF). Leaking
-  removes resolver static destruction entirely; the kernel reclaims everything,
-  LSan sees reachable globals as live, and the skipped `bfd_close` calls only
-  release read-only descriptors. Only the constant-initialized
-  `s_bfd_mutex` (constexpr ctor) and `s_bfd_initialized` (bool) remain plain statics.
+  `objects()` (registered object files), `object_load_failed()` (negative cache),
+  `name_cache()` / `location_cache()` (memoization), `argv0()` — so an instrumented
+  static constructor in a user TU can never reach them before their dynamic
+  initialization has run (same rationale as `g_trace()` in `trace.cpp`). Each
+  instance is heap-allocated and deliberately LEAKED, also mirroring `g_trace()`:
+  the caches are first used during tracing (after `trace_begin` registered
+  `trace_shutdown` via atexit), so plain function-local statics would be
+  destroyed BEFORE `trace_shutdown` runs (exit handlers are LIFO) — i.e. before
+  `shutdown_complete` gates workers out of `resolve()`, letting a worker mutate a
+  map mid-destruction (UAF). Leaking removes resolver static destruction
+  entirely; the kernel reclaims everything and LSan sees reachable globals as
+  live. The libbacktrace state is created on first use and never freed (the
+  library has no counterpart to `backtrace_create_state`; its memory comes from
+  `mmap`). Only the constant-initialized `s_resolver_mutex` (constexpr ctor)
+  remains a plain static.
+- No third-party header: the libbacktrace state is only forward-declared
+  (`struct backtrace_state;`), so a consumer's compiler never needs
+  libbacktrace's headers. `backtrace.h` is included by `callStack.cpp` and
+  `src/backtraceExtension.h` only.
 - Free functions: `get_call_stack()`, `resolve()`
 
 **Public-API re-entrancy guard (load-bearing):** both free functions hold the
@@ -948,11 +1065,11 @@ per-thread `t_in_instrumentation` guard for their whole duration (RAII
 `trace.cpp`; no-op definitions exist for `DISABLE_INSTRUMENTATION` builds; the
 LOG_EXCEPTIONS interposers hold the same scope around their `what()` calls).
 Without it, calling `get_call_stack()` from a **Clang-instrumented** program
-self-deadlocks: the resolver holds `s_bfd_mutex` while running std
+self-deadlocks: the resolver holds `s_resolver_mutex` while running std
 container/string template code, and the linker may resolve those COMDAT
 instantiations to the copies compiled in the user's instrumented TU (any TU
 including `callStack.h` emits them) — the enter hook then fires mid-resolver
-and re-locks `s_bfd_mutex` (observed via `unordered_map::find` inside
+and re-locks `s_resolver_mutex` (observed via `unordered_map::find` inside
 `resolve_no_unwind`). GCC is immune only because its compile-time
 exclude-file-list keeps user-TU std instantiations hook-free. Regression-pinned by
 `CallStackApiTest.WorksFromInstrumentedProgram` (runs under `timeout 10`).
@@ -1007,29 +1124,46 @@ parsing with no dependencies; compiled on both compilers so
 `test_std_symbol_filter.cpp` covers every pattern regardless of toolchain, but
 consulted only under `#ifdef __clang__` in `callStack.cpp` (GCC excludes std
 headers at compile time). Applied both to `dladdr()`'s `dli_sname` and to the
-BFD-derived symtab name in `resolve_function_name()` — the latter catches
+symbolizer's name in `resolve_function_name()` — the latter catches
 symbols with no (or a different, nearest-exported) dynamic symbol.
+
+### `src/backtraceExtension.c`
+The forty-line extension of libbacktrace (plus the file-size guard): includes
+the pinned `elf.c` and exports `cslg_backtrace_create_state()` (one THREADED
+state with the lazy executable discovery disabled) and
+`cslg_backtrace_add_file(state, path, load_bias, …)` (registers one ELF file
+at its load bias through the internal `elf_add()` and installs the lookup
+functions). Compiled into the `cslg_libbacktrace` static library in place of
+`elf.c`, with hidden visibility, `-O2` in every build type and the sanitizer
+flags of the build. See "Symbol Resolution Pipeline" for why it exists.
 
 ### `src/callStack.cpp`
 The core implementation. Key functions:
 - `demangle_cxa()` - Wraps `abi::__cxa_demangle` with RAII
-- `bfdResolver::ensure_bfd_loaded()` - Opens BFD, reads symbol table, caches by base address
-- `bfdResolver::resolve_function_name()` - Resolves callee address to demangled function name
-- `bfdResolver::resolve_filename_and_line()` - Resolves caller address to source file and line.
-  A successful `bfd_find_nearest_line()` with an EMPTY filename or line 0 (DWARF "no
-  source line" sentinel) degrades through the same fallbacks as a failed lookup
-  (`func:???` → `<unknown function>`) instead of rendering "(called from: :0)"
-- `bfdResolver::resolve()` - Entry point for the hooks: steps the hook's return-address
+- `collect_pcinfo()` / `collect_syminfo()` - The C callbacks libbacktrace invokes
+  (copy the strings, catch everything)
+- `addressResolver::state()` - The libbacktrace state, created on first use under the mutex
+- `addressResolver::ensure_object_loaded()` - Registers the object file at its load bias once, caches by `dli_fbase`
+- `addressResolver::query_address()` - `dladdr1(RTLD_DL_LINKMAP)`: the `Dl_info` plus `link_map::l_addr`, outside the mutex
+- `addressResolver::look_up()` - `backtrace_pcinfo` (innermost first) + `backtrace_syminfo` for one address
+- `addressResolver::function_name_of()` - BFD's name rule: DWARF linkage name, else the symbol table's name unless it only repeats the DWARF name or adds a clone suffix
+- `addressResolver::resolve_function_name()` - Resolves callee address to demangled function name
+- `addressResolver::resolve_filename_and_line()` - Resolves caller address to source file and line.
+  A DWARF position needs a file and a non-zero line (libbacktrace reports a
+  compilation unit's file with line 0 for an address no line row covers); anything
+  less degrades through the same fallbacks as no debug information
+  (`func:???` → dynamic symbol's name → `<unknown function>`)
+- `addressResolver::resolve()` - Entry point for the hooks: steps the hook's return-address
   argument back one byte into the call instruction, then delegates to `resolve_no_unwind()`
-- `bfdResolver::resolve_no_unwind()` - Memoized callee-name + caller-location resolution
+- `addressResolver::resolve_no_unwind()` - Memoized callee-name + caller-location resolution
   on two addresses taken verbatim (shared by the hooks and `get_call_stack()`)
-- `bfdResolver::get_argv0()` - Reads `/proc/self/cmdline` for executable path
-- `bfdResolver::object_file_path()` - Picks the file `bfd_openr` opens: `/proc/self/exe` for
+- `addressResolver::get_argv0()` - Reads `/proc/self/cmdline` for executable path
+- `addressResolver::object_file_path()` - Picks the file to register: `/proc/self/exe` for
   the main executable (PATH-found argv[0] is no path), else the mapping's absolute path from
   `mapped_object_path()` (`/proc/self/maps`, immune to a relative `dlopen` path + later
   `chdir`), else `dli_fname`
 - `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames)
-- `resolve_site()` / `bfdResolver::resolve_location()` - Location-only lookup of an
+- `resolve_site()` / `addressResolver::resolve_location()` - Location-only lookup of an
   instruction address (a throw or catch site) through the location cache, via
   `resolve_event_site_location()`: `resolve_filename_and_line()` plus a check that the
   line row covering the address did not leak across a symbol boundary. GCC 13 at -O2
@@ -1037,14 +1171,17 @@ The core implementation. Key functions:
   function's cold partition) no location, so the row of the code before it in
   `.text.unlikely` — another function's line — covers it; the symbol table bounds
   what the line table cannot: when the line at the containing symbol's first byte
-  equals the line at the byte before the symbol, the row leaked, and the site is taken
-  from the first instruction after the call (the handler's first statement, resolved
-  through `bfd_find_inliner_info` to its outermost inline frame), or left without a
+  (`backtrace_syminfo`'s `symval`) equals the line at the byte before the symbol, the
+  row leaked, and the site is taken from the first instruction after the call (the
+  handler's first statement, resolved to its outermost inline frame), or left without a
   line when that leaks too. GCC 16 and Clang give the entry the clause's line, so the
   check changes nothing there. Found by CI's GCC RelWithDebInfo job on Ubuntu 24.04
-  (`LogExceptionsTest.CatchLinesNameTypeMessageAndExactSite`); `demangle_symbol()`
+  (`LogExceptionsTest.CatchLinesNameTypeMessageAndExactSite`), which still passes with
+  the symbol table read through libbacktrace (BFD's walk also counted zero-size and
+  NOTYPE symbols and a section's first byte as a stop; neither matters for a landing
+  pad, which sits at the start of a sized FUNC symbol); `demangle_symbol()`
   - the public demangler (LOG_EXCEPTIONS event lines); `inline_chain_at()` /
-  `bfdResolver::resolve_inline_chain()` - the DWARF inline chain at an address as base
+  `addressResolver::resolve_inline_chain()` - the DWARF inline chain at an address as base
   names, innermost first, memoized (LOG_EXCEPTIONS reconciliation of inlined frames)
 - The location cache stores `CachedLocation { file, line, function_base }`: the base
   name of the innermost function containing each call site rides along with the
@@ -1102,8 +1239,8 @@ make run                                    # Build and run (generates trace.out
 |------|---------|
 | `-finstrument-functions` | Enable function entry/exit hooks (user code, both compilers) |
 | `-finstrument-functions-exclude-file-list=...` | Exclude std lib and project headers (GCC only) |
-| `-rdynamic` | Export all symbols to dynamic symbol table (needed by `dladdr`) |
-| `-g` | Debug symbols (needed by BFD for line numbers) |
+| `-Wl,--export-dynamic-symbol=<hook>` (×2, +5 interposers with LOG_EXCEPTIONS) | Export the hooks (plugins loaded with `dlopen` bind to them) and the interposed runtime entry points; `-rdynamic` with `CSLG_EXPORT_ALL_SYMBOLS=ON` or a linker without the option |
+| `-g` | Debug symbols (DWARF: file and line numbers, inline chains) |
 | `-Wall` | All warnings |
 | `-std=c++17` | C++17 standard (for `std::optional`, structured bindings, etc.) |
 
@@ -1114,34 +1251,48 @@ make run                                    # Build and run (generates trace.out
 | `LOG_ADDR` | Include function addresses in trace output |
 | `LOG_ELAPSED` | Record per-function duration via in-place pwrite() patching of a 12-byte placeholder spliced after the timestamp. See "Per-function timing" below. |
 | `LOG_EXCEPTIONS` | Trace throw/rethrow/catch/terminate as event lines and mark the lines of the frames an exception or a longjmp left (the frame reconciliation that keeps the tree exact runs in every build). Needs the shared libstdc++. See "Frame Reconciliation After Non-Local Exits" and "Exception Events" above. |
-| `DISABLE_INSTRUMENTATION` | Compile without any instrumentation hooks |
+| `DISABLE_INSTRUMENTATION` | Compile without any instrumentation hooks; `callstacklogger::instrumented` then contributes nothing (API users link `callstacklogger::callstacklogger`) |
+| `CSLG_EXPORT_ALL_SYMBOLS` (CMake option) | Link tracing programs with `-rdynamic` instead of exporting only the hooks |
+| `BUILD_BENCH` (CMake option) | Add the `bench` target (top-level builds) |
 
 
 ### Link Dependencies
 
 | Library | Purpose |
 |---------|---------|
-| `-ldl` | Dynamic linking (`dladdr`) |
-| `-lbfd` | Binary File Descriptor (symbol/line resolution) |
-| `-lzstd` | Only when a configure-time probe detects static libbfd needs it (binutils ≥ 2.46, e.g. Fedora 41+ — the distro `-lbfd` linker script omits it) |
+| `cslg_libbacktrace` (static, built from the vendored sources, linked PRIVATE) | Symbol table and DWARF reader (libbacktrace), with hidden symbols |
+| `-ldl` (`CMAKE_DL_LIBS`) | Dynamic linking (`dladdr1`) |
+| `Threads::Threads` | `pthread_setcancelstate` in the hooks |
 
-The probe lives in the root `CMakeLists.txt` and produces `CSLG_BFD_LINK_LIBS`
-(`dl bfd` or `dl bfd zstd`), consumed by `src/CMakeLists.txt` and by the
-per-flag library variants in `tests/integration/CMakeLists.txt`.
+No binutils library: `-lbfd`, the zstd probe and `binutils-dev` / `binutils-devel` /
+`libzstd-devel` are gone. libbacktrace decompresses zlib- and zstd-compressed debug
+sections itself.
 
 ### System Requirement
 
-- **GNU Binutils dev package:** `sudo apt-get install binutils-dev` (provides `libbfd`);
-  on Fedora: `sudo dnf install binutils-devel libzstd-devel` (see Link Dependencies)
+- CMake 3.14, a C++17 compiler (GCC or Clang), glibc; network access at configure
+  time for the pinned libbacktrace download (or `FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE`
+  pointing at a local copy). `libc6-dbg` (Debian/Ubuntu) is optional and gives libc
+  frames a file and a line. The test suite uses `objcopy` and `strip` (shipped with
+  the compiler) for its fixtures.
 
 ### Library Targets
 
 The build produces three CMake targets:
 
-- `callstacklogger` (static library, plus alias `callstacklogger::callstacklogger`) —
-  the library itself (`callStack.cpp` + `trace.cpp`). As an INTERFACE it propagates
-  `-g`, `-rdynamic`, the include path, and `-ldl -lbfd` to consumers. Link plain
-  `callstacklogger` when you want the on-demand `get_call_stack()` API without
+- `callstacklogger` (static library, position-independent, plus alias
+  `callstacklogger::callstacklogger`) — the library itself (`callStack.cpp` +
+  `trace.cpp` + `exceptions.cpp`, with `cslg_libbacktrace` linked PRIVATE). As an
+  INTERFACE it propagates `-g`, the exported-symbol link options
+  (`cslg_set_consumer_link_options()` in the root CMakeLists: `--export-dynamic-symbol`
+  for the two hooks and, with LOG_EXCEPTIONS, the five interposers; `-rdynamic` as the
+  fallback for linkers without the option and behind `CSLG_EXPORT_ALL_SYMBOLS`), the
+  include path and `-ldl` to consumers. The narrow export is the one visible
+  difference to `-rdynamic`: an executable stripped of its symbol table without a
+  separate debug file keeps no names for the resolver (`StrippedExecutableTest`); the
+  hooks and interposers are everything the library needs exported — names come from
+  the symbol table and DWARF of the files, not from the dynamic symbol table. Link
+  plain `callstacklogger` when you want the on-demand `get_call_stack()` API without
   per-call `-finstrument-functions` hooks. The `LOG_ADDR` / `LOG_ELAPSED` macros are PRIVATE compile definitions on this target: only
   `callStack.cpp` and `trace.cpp` test them (nothing in `include/` does), and as
   PUBLIC definitions they leaked into every consumer TU, where any unrelated
@@ -1151,7 +1302,12 @@ The build produces three CMake targets:
 - `callstacklogger_instrumented` (INTERFACE, plus alias `callstacklogger::instrumented`) —
   bundles `INSTRUMENT_FLAGS` (compile-time `-finstrument-functions` plus GCC's
   exclude-file-list) and links `callstacklogger`. **The single target users link to get
-  full tracing.**
+  full tracing.** With `DISABLE_INSTRUMENTATION=ON` it is empty — no flags, no `-g`, no
+  exports, no library — so a release build that keeps it in the link line is the same
+  binary as one that never linked it (`tests/disabled/` proves it through
+  `ctest --build-and-test`: NEEDED libraries, debug sections and exported symbols of
+  the two programs must match); a program that uses the on-demand API links
+  `callstacklogger::callstacklogger` explicitly.
 - `runDemo` (executable) — only built when the project is top-level (`CSLG_TOP_LEVEL`).
   Skipped when cslg is pulled in via `add_subdirectory` or FetchContent so user projects
   don't get it built as a side effect.
@@ -1160,7 +1316,7 @@ External users integrate by `FetchContent_MakeAvailable` or `add_subdirectory` a
 ```cmake
 target_link_libraries(my_app PRIVATE callstacklogger::instrumented)
 ```
-No per-target `target_compile_options` or `-rdynamic` boilerplate needed — everything
+No per-target `target_compile_options` or link-option boilerplate needed — everything
 propagates through the INTERFACE. See README "Integrating into your own project".
 
 ## Testing
@@ -1285,7 +1441,7 @@ Test pure/deterministic functions from the include headers:
 - `FilteredOverflowTest.UnloggedFramesBeyondInitialCapacityKeepDepthExact` — runs
   `cslg_filtered_overflow_program` (same recursion, plus a call at every level into
   `cslg_filtered_overflow_lib`, an instrumented shared library stripped after the build whose
-  file-local helper has no symbol left for `dladdr()` or BFD — its enter hook fires but
+  file-local helper has no symbol left for `dladdr()` or the symbolizer — its enter hook fires but
   writes no line). Asserts exactly one line per logged enter (6003) and that the markers
   traced afterwards sit at their true depths
   (`marker_a`/`marker_b` level with the first recursion frame, `marker_b_child` one
@@ -1322,9 +1478,9 @@ Test pure/deterministic functions from the include headers:
   callees (distinct template instantiations, so each call is a cache miss) while another
   `dlopen()`s/`dlclose()`s `cslg_dlopen_ctor_plugin` in a loop. The plugin's instrumented
   static initializer fires the enter hook with glibc's loader lock held; with `dladdr()`
-  under `s_bfd_mutex` the two threads deadlocked on every run (exit 124). Pins the
+  under `s_resolver_mutex` the two threads deadlocked on every run (exit 124). Pins the
   lock-order rule in `resolve_no_unwind()`. The loop is bounded (20,000 rounds): the two
-  threads compete for `s_bfd_mutex` with an unfair handoff, and an unbounded loop starved
+  threads compete for `s_resolver_mutex` with an unfair handoff, and an unbounded loop starved
   the cold path for 1–42 s per run on Ubuntu 24.04 in every configuration, which the
   timeout reported as the deadlock; the real deadlock strikes within the first rounds and
   never reaches the bound.
@@ -1338,12 +1494,11 @@ Test pure/deterministic functions from the include headers:
 - `StrippedCallerTest.CallerInStrippedLibraryDoesNotHang` — regression test for
   the `resolve_filename_and_line()` infinite loop: the instrumented callback's
   caller address lies in a file-local function of the stripped
-  `libcslg_stripped_caller.so`, so `dladdr` yields no symbol and
-  `bfd_find_nearest_line` fails; the resolver must return the `<bfd_error>`
-  fallback instead of spinning forever while holding `s_bfd_mutex`. The program
-  runs under `timeout 10` (with `DEBUGINFOD_URLS` cleared so libbfd cannot
-  fetch debug info from the network), so a regression fails fast with exit
-  code 124 instead of hanging the suite.
+  `libcslg_stripped_caller.so`, so `dladdr` yields no symbol and the symbolizer
+  finds neither a symbol nor a line; the resolver must return the
+  `<unknown function>:???` fallback instead of spinning forever while holding
+  `s_resolver_mutex`. The program runs under `timeout 10`, so a regression fails
+  fast with exit code 124 instead of hanging the suite.
 - `LogAddrFlagTest` (2 tests) exercises the build-time CMake option `-DLOG_ADDR=ON`.
   The flag has its own library variant in `tests/integration/CMakeLists.txt` —
   `callstacklogger_log_addr` — built from the same sources with the macro defined, and
@@ -1451,7 +1606,7 @@ Test pure/deterministic functions from the include headers:
   catch whose thrower chain was inlined into the catcher sits under the catcher, the
   catch line too, the inlined frames carry `!_`; and a retry loop whose longjmp'ing leaf
   is inlined keeps its marker at the loop's depth with every leaf marked `~_` — both
-  need the DWARF inline chains (under Clang, the `-gdwarf-4` the variant propagates). `LogExceptionsUncaughtTest` (6 tests) drives
+  need the DWARF inline chains (read from Clang's default DWARF 5 as well). `LogExceptionsUncaughtTest` (6 tests) drives
   `cslg_uncaught_traced_program_log_exceptions_elapsed` in one mode per test (its
   command-line argument): the plain uncaught throw (the process must die, the last
   line is the `terminate` line at the thrower's depth + 1, the throw line precedes
@@ -1471,6 +1626,34 @@ Test pure/deterministic functions from the include headers:
   no handler of its own, so the worker's frames stay `[  pending ]`; the main
   file, blocked in `join()`, carries no event).
   The driver sets stdout unbuffered, since the abort would discard its reported lines.
+- `SeparateDebugFileTest.DebuglinkFileSuppliesNamesAndLines` — the fixture library's
+  DWARF was moved post-build to `<lib>.debug` (`objcopy --only-keep-debug`,
+  `--strip-debug`, `--add-gnu-debuglink`); the test checks the ELF section names
+  (no `.debug_info`, a `.gnu_debuglink`) and that the helper's call site inside the
+  library resolves to `separate_debug_lib.cpp:<line>`.
+- `CompressedDebugSectionsTest` (2 tests) — call sites inside libraries built with
+  `-gz=zlib` and `-gz=zstd` resolve to file and line; the zstd test skips when the
+  toolchain lacks `-gz=zstd` (`CSLG_HAVE_ZSTD_DEBUG`).
+- `DamagedObjectTest` (3 tests) — `cslg_damaged_objects_traced_program` copies the
+  dlopen plugin: deleted after loading → `<could not open object file>` /
+  `<could not open caller object file>:???` and no name from the vanished file;
+  truncated right after the last PT_LOAD (the loader still maps it, the section
+  headers are gone) → the same texts and exit 0 — the file-size guard in
+  `backtraceExtension.c` is what keeps this from a SIGBUS; addresses in no object
+  (`0x1`, a heap block) through the public `resolve()` → `<address to object not found>`.
+- `PieTest.PieAndNonPieExecutablesResolveAlike` — `traced_program.cpp` built with
+  `-fPIE -pie` and with `-fno-pie -no-pie`; both traces must equal the default build's
+  line for line (timestamp, duration and address columns aside). Pins the load-bias
+  rule (`l_addr`, not `dli_fbase`).
+- `StrippedExecutableTest` (2 tests) — the traced program after `strip --strip-all`
+  with a `.gnu_debuglink` debug file next to it (trace equal to the default build's) and
+  without one (exit 0, a well-formed trace; empty with the narrow symbol export, names
+  with `:???` under `-rdynamic` — `CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS` tells the test which).
+- `cslg_disabled_instrumentation_is_inert` (ctest, only with `DISABLE_INSTRUMENTATION=ON`)
+  — `ctest --build-and-test` configures `tests/disabled/` as a Release consumer project
+  (with `FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE` pointing at the already-downloaded
+  sources) and runs `compare_binaries.sh` on the program built with and without
+  `callstacklogger::instrumented`.
 - `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the both-flags
   variant `cslg_traced_test_program_log_elapsed_addr`. Asserts the
   ordering "timestamp → duration → addr" via regex, the tree column stays
@@ -1544,16 +1727,11 @@ cmake -B build-asan -DBUILD_TESTS=ON -DSANITIZE=address+undefined
 cmake -B build-tsan -DBUILD_TESTS=ON -DSANITIZE=thread
 ```
 
-LSan reports from inside `libbfd` (GNU binutils keeps static symbol-table / object-file
-caches live to program exit — not a leak in cslg's code) are silenced via
-`tests/lsan-suppressions.txt`. Pass it with
-`LSAN_OPTIONS=suppressions=.../tests/lsan-suppressions.txt`. The patterns are anchored
-(`leak:^bfd_*`, `leak:^_bfd_*`) because LSan matches them as substrings of every frame
-name — an unanchored `bfd_` also matched cslg's own `bfdResolver::ensure_bfd_loaded` /
-`check_bfd_initialized` / `bfd_load_failed` frames and would hide a genuine cslg leak.
-`leak:libbfd` is a module match that only fires where libbfd is a shared library
-(static `libbfd.a` on Fedora makes it a no-op). Our own allocations are
-still caught. The Clang builds need `libclang-rt-18-dev` (added to the Dockerfile) —
+LeakSanitizer runs without a suppression file (the libbfd suppressions of earlier
+releases are gone): libbacktrace allocates through `mmap`, which LSan does not track,
+and keeps what it read for the process lifetime by design; the resolver's own caches
+are reachable from static storage. The ASan runs pass without suppressions on GCC and
+Clang. The Clang builds need `libclang-rt-18-dev` (added to the Dockerfile) —
 GCC ships its sanitizer runtimes with `g++`.
 
 docker compose services: `sanitize-asan` and `sanitize-tsan` (GCC), plus
@@ -1563,7 +1741,9 @@ under the respective sanitizer.
 GitHub Actions CI runs the two GCC sanitizer services on every push and PR:
 `sanitize-asan` (ASan + UBSan + LSan) and `sanitize-tsan` (TSan). Clang sanitizer
 runs are not part of CI to keep the maintenance surface small — they remain
-available locally via docker-compose.
+available locally via docker-compose. The sanitizer flags also reach
+`cslg_libbacktrace` (`cslg_apply_sanitizers`), so the vendored symbolizer runs
+sanitized too.
 
 ## CI/CD
 
@@ -1583,14 +1763,14 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with sev
   only here — the inlined driver is built at -O2 in every job, the rest of the suite
   is not. Locally the `test-clang-optimized` compose service.
 - **disabled-instrumentation**: `-DDISABLE_INSTRUMENTATION=ON` with every `LOG_*`
-  option on, build plus the unit tests (the integration tests are skipped at
-  configure time by design). Nothing else builds that configuration, whose `#ifdef`
-  seams between the options and the kill switch would otherwise rot unnoticed.
-  Locally the `test-disabled` compose service.
-- **sanitize-asan**: builds with `SANITIZE=address+undefined`, runs tests under ASan + UBSan + LSan (libbfd suppression via `${{ github.workspace }}/tests/lsan-suppressions.txt`).
+  option on, build plus the unit tests and the inertness check of `tests/disabled/`
+  (the integration tests are skipped at configure time by design). Nothing else
+  builds that configuration, whose `#ifdef` seams between the options and the kill
+  switch would otherwise rot unnoticed. Locally the `test-disabled` compose service.
+- **sanitize-asan**: builds with `SANITIZE=address+undefined`, runs tests under ASan + UBSan + LSan (no suppressions).
 - **sanitize-tsan**: builds with `SANITIZE=thread`, runs tests under TSan.
 
-Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across toolchain versions and would add maintenance noise. Available locally via docker-compose.
+Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across toolchain versions and would add maintenance noise. Available locally via docker-compose. None of the jobs installs `binutils-dev` any more; they install `libc6-dbg` (file and line for libc frames) and, for coverage, `lcov`.
 
 ## Code Style
 
@@ -1615,7 +1795,8 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
 ## Design Decisions & Caveats
 
 1. **Linux-only:** Relies on `/proc/self/cmdline`, `/proc/self/exe`, `/proc/self/maps`,
-   `dladdr`, BFD, `backtrace`, `localtime_r`, `O_NOFOLLOW`. Supports both GCC and Clang compilers.
+   `dladdr1`, libbacktrace's ELF/DWARF reader, `backtrace`, `localtime_r`, `O_NOFOLLOW`.
+   Supports both GCC and Clang compilers.
    **Std library exclusion uses a two-tier approach:**
    - GCC: compile-time via `-finstrument-functions-exclude-file-list` (auto-discovered paths)
    - Clang: runtime via `is_std_library_symbol()` mangled name filter in `resolve_function_name()`
@@ -1642,9 +1823,10 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    `FILE*` lives in an RAII `PerThreadTraceFile` member whose destructor runs on
    thread exit. **Zero mutex on the hot write path** — each thread writes to its own
    FILE*. `open_files_mutex` is taken only during open (once per thread) and during
-   shutdown (to fflush the registry). `s_bfd_mutex` serializes all BFD work and the
-   memoization caches (BFD is not thread-safe); `dladdr()` runs outside it (lock-order
-   rule, see the memoization paragraph in the resolution pipeline) and file I/O is
+   shutdown (to fflush the registry). `s_resolver_mutex` serializes every call into
+   libbacktrace and the memoization caches (libbacktrace's lazy per-unit parsing
+   must not run twice); `dladdr1()` runs outside it (lock-order rule, see the
+   memoization paragraph in the resolution pipeline) and file I/O is
    fully parallel.
    **Shutdown does NOT close other threads' descriptors** — it only fflushes — to
    avoid UAF on the stdio FILE struct and fd-number-reuse for patch_fd (see the
@@ -1652,7 +1834,7 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    Worst-case shutdown artifact is one torn final line per thread. `fork()` is
    not supported — child inherits parent's thread_local FILE* pointers.
    `localtime_r` replaces `std::localtime` for thread-safe timestamp formatting.
-3. **Caller comes from the hook argument, not a stack walk:** `bfdResolver::resolve()`
+3. **Caller comes from the hook argument, not a stack walk:** `addressResolver::resolve()`
    resolves `caller - 1`, where `caller` is the return address both compilers pass to
    `__cyg_profile_func_enter`. Nothing in the hook or resolver depends on the shape
    of the call chain, so helpers may be inlined or split freely and the library needs
@@ -1668,7 +1850,8 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    output to a custom path (defaults to `"trace.out"`). A relative path is resolved
    against the working directory at program start (see Trace File Lifecycle)
 6. **Performance overhead:** The first call for each callee/call-site address triggers
-   full symbol resolution via BFD; repeat calls hit the per-address memoization caches
+   full symbol resolution (object registration on the very first address of an object,
+   then the symbol-table and DWARF lookups); repeat calls hit the per-address memoization caches
    (see Symbol Resolution Pipeline) and cost a hash lookup plus the file write. Still
    a debugging/tracing tool, not for production use. The warm path allocates nothing:
    the enter hook formats from pointers into the caches (`ResolvedFrameView`) into
@@ -1715,7 +1898,7 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    `LOG_EXCEPTIONS`). Documented in README's "Compiler-specific instrumentation";
    pinned by `ExceptionUnwindTest` on both compilers and by `LongjmpTest`.
 10. **The hooks are opaque to `pthread_cancel`:** both hooks that contain cancellation
-   points (the enter hook: `fwrite`, the lazy `open`, BFD's reads; the LOG_ELAPSED exit
+   points (the enter hook: `fwrite`, the lazy `open`, the symbolizer's reads; the LOG_ELAPSED exit
    hook: `pwrite`) run with cancellation disabled via `pthread_setcancelstate`. This is
    load-bearing: GCC and Clang emit the hook call as non-throwing, so the instrumented
    function has no unwind entry for that call site and ANY unwind leaving a hook —
@@ -1736,13 +1919,37 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    `LOG_ELAPSED` their lines keep `[  pending ]` exactly like after a crash
    (README "What is not traced").
 12. **Signal handlers must not be instrumented (known limitation):** the hooks
-   allocate, lock `s_bfd_mutex`, and use stdio — none async-signal-safe. A signal
+   allocate, lock `s_resolver_mutex`, and use stdio — none async-signal-safe
+   (libbacktrace's own README calls its lookups async-signal-safe after a first
+   call; that does not make the hooks so). A signal
    interrupting a thread mid-`malloc` whose handler runs instrumented functions
    re-enters the allocator on the same thread and can deadlock. (The
    `t_in_instrumentation` guard incidentally covers signals landing *inside* the
    resolve pipeline, but not the interrupted-allocator case.) Signal handlers
    should live in a TU compiled without `-finstrument-functions` or carry
    `NO_INSTRUMENT`. Documented in README's Thread Safety section.
+
+13. **The symbolizer is libbacktrace, vendored, registered per object (the license fix):**
+   libbfd is GPL-3.0-or-later and made every shipped instrumented program a GPL
+   program, which the commercial license cannot cover; `THIRD_PARTY.md` has the
+   before/after tables. libbacktrace (BSD-3-Clause) replaced it in v1.0.0 with the
+   one-state-plus-extension design described in the resolution pipeline (why the
+   public API alone could not register plugins and dlopen()ed libraries, the
+   `elf_add()` dependency, the load-bias rule, the name mapping that keeps the
+   output byte-identical except for the retired `<bfd_error>` texts). Alternatives
+   considered and why not: elfutils' libdw (LGPL-3.0-or-later / GPL-2.0-or-later),
+   libdwarf (LGPL-2.1), cpptrace and backward-cpp (MIT, but they resolve through
+   libdwarf, libdw or libbfd), LLVM's DebugInfo (permissive but enormous), LIEF
+   (DWARF only in the paid edition), `addr2line` / `llvm-symbolizer` as a child
+   process (far too slow per call, tools needed on the target), an own DWARF parser
+   (weeks of work libbacktrace has done). The vendored C code is compiled at -O2 in
+   every build type; unoptimized, the first lookups in an object took about twice as
+   long (`bench/`). Measured with `bench/run_bench.sh` on the reference host against
+   the libbfd build: the warm per-call cost is unchanged, the cold cost per new
+   address is within 10 % at -O0 and about 30 % lower at RelWithDebInfo, the
+   one-time registration of an object (2000 functions) is 10–15 % slower (libbacktrace
+   builds its unit address map and sorts the symbol table up front, where BFD parsed
+   DWARF lazily), and the resident memory after tracing is about half.
 
 ## Use Cases (from the article)
 
@@ -1781,3 +1988,9 @@ The project evolved through these milestones (earliest first):
     in-place marks on the frames they left) and the level-keyed frame reconciliation,
     which started inside the option and then moved to every build once its cost was
     measured, retiring the Clang-exception and longjmp drifts as documented limitations
+13. v1.0.0: symbol resolution moved from libbfd (GPL) to libbacktrace (BSD), vendored at a
+    pinned commit and registered per object through `src/backtraceExtension.c`; no binutils
+    dependency; programs export only the hooks and the interposers instead of `-rdynamic`;
+    `callstacklogger::instrumented` is inert under `DISABLE_INSTRUMENTATION`; Clang's
+    `-gdwarf-4` request gone; `THIRD_PARTY.md`, `CHANGELOG.md`, the `bench/` benchmark and
+    the fixtures for separate, compressed, deleted and truncated debug information
