@@ -217,44 +217,63 @@ if(DISABLE_INSTRUMENTATION)
 endif()
 
 # ============================================================================
-# BFD link dependencies
+# Symbols the user's executable must export
 # ============================================================================
-# Newer static libbfd builds (binutils >= 2.46, e.g. Fedora 41+) call into
-# libzstd for zstd-compressed debug sections, but distro linker scripts for
-# -lbfd don't always pull -lzstd in (Fedora's /usr/lib64/libbfd.so lists
-# libsframe / -lz / -ldl only), so every executable linking -lbfd fails with
-# "undefined reference to ZSTD_isError". Probe at configure time whether bfd
-# links standalone and append zstd only when needed — Ubuntu's binutils keeps
-# linking exactly as before. The resulting list is consumed by src/ (the main
-# library) and tests/integration/ (the per-flag library variants); it must be
-# set here because child scopes only see parent variables defined before
-# add_subdirectory().
+# Plugins loaded with dlopen() do not link the library: their instrumented
+# code binds __cyg_profile_func_enter / __cyg_profile_func_exit at load time
+# to the HOST executable's dynamic symbols, so the executable has to export
+# the two hooks or every traced plugin fails to load. With LOG_EXCEPTIONS the
+# executable also defines the C++ runtime's throw/catch entry points
+# (__cxa_throw & co., src/exceptions.cpp) and must export them, or the dynamic
+# linker never routes the runtime's own calls through them. Nothing else in
+# the library depends on exported symbols: the resolver names functions from
+# the symbol table and the debug information of the object files, not from
+# the dynamic symbol table.
+#
+# -rdynamic (the historical choice) exports EVERY global symbol of the
+# executable, which bloats its dynamic symbol table and lets shared libraries
+# bind to the executable's copies of their own symbols. The narrow form,
+# --export-dynamic-symbol=<name> per symbol (GNU ld since binutils 2.35, lld,
+# gold), exports exactly the names above and is used when the linker accepts
+# it; -rdynamic stays the fallback for older linkers and the explicit choice
+# behind CSLG_EXPORT_ALL_SYMBOLS. The one observable difference: an executable
+# stripped of its symbol table (strip --strip-all, no separate debug file)
+# keeps its function names in the dynamic symbol table only with -rdynamic;
+# with the narrow form the resolver finds no names and the trace stays empty.
+option(CSLG_EXPORT_ALL_SYMBOLS
+    "Link programs that trace with -rdynamic (every symbol exported) instead of exporting only the hooks"
+    OFF)
 include(CheckCXXSourceCompiles)
-set(CSLG_BFD_PROBE_SOURCE "
-    #define PACKAGE
-    #define PACKAGE_VERSION
-    #include <bfd.h>
-    int main() { bfd_init(); return 0; }")
-set(CMAKE_REQUIRED_LIBRARIES bfd)
-check_cxx_source_compiles("${CSLG_BFD_PROBE_SOURCE}" CSLG_BFD_LINKS_STANDALONE)
-set(CSLG_BFD_LINK_LIBS dl bfd)
-if(NOT CSLG_BFD_LINKS_STANDALONE)
-    set(CMAKE_REQUIRED_LIBRARIES bfd zstd)
-    check_cxx_source_compiles("${CSLG_BFD_PROBE_SOURCE}" CSLG_BFD_LINKS_WITH_ZSTD)
-    if(CSLG_BFD_LINKS_WITH_ZSTD)
-        list(APPEND CSLG_BFD_LINK_LIBS zstd)
-        message(STATUS "libbfd requires libzstd — appending zstd to the BFD link libraries")
-    else()
-        message(WARNING "Could not link a probe program against libbfd (alone or with zstd). "
-                "Is binutils-dev / binutils-devel installed (plus libzstd-devel on Fedora)? "
-                "The build will likely fail at link time.")
+set(CMAKE_REQUIRED_LINK_OPTIONS "-Wl,--export-dynamic-symbol=main")
+check_cxx_source_compiles("int main() { return 0; }" CSLG_LINKER_HAS_EXPORT_DYNAMIC_SYMBOL)
+unset(CMAKE_REQUIRED_LINK_OPTIONS)
+
+# Attaches, as INTERFACE link options of `target` (a library every tracing
+# program links), the exports described above. Used for the shipped library in
+# src/ and for the per-flag library variants the integration tests build.
+function(cslg_set_consumer_link_options target)
+    if(CSLG_EXPORT_ALL_SYMBOLS OR NOT CSLG_LINKER_HAS_EXPORT_DYNAMIC_SYMBOL)
+        target_link_options(${target} INTERFACE -rdynamic)
+        return()
     endif()
-endif()
-unset(CMAKE_REQUIRED_LIBRARIES)
+    set(symbols __cyg_profile_func_enter __cyg_profile_func_exit)
+    if(LOG_EXCEPTIONS)
+        # The five interposed entry points (see verify_interposers in
+        # src/exceptions.cpp): __cxa_throw, __cxa_rethrow, __cxa_begin_catch,
+        # std::rethrow_exception(std::exception_ptr), std::terminate().
+        list(APPEND symbols __cxa_throw __cxa_rethrow __cxa_begin_catch
+             _ZSt17rethrow_exceptionSt13exception_ptr _ZSt9terminatev)
+    endif()
+    foreach(symbol IN LISTS symbols)
+        target_link_options(${target} INTERFACE "-Wl,--export-dynamic-symbol=${symbol}")
+    endforeach()
+endfunction()
 
 # ============================================================================
 # Targets
 # ============================================================================
+# The vendored symbolizer first: src/ links the target it defines.
+add_subdirectory(third_party/libbacktrace)
 add_subdirectory(src)
 
 if(CSLG_TOP_LEVEL)

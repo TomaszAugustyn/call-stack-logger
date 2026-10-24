@@ -229,13 +229,17 @@ function(cslg_add_flag_variant variant driver)
     # so the variant libraries compile the same code the shipped library does.
     target_compile_definitions(callstacklogger_${variant} PRIVATE _FILE_OFFSET_BITS=64)
     target_compile_options(callstacklogger_${variant} INTERFACE -g)
-    # Same DWARF 4 request as the shipped library makes under Clang with
-    # LOG_EXCEPTIONS (see src/CMakeLists.txt for why).
-    if("LOG_EXCEPTIONS" IN_LIST ARGN AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        target_compile_options(callstacklogger_${variant} INTERFACE -gdwarf-4)
+    # The same exported symbols and the same symbolizer as the shipped library
+    # (src/CMakeLists.txt). The exported set depends on the global LOG_EXCEPTIONS
+    # option, not on the variant's macros: a variant WITH the interposers in a
+    # build configured WITHOUT the option needs them exported all the same.
+    if("LOG_EXCEPTIONS" IN_LIST ARGN AND NOT LOG_EXCEPTIONS)
+        set(LOG_EXCEPTIONS ON)
     endif()
-    target_link_options(callstacklogger_${variant} INTERFACE -rdynamic)
-    target_link_libraries(callstacklogger_${variant} PUBLIC ${CSLG_BFD_LINK_LIBS} Threads::Threads)
+    cslg_set_consumer_link_options(callstacklogger_${variant})
+    target_link_libraries(callstacklogger_${variant}
+        PRIVATE cslg_libbacktrace
+        PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 
     add_executable(cslg_traced_test_program_${variant} ${driver})
     target_compile_features(cslg_traced_test_program_${variant} PRIVATE cxx_std_17)

@@ -11,37 +11,7 @@
 
 #include "types.h"
 
-// Workaround for deliberately incompatible bfd.h header files on some systems.
-// binutils < 2.39 (e.g. Ubuntu 22.04, Debian 11) #errors out unless PACKAGE /
-// PACKAGE_VERSION are defined — without this guard, consumers of the public
-// get_call_stack() API could not include this header on those distros.
-// Mirrors the same workaround in src/callStack.cpp.
-//
-// Only macros WE defined are #undef'd right after the include: leaving empty
-// definitions behind would clash with consumer TUs that define their own
-// PACKAGE afterwards (e.g. an autotools-generated config.h with
-// `#define PACKAGE "myapp"` — a macro redefinition), while a consumer's
-// pre-existing definition is passed through untouched.
-#ifndef PACKAGE
-    #define PACKAGE
-    #define CSLG_UNDEF_PACKAGE
-#endif
-#ifndef PACKAGE_VERSION
-    #define PACKAGE_VERSION
-    #define CSLG_UNDEF_PACKAGE_VERSION
-#endif
-
-#include <bfd.h>
-
-#ifdef CSLG_UNDEF_PACKAGE
-    #undef PACKAGE
-    #undef CSLG_UNDEF_PACKAGE
-#endif
-#ifdef CSLG_UNDEF_PACKAGE_VERSION
-    #undef PACKAGE_VERSION
-    #undef CSLG_UNDEF_PACKAGE_VERSION
-#endif
-
+#include <cstdint>
 #include <dlfcn.h>
 #include <map>
 #include <memory>
@@ -57,55 +27,48 @@
     #define NO_INSTRUMENT __attribute__((no_instrument_function))
 #endif
 
+// The symbolizer behind the resolver is libbacktrace (vendored, see
+// third_party/libbacktrace). Its state is opaque here: this header is part of
+// the public API and must not require libbacktrace's headers in a consumer's
+// build, so the state is only ever named through this forward declaration and
+// touched in callStack.cpp.
+struct backtrace_state;
+
 namespace instrumentation {
 
 /**
  * Loads symbols and resolves address pointers to ResolvedFrame
  *
- * It uses binutils to define bfds, caches the bfds to read them only once
- * per run of the application. For the use of dladdr see also:
+ * Every object file the program has loaded (the executable, its shared
+ * libraries, dlopen()ed plugins) is registered once, at first sight of an
+ * address inside it, with one libbacktrace state at the object's runtime load
+ * bias; the state then answers symbol-table and DWARF lookups for runtime
+ * addresses directly. The object behind an address comes from dladdr and
+ * /proc/self/maps. For the use of dladdr see also:
  * https://sourceware.org/git/?p=glibc.git;a=blob;f=debug/backtracesyms.c
  */
-struct bfdResolver {
+struct addressResolver {
 public:
-    /// Single bfd structure
-    struct storedBfd {
-        // Deleter type derived from bfd_close itself rather than spelled with
-        // bfd_boolean: upstream binutils removed the bfd_boolean typedef (>= 2.38);
-        // current distro headers only provide it as a compat #define that can be
-        // poisoned via POISON_BFD_BOOLEAN. decltype tracks whatever return type
-        // the installed bfd.h declares (bfd_boolean, bool, int, ...).
-        using deleter_t = decltype(bfd_close);
-
-        // Custom deleter that casts back to char* before delete[], matching the
-        // allocation type (new char[]) used for the BFD symbol table storage.
-        struct SymbolDeleter {
-            NO_INSTRUMENT void operator()(asymbol** p) const { delete[] reinterpret_cast<char*>(p); }
-        };
-
-        std::unique_ptr<bfd, deleter_t*> abfd;
-        std::unique_ptr<asymbol*[], SymbolDeleter> symbols;
-        // Assigned by ensure_bfd_loaded() just before the map emplace; the
-        // zero-init keeps the member from ever being read indeterminate.
-        intptr_t offset = 0;
-
-        NO_INSTRUMENT storedBfd(bfd* _abfd, deleter_t* _del) : abfd(_abfd, _del) {}
-        // Explicit move operations and destructor with NO_INSTRUMENT keep the
-        // compiler-generated special members uninstrumented (they run during
-        // emplace into the bfds() map and on the failure paths in
-        // ensure_bfd_loaded; the map itself is deliberately leaked, so there is
-        // no static cleanup). Declaring a destructor suppresses implicit move
-        // generation in C++, so move operations must be explicitly defaulted.
-        NO_INSTRUMENT storedBfd(storedBfd&&) = default;
-        NO_INSTRUMENT storedBfd& operator=(storedBfd&&) = default;
-        NO_INSTRUMENT ~storedBfd() = default;
+    /// What the resolver knows about one registered object file (an entry of
+    /// objects(), keyed by the object's dli_fbase).
+    struct ObjectFile {
+        /// link_map::l_addr — the base libbacktrace adds to the file's
+        /// addresses. 0 for a non-PIE executable, the map start otherwise.
+        uintptr_t load_bias = 0;
+        /// The file (or its separate debug file) has a symbol table / DWARF
+        /// debug information; lookups that cannot succeed are skipped.
+        bool has_symtab = false;
+        bool has_dwarf = false;
     };
 
-    /// Returns the cached (or freshly loaded) storedBfd for the object containing
-    /// `_info`, or nullptr when the object file cannot be opened/parsed. Pointer
-    /// stays valid for the process lifetime (bfds() entries are never erased).
+    /// Returns the cached (or freshly registered) ObjectFile for the object
+    /// containing `_info` (its dladdr() result; `load_bias` is the object's
+    /// link_map::l_addr obtained with it), or nullptr when the object file
+    /// cannot be opened/parsed. Pointer stays valid for the process lifetime
+    /// (objects() entries are never erased). Must be called with
+    /// s_resolver_mutex held.
     NO_INSTRUMENT
-    static storedBfd* ensure_bfd_loaded(Dl_info& _info);
+    static ObjectFile* ensure_object_loaded(const Dl_info& _info, uintptr_t load_bias);
 
     /// Resolves callee + caller for the instrumentation hooks. `caller_address`
     /// is the hook's second argument: both GCC and Clang pass the instrumented
@@ -133,8 +96,8 @@ public:
     /// Non-owning form of resolve_no_unwind(): the memoized (or, on first
     /// sight, freshly resolved) callee name and caller location are returned as
     /// pointers into the caches. This is the only function that touches the
-    /// caches together with resolve_location() below, so s_bfd_mutex is held
-    /// exactly there and nowhere up the stack.
+    /// caches together with resolve_location() below, so s_resolver_mutex is
+    /// held exactly there and nowhere up the stack.
     NO_INSTRUMENT
     static bool resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out);
 
@@ -148,29 +111,77 @@ public:
 
     /// The inline chain at `address`: the base names (function_base_name in
     /// frameReconcile.h) of the functions inlined into each other there,
-    /// innermost first, read from DWARF with bfd_find_inliner_info(). Empty when
-    /// the address has no DWARF line information (then nothing is known about
-    /// inlining there). Memoized per address; the pointer stays valid for the
-    /// process lifetime like the other cache entries.
+    /// innermost first, read from DWARF (libbacktrace reports one entry per
+    /// inlined level, innermost first). Empty when the address has no DWARF
+    /// line information (then nothing is known about inlining there). Memoized
+    /// per address; the pointer stays valid for the process lifetime like the
+    /// other cache entries.
     NO_INSTRUMENT
     static const std::vector<std::string>* resolve_inline_chain(void* address);
 
-private:
-    /// Walks the object's section list to find the section containing `address`
-    /// and writes the section-relative offset to `offset_out`. Returns nullptr
-    /// when no section contains the address. Shared by resolve_function_name()
-    /// and resolve_filename_and_line(). Must be called with s_bfd_mutex held.
-    NO_INSTRUMENT
-    static asection* find_containing_section(storedBfd& currBfd, void* address,
-                                             intptr_t& offset_out);
+    /// The dladdr() result for an address plus the containing object's load
+    /// bias, both obtained OUTSIDE s_resolver_mutex (dladdr takes glibc's
+    /// loader lock — see the lock-order note in resolve_no_unwind()). `valid`
+    /// is false when dladdr() failed; the other fields are then unspecified.
+    struct AddressInfo {
+        Dl_info info {};
+        uintptr_t load_bias = 0;
+        bool valid = false;
+    };
 
-    /// Names the callee from `dl_info`, the dladdr() result for callee_address
-    /// (nullptr when dladdr() failed). Must be called with s_bfd_mutex held; the
-    /// dladdr() call itself is made by resolve_no_unwind() OUTSIDE the mutex —
-    /// see the lock-order note there.
+    /// dladdr1(RTLD_DL_LINKMAP) for `address`: the Dl_info and the link_map's
+    /// l_addr, read while the map is certainly alive. Never call with
+    /// s_resolver_mutex held.
+    NO_INSTRUMENT
+    static AddressInfo query_address(void* address);
+
+    /// One entry libbacktrace reports for an address: the function containing
+    /// it (its DWARF name, a linkage name where DWARF has one) and the source
+    /// position. For an address inside inlined code there is one entry per
+    /// inlined level, innermost first; `file`/`line` of an entry are the
+    /// position inside that function (for all but the innermost: the call site
+    /// of the next inner one). Empty strings / line 0 mean "not available".
+    struct DwarfEntry {
+        std::string function;
+        std::string file;
+        unsigned int line = 0;
+    };
+
+    /// libbacktrace's complete answer for one address, from the DWARF debug
+    /// information (`entries`, innermost first; empty when no registered file
+    /// describes the address) and from the symbol table (`symbol`, the
+    /// function or object symbol containing the address, `symbol_value` its
+    /// start; empty when none).
+    struct Lookup {
+        std::vector<DwarfEntry> entries;
+        std::string symbol;
+        uintptr_t symbol_value = 0;
+    };
+
+private:
+    /// Runs backtrace_pcinfo() and backtrace_syminfo() for `address` (a
+    /// runtime address inside `object`). Must be called with s_resolver_mutex
+    /// held: libbacktrace's lazy per-unit parsing may otherwise run twice.
+    NO_INSTRUMENT
+    static Lookup look_up(const ObjectFile& object, void* address);
+
+    /// The name of the function containing the address, chosen as BFD's
+    /// bfd_find_nearest_line() chose it, so that the trace reads as before:
+    /// the DWARF linkage name when there is one, otherwise the symbol table's
+    /// name (which carries the mangled parameter list for a static function,
+    /// an anonymous-namespace function or a lambda), unless that only repeats
+    /// the DWARF name or adds a clone suffix to it. Empty when nothing names
+    /// the address.
+    NO_INSTRUMENT
+    static std::string function_name_of(const Lookup& lookup);
+
+    /// Names the callee from `address_info`, the dladdr() result for
+    /// callee_address (`valid` false when dladdr() failed). Must be called
+    /// with s_resolver_mutex held; the dladdr() call itself is made by
+    /// resolve_no_unwind() OUTSIDE the mutex — see the lock-order note there.
     NO_INSTRUMENT
     static std::optional<std::string> resolve_function_name(void* callee_address,
-                                                            const Dl_info* dl_info);
+                                                            const AddressInfo& address_info);
 
     /// One memoized callee name: the demangled name (nullopt = filtered / not
     /// loggable) and its base name (function_base_name in frameReconcile.h,
@@ -190,27 +201,33 @@ private:
         std::string function_base;
     };
 
-    /// Same contract as resolve_function_name(): `dl_info` is the caller's
-    /// dladdr() result, obtained outside s_bfd_mutex.
+    /// Same contract as resolve_function_name(): `address_info` is the caller's
+    /// dladdr() result, obtained outside s_resolver_mutex.
     NO_INSTRUMENT
-    static CachedLocation resolve_filename_and_line(void* caller_address, const Dl_info* dl_info);
+    static CachedLocation resolve_filename_and_line(void* caller_address, const AddressInfo& address_info);
 
     /// Location of an exception event's site (the interposer's return address
     /// minus one): resolve_filename_and_line() plus a check that the line row
     /// covering the address did not leak across a symbol boundary from the code
     /// before it (GCC 13 at -O2 gives a landing pad's entry no location of its
     /// own — see the definition), with the handler's first statement as the
-    /// fallback. Must be called with s_bfd_mutex held.
-    static CachedLocation resolve_event_site_location(void* address, const Dl_info* dl_info);
+    /// fallback. Must be called with s_resolver_mutex held.
+    static CachedLocation resolve_event_site_location(void* address, const AddressInfo& address_info);
 
     /// Reads the inline chain for `address` (see resolve_inline_chain) — must be
-    /// called with s_bfd_mutex held; `dl_info` is the address's dladdr() result
-    /// obtained outside the mutex (null when dladdr() failed).
+    /// called with s_resolver_mutex held; `address_info` is the address's dladdr()
+    /// result obtained outside the mutex.
     NO_INSTRUMENT
-    static std::vector<std::string> read_inline_chain(void* address, const Dl_info* dl_info);
+    static std::vector<std::string> read_inline_chain(void* address, const AddressInfo& address_info);
 
+    /// The one libbacktrace state, created on first use under s_resolver_mutex
+    /// (threaded, with the lazy executable discovery disabled — see
+    /// src/backtraceExtension.c) and never freed: libbacktrace has no
+    /// counterpart to backtrace_create_state(), and the caches below point into
+    /// it for the process lifetime anyway. nullptr when creation failed; every
+    /// lookup then degrades to "no information".
     NO_INSTRUMENT
-    static void check_bfd_initialized();
+    static backtrace_state* state();
 
     NO_INSTRUMENT
     static std::string get_argv0();
@@ -221,9 +238,10 @@ private:
     NO_INSTRUMENT
     static std::optional<std::string> mapped_object_path(void* base);
 
-    /// Path to hand to bfd_openr for the object described by `symbol_info`:
-    /// /proc/self/exe for the main executable, else the mapped file's absolute
-    /// path, else dli_fname verbatim. Empty when nothing usable exists.
+    /// Path of the object file described by `symbol_info` to register with
+    /// libbacktrace: /proc/self/exe for the main executable, else the mapped
+    /// file's absolute path, else dli_fname verbatim. Empty when nothing usable
+    /// exists.
     NO_INSTRUMENT
     static std::string object_file_path(const Dl_info& symbol_info);
 
@@ -236,8 +254,8 @@ private:
     // UB. Function-local statics are constructed on first use (thread-safely,
     // per C++11 magic statics), closing that window. Same rationale as the
     // g_trace() singleton in trace.cpp. The per-call cost is one
-    // already-initialized guard check on paths that already take s_bfd_mutex
-    // and do hash lookups — negligible.
+    // already-initialized guard check on paths that already take
+    // s_resolver_mutex and do hash lookups — negligible.
     //
     // Each instance is heap-allocated and deliberately LEAKED (never destroyed),
     // again mirroring g_trace(): these caches are first used during tracing,
@@ -250,35 +268,35 @@ private:
     // shutdown guarantee. (Under Clang the map destructors themselves could
     // additionally fire hooks through instrumented COMDAT std internals from a
     // user TU, mid-destruction.) Leaking removes static destruction of resolver
-    // state entirely: the kernel reclaims the memory at process exit, LSan
-    // treats reachable globals as live (nothing is reported), and the skipped
-    // bfd_close calls only release read-only descriptors the kernel closes
-    // anyway.
+    // state entirely: the kernel reclaims the memory at process exit and LSan
+    // treats reachable globals as live (nothing is reported). libbacktrace's
+    // own memory comes from mmap and is never freed either, by its design.
     //
-    // s_bfd_mutex and s_bfd_initialized stay as plain statics below: std::mutex
-    // has a constexpr constructor and bool is zero-initialized, so both are
-    // constant-initialized before any code runs — no order hazard.
+    // s_resolver_mutex stays a plain static below: std::mutex has a constexpr
+    // constructor, so it is constant-initialized before any code runs — no
+    // order hazard.
     NO_INSTRUMENT
-    static std::map<void*, storedBfd>& bfds() {
-        static auto* instance = new std::map<void*, storedBfd>();
+    static std::map<void*, ObjectFile>& objects() {
+        static auto* instance = new std::map<void*, ObjectFile>();
         return *instance;
     }
 
-    /// Negative cache: base addresses whose object file failed to load/parse.
+    /// Negative cache: base addresses whose object file failed to open/parse.
     /// Without it, every traced call whose callee or caller lands in an
-    /// unloadable object (deleted .so, unreadable file, unparsable format)
-    /// would re-run bfd_openr + bfd_check_format — file I/O per call. Bounded
-    /// by the number of distinct loaded objects. Protected by s_bfd_mutex.
+    /// unloadable object (deleted .so, unreadable or truncated file, unparsable
+    /// format) would re-run the open and the ELF checks — file I/O per call.
+    /// Bounded by the number of distinct loaded objects. Protected by
+    /// s_resolver_mutex.
     NO_INSTRUMENT
-    static std::unordered_set<void*>& bfd_load_failed() {
+    static std::unordered_set<void*>& object_load_failed() {
         static auto* instance = new std::unordered_set<void*>();
         return *instance;
     }
 
     // Memoization caches for fully-resolved per-address results, consulted in
-    // resolve_no_unwind() before the BFD machinery. bfds() caches the PARSED
-    // OBJECT FILES, but each resolve still cost dladdr + a section walk +
-    // bfd_find_nearest_line (a DWARF line-table walk) + __cxa_demangle — per
+    // resolve_no_unwind() before libbacktrace. objects() remembers which
+    // files are registered, but each resolve would still cost dladdr + a
+    // DWARF line-table walk + a symbol-table search + __cxa_demangle — per
     // call, repeated in full every time the same function was called again.
     // Memoizing by exact address turns repeat resolutions into one hash lookup.
     // A cached nullopt in name_cache() is meaningful: it records "this callee
@@ -292,7 +310,7 @@ private:
     // of KB); worst realistic case for very large binaries: a few hundred
     // thousand entries (tens of MB). Staleness caveat: dlclose + dlopen that
     // reuses an address keeps serving the old entry — the same accepted
-    // trade-off as bfds(). Protected by s_bfd_mutex.
+    // trade-off as objects(). Protected by s_resolver_mutex.
     NO_INSTRUMENT
     static std::unordered_map<void*, CachedName>& name_cache() {
         static auto* instance = new std::unordered_map<void*, CachedName>();
@@ -312,7 +330,7 @@ private:
     /// Inline chains per address (resolve_inline_chain). Consulted only when
     /// the frame reconciliation meets records at the current frame's own level
     /// (inlined activations, catches), so it stays small. Leaked and protected
-    /// by s_bfd_mutex like the other caches.
+    /// by s_resolver_mutex like the other caches.
     NO_INSTRUMENT
     static std::unordered_map<void*, std::vector<std::string>>& inline_chain_cache() {
         static auto* instance = new std::unordered_map<void*, std::vector<std::string>>();
@@ -327,12 +345,12 @@ private:
         return *instance;
     }
 
-    inline static bool s_bfd_initialized = false;
-    // Protects bfds(), s_bfd_initialized, the memoization caches, and BFD
-    // library calls which are not thread-safe. Lock-order rule: nothing that
-    // takes glibc's loader lock — dladdr() above all — may run while this
-    // mutex is held; see resolve_no_unwind() in callStack.cpp for why.
-    inline static std::mutex s_bfd_mutex;
+    // Protects objects(), the libbacktrace state and every call into it (its
+    // lazy per-unit parsing in threaded mode lets two threads both parse and
+    // leaks the loser's work), and the memoization caches. Lock-order rule:
+    // nothing that takes glibc's loader lock — dladdr() above all — may run
+    // while this mutex is held; see resolve_no_unwind() in callStack.cpp for why.
+    inline static std::mutex s_resolver_mutex;
 };
 
 /**
@@ -345,7 +363,7 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack();
 
 /// Returns the ResolvedFrame if address resolution succeeds, std::nullopt if fails.
 /// `caller_address` is the return address as passed by `__cyg_profile_func_enter`
-/// (see bfdResolver::resolve).
+/// (see addressResolver::resolve).
 NO_INSTRUMENT
 std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address);
 
@@ -369,7 +387,7 @@ void resolve_site(void* address, ResolvedFrameView& out);
 NO_INSTRUMENT
 std::string demangle_symbol(const char* mangled);
 
-/// The inline chain at `address` (see bfdResolver::resolve_inline_chain), for
+/// The inline chain at `address` (see addressResolver::resolve_inline_chain), for
 /// the frame reconciliation of frames that share a physical frame.
 NO_INSTRUMENT
 const std::vector<std::string>* inline_chain_at(void* address);

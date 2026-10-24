@@ -8,40 +8,20 @@
  */
 
 #include "callStack.h"
+#include "backtraceExtension.h"
 #include "frameReconcile.h"
 #include "prettyTime.h"
 #include "stdSymbolFilter.h"
 #include "tracerScope.h"
 
-// Workaround for deliberately incompatible bfd.h header files on some systems.
-// Same define/undef pattern as include/callStack.h (see the comment there);
-// kept self-sufficient here so this TU doesn't depend on header include order.
-#ifndef PACKAGE
-    #define PACKAGE
-    #define CSLG_UNDEF_PACKAGE
-#endif
-#ifndef PACKAGE_VERSION
-    #define PACKAGE_VERSION
-    #define CSLG_UNDEF_PACKAGE_VERSION
-#endif
-
-#include <bfd.h>
-
-#ifdef CSLG_UNDEF_PACKAGE
-    #undef PACKAGE
-    #undef CSLG_UNDEF_PACKAGE
-#endif
-#ifdef CSLG_UNDEF_PACKAGE_VERSION
-    #undef PACKAGE_VERSION
-    #undef CSLG_UNDEF_PACKAGE_VERSION
-#endif
-
+#include <backtrace.h>
 #include <cstdlib> // for strtoull
 #include <cstring>
 #include <cxxabi.h> // for __cxa_demangle
-#include <dlfcn.h> // for dladdr
+#include <dlfcn.h> // for dladdr1
 #include <execinfo.h> // for backtrace
 #include <fstream>
+#include <link.h> // for link_map
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -50,7 +30,7 @@
 namespace {
 
 // Takes const char* directly to avoid constructing a temporary std::string at each
-// call site — all callers pass const char* from BFD/dladdr.
+// call site — all callers pass const char* from libbacktrace/dladdr.
 NO_INSTRUMENT
 std::string demangle_cxa(const char* mangled) {
     int status;
@@ -82,79 +62,138 @@ instrumentation::ResolvedFrame own_frame(const instrumentation::ResolvedFrameVie
     return frame;
 }
 
+// libbacktrace's error callback. It is called for malformed or unreadable
+// files at registration and, per lookup, with errnum -1 when the registered
+// files carry no debug information for the address ("no debug info ..."). Both
+// are ordinary outcomes for the resolver — the object is negative-cached, the
+// address degrades through the documented fallback texts — so nothing is
+// printed, exactly as the BFD-based resolver printed nothing on its failures.
+NO_INSTRUMENT
+void on_backtrace_error(void* /*data*/, const char* /*message*/, int /*errnum*/) noexcept {}
+
+// The callbacks libbacktrace invokes from C. They copy every string before
+// returning (the documentation says the buffers may not outlive the callback)
+// and catch everything: the copies allocate, and an exception must not unwind
+// through libbacktrace's C frames. An allocation failure leaves `failed` set,
+// which look_up() turns into "no information", like an address no file knows.
+
+struct PcInfoCollector {
+    std::vector<instrumentation::addressResolver::DwarfEntry> entries;
+    bool failed = false;
+};
+
+NO_INSTRUMENT
+int collect_pcinfo(void* data, uintptr_t /*pc*/, const char* file, int line, const char* function) noexcept {
+    auto* out = static_cast<PcInfoCollector*>(data);
+    try {
+        instrumentation::addressResolver::DwarfEntry entry;
+        entry.function = function != nullptr ? function : "";
+        entry.file = file != nullptr ? file : "";
+        entry.line = line > 0 ? static_cast<unsigned int>(line) : 0u;
+        out->entries.push_back(std::move(entry));
+    } catch (...) {
+        out->failed = true;
+        return 1; // stop the walk
+    }
+    return 0;
+}
+
+struct SymInfoCollector {
+    std::string name;
+    uintptr_t value = 0;
+    bool failed = false;
+};
+
+NO_INSTRUMENT
+void collect_syminfo(void* data, uintptr_t /*pc*/, const char* name, uintptr_t value,
+                     uintptr_t /*size*/) noexcept {
+    auto* out = static_cast<SymInfoCollector*>(data);
+    if (name == nullptr) {
+        return; // no symbol covers the address
+    }
+    try {
+        out->name = name;
+        out->value = value;
+    } catch (...) {
+        out->failed = true;
+    }
+}
+
 } // namespace
 
 namespace instrumentation {
 
-// Must be called with s_bfd_mutex already held (locked in resolve()).
-bfdResolver::storedBfd* bfdResolver::ensure_bfd_loaded(Dl_info& _info) {
-    // Load the corresponding bfd file (from file or map). Single map lookup on
-    // the hot path: find() locates the cached entry, and on a miss the emplace's
-    // iterator is reused for the return — no separate count()/at() round trips.
-    auto it = bfds().find(_info.dli_fbase);
-    if (it == bfds().end()) {
-        // Negative cache: a previous load attempt for this object already failed.
-        // Don't retry bfd_openr on every traced call — the failure is sticky for
-        // the process lifetime (matching bfds(), which is never invalidated).
-        if (bfd_load_failed().count(_info.dli_fbase) != 0) {
+backtrace_state* addressResolver::state() {
+    // Created on first use, under s_resolver_mutex (every caller holds it), and
+    // never freed. A plain function-local pointer, not a magic static: a
+    // failed creation stays nullptr and is retried on the next lookup.
+    static backtrace_state* instance = nullptr;
+    if (instance == nullptr) {
+        instance = cslg_backtrace_create_state(&on_backtrace_error, nullptr);
+    }
+    return instance;
+}
+
+// Must be called with s_resolver_mutex already held (locked in resolve()).
+addressResolver::ObjectFile* addressResolver::ensure_object_loaded(const Dl_info& _info, uintptr_t load_bias) {
+    // Single map lookup on the hot path: find() locates the cached entry, and
+    // on a miss the emplace's iterator is reused for the return — no separate
+    // count()/at() round trips.
+    auto it = objects().find(_info.dli_fbase);
+    if (it == objects().end()) {
+        // Negative cache: a previous registration attempt for this object
+        // already failed. Don't retry the open on every traced call — the
+        // failure is sticky for the process lifetime (matching objects(),
+        // which is never invalidated).
+        if (object_load_failed().count(_info.dli_fbase) != 0) {
             return nullptr;
         }
         // An empty path means no usable file name exists for this object (no
         // mapping found and dladdr() left dli_fname null — e.g. objects the
-        // dynamic linker knows no path for). bfd_openr must not receive that;
-        // negative-cache like any other unloadable object.
+        // dynamic linker knows no path for). Negative-cache like any other
+        // unloadable object.
         const std::string path = object_file_path(_info);
         if (path.empty()) {
-            bfd_load_failed().insert(_info.dli_fbase);
+            object_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
-        // Stack local (moved into the map on success) — no reason to heap-allocate
-        // a temporary that is unconditionally consumed or discarded in this scope.
-        storedBfd newBfd(bfd_openr(path.c_str(), nullptr), &bfd_close);
-        if (!newBfd.abfd) {
-            bfd_load_failed().insert(_info.dli_fbase);
+        backtrace_state* bt = state();
+        if (bt == nullptr) {
+            object_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
-        if (!bfd_check_format(newBfd.abfd.get(), bfd_object)) {
-            bfd_load_failed().insert(_info.dli_fbase);
+        // Registers the file's symbol table and DWARF data (or those of its
+        // separate debug file) with the shared state at the object's load
+        // bias: lookups then take runtime addresses as they are. A file that
+        // cannot be read, is not ELF, or is truncated adds nothing and is
+        // negative-cached — the open happens lazily at first sight of an
+        // address inside the object, possibly long after the load, when the
+        // file may have been deleted or replaced (see object_file_path).
+        ObjectFile object;
+        object.load_bias = load_bias;
+        int has_symtab = 0;
+        int has_dwarf = 0;
+        if (cslg_backtrace_add_file(bt, path.c_str(), load_bias, &on_backtrace_error, nullptr, &has_symtab,
+                                    &has_dwarf)
+            == 0) {
+            object_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
-        long storageNeeded = bfd_get_symtab_upper_bound(newBfd.abfd.get());
-        if (storageNeeded < 0) {
-            bfd_load_failed().insert(_info.dli_fbase);
-            return nullptr;
-        }
-        newBfd.symbols.reset(reinterpret_cast<asymbol**>(new char[static_cast<size_t>(storageNeeded)]));
-        if (bfd_canonicalize_symtab(newBfd.abfd.get(), newBfd.symbols.get()) < 0) {
-            // Canonicalization failed (malformed symbol table): the buffer contents
-            // are undefined and bfd_find_nearest_line() would chase garbage pointers.
-            // Treat it like any other unloadable object.
-            bfd_load_failed().insert(_info.dli_fbase);
-            return nullptr;
-        }
-
-        newBfd.offset = reinterpret_cast<intptr_t>(_info.dli_fbase);
-        it = bfds().emplace(_info.dli_fbase, std::move(newBfd)).first;
+        object.has_symtab = has_symtab != 0;
+        object.has_dwarf = has_dwarf != 0;
+        it = objects().emplace(_info.dli_fbase, object).first;
     }
     return &it->second;
 }
 
-// Must be called with s_bfd_mutex already held (locked in resolve()).
-void bfdResolver::check_bfd_initialized() {
-    if (!s_bfd_initialized) {
-        bfd_init();
-        s_bfd_initialized = true;
-    }
-}
-
-std::string bfdResolver::get_argv0() {
+std::string addressResolver::get_argv0() {
     std::string argv0;
     std::ifstream ifs("/proc/self/cmdline");
     std::getline(ifs, argv0, '\0');
     return argv0;
 }
 
-std::optional<std::string> bfdResolver::mapped_object_path(void* base) {
+std::optional<std::string> addressResolver::mapped_object_path(void* base) {
     // Each /proc/self/maps line reads "start-end perms offset dev inode [path]".
     // The path column is absent for anonymous mappings, is a bracketed
     // pseudo-name for [vdso] / [stack] and friends, and may contain spaces.
@@ -193,7 +232,7 @@ std::optional<std::string> bfdResolver::mapped_object_path(void* base) {
     return std::nullopt;
 }
 
-std::string bfdResolver::object_file_path(const Dl_info& symbol_info) {
+std::string addressResolver::object_file_path(const Dl_info& symbol_info) {
     // The null check is load-bearing: comparing a null const char* against
     // std::string is undefined behavior.
     if (symbol_info.dli_fname != nullptr && symbol_info.dli_fname == argv0()) {
@@ -202,7 +241,9 @@ std::string bfdResolver::object_file_path(const Dl_info& symbol_info) {
         // executable was found by a search of the PATH environment
         // variable; In that case, we actually open /proc/self/exe, which
         // is always the actual executable (even if it was deleted/replaced!)
-        // but display the path that /proc/self/exe links to.
+        // but display the path that /proc/self/exe links to. (libbacktrace
+        // resolves the symlink itself when it looks for a separate debug
+        // file next to the executable.)
         return "/proc/self/exe";
     }
     // For every other object dli_fname is the string the dynamic linker loaded
@@ -222,39 +263,99 @@ std::string bfdResolver::object_file_path(const Dl_info& symbol_info) {
     return symbol_info.dli_fname != nullptr ? std::string(symbol_info.dli_fname) : std::string();
 }
 
-asection* bfdResolver::find_containing_section(storedBfd& currBfd, void* address,
-                                               intptr_t& offset_out) {
-    asection* section = currBfd.abfd->sections;
-    // Rebasing heuristic: when the first section's VMA lies below the object's
-    // load base, the object is position-independent and the raw address must
-    // have the load base subtracted to become a section-relative VMA.
-    const bool relative = section->vma < static_cast<uintptr_t>(currBfd.offset);
-    while (section != nullptr) {
-        const intptr_t offset = reinterpret_cast<intptr_t>(address)
-                - (relative ? currBfd.offset : 0) - static_cast<intptr_t>(section->vma);
-        if (offset >= 0 && static_cast<size_t>(offset) < section->size) {
-            offset_out = offset;
-            return section;
-        }
-        section = section->next;
+addressResolver::AddressInfo addressResolver::query_address(void* address) {
+    AddressInfo result;
+    link_map* map = nullptr;
+    // dladdr1 with RTLD_DL_LINKMAP is dladdr plus the object's link_map, whose
+    // l_addr is the load bias libbacktrace needs (dli_fbase is the map start,
+    // which differs from the bias for a non-PIE executable). The bias is read
+    // here, while the loader's lock has just been released and the map is
+    // certainly alive — not later under s_resolver_mutex.
+    if (dladdr1(address, &result.info, reinterpret_cast<void**>(&map), RTLD_DL_LINKMAP) == 0
+        || result.info.dli_fbase == nullptr) {
+        return result;
     }
-    return nullptr;
+    result.load_bias = map != nullptr ? static_cast<uintptr_t>(map->l_addr) : 0;
+    result.valid = true;
+    return result;
 }
 
-std::optional<std::string> bfdResolver::resolve_function_name(void* address, const Dl_info* dl_info) {
-    // A null dl_info means dladdr() failed for this address (its Dl_info
-    // contents are undefined then, so resolve_no_unwind() passes nothing on).
-    if (dl_info == nullptr) {
+addressResolver::Lookup addressResolver::look_up(const ObjectFile& object, void* address) {
+    Lookup lookup;
+    backtrace_state* bt = state();
+    if (bt == nullptr) {
+        return lookup;
+    }
+    const uintptr_t pc = reinterpret_cast<uintptr_t>(address);
+    if (object.has_dwarf) {
+        // One callback per function containing the address (several when it
+        // lies inside inlined code, innermost first); with no debug
+        // information for the address the callback reports null names and
+        // line 0, and an error ("no debug info", errnum -1) is not a failure.
+        PcInfoCollector pcinfo;
+        backtrace_pcinfo(bt, pc, &collect_pcinfo, &on_backtrace_error, &pcinfo);
+        if (!pcinfo.failed) {
+            lookup.entries = std::move(pcinfo.entries);
+        }
+        // A single all-empty entry is what libbacktrace reports when nothing
+        // describes the address; keep "no entries" for that.
+        if (lookup.entries.size() == 1 && lookup.entries.front().function.empty()
+            && lookup.entries.front().file.empty() && lookup.entries.front().line == 0) {
+            lookup.entries.clear();
+        }
+    }
+    if (object.has_symtab) {
+        // The function or object symbol whose [value, value + size) contains
+        // the address, from .symtab (or .dynsym when the file has no .symtab).
+        SymInfoCollector syminfo;
+        backtrace_syminfo(bt, pc, &collect_syminfo, &on_backtrace_error, &syminfo);
+        if (!syminfo.failed) {
+            lookup.symbol = std::move(syminfo.name);
+            lookup.symbol_value = syminfo.value;
+        }
+    }
+    return lookup;
+}
+
+std::string addressResolver::function_name_of(const Lookup& lookup) {
+    // BFD's bfd_find_nearest_line() chose the name like this: a DWARF linkage
+    // name (DW_AT_linkage_name, a mangled "_Z..." name) was final; otherwise
+    // it looked the address up in the symbol table and preferred that name,
+    // which for a static function, an anonymous-namespace function or a lambda
+    // compiled by GCC is the mangled name with the parameter list ("_ZL14..."),
+    // where DWARF only has the bare "file_static_func" — the trace shows
+    // "file_static_func(int)" because of it. For languages without name
+    // mangling (C) BFD took the DWARF name as it was; the symbol table then
+    // either repeats it or adds a clone suffix ("foo.cold", "foo.constprop.0"),
+    // which is the one case where the symbol table loses here.
+    const std::string& dwarf = lookup.entries.empty() ? std::string() : lookup.entries.front().function;
+    if (!dwarf.empty() && dwarf.compare(0, 2, "_Z") == 0) {
+        return dwarf;
+    }
+    if (lookup.symbol.empty()) {
+        return dwarf;
+    }
+    if (!dwarf.empty() && lookup.symbol.compare(0, dwarf.size(), dwarf) == 0
+        && (lookup.symbol.size() == dwarf.size() || lookup.symbol[dwarf.size()] == '.')) {
+        return dwarf;
+    }
+    return lookup.symbol;
+}
+
+std::optional<std::string> addressResolver::resolve_function_name(void* address, const AddressInfo& address_info) {
+    // An invalid address_info means dladdr() failed for this address (its
+    // Dl_info contents are undefined then).
+    if (!address_info.valid) {
         return "<address to object not found>";
     }
-    // Private copy: ensure_bfd_loaded() may redirect dli_fname to /proc/self/exe.
-    Dl_info info = *dl_info;
+    const Dl_info& info = address_info.info;
     // dli_sname is null for every callee without a dynamic symbol: static
     // functions, anonymous-namespace functions, lambdas (their operator()),
-    // local classes. That is NOT a reason to drop the frame — BFD's symtab /
-    // DWARF lookup below names such functions fine, and the per-address name
-    // cache makes the extra BFD work a one-time cost per callee. The frame is
-    // dropped only when BFD has no name either (the nullopt returns below).
+    // local classes. That is NOT a reason to drop the frame — the symbol
+    // table / DWARF lookup below names such functions fine, and the
+    // per-address name cache makes the extra work a one-time cost per callee.
+    // The frame is dropped only when nothing has a name for it (the nullopt
+    // returns below).
 
 #ifdef __clang__
     // Runtime std library filter (Clang only). GCC excludes std library functions at
@@ -265,148 +366,119 @@ std::optional<std::string> bfdResolver::resolve_function_name(void* address, con
     }
 #endif
 
-    storedBfd* currBfd = ensure_bfd_loaded(info);
-    if (currBfd == nullptr) {
+    const ObjectFile* object = ensure_object_loaded(info, address_info.load_bias);
+    if (object == nullptr) {
         return "<could not open object file>";
     }
 
-    if (currBfd->abfd->sections == nullptr) {
-        return "<no sections in object file>";
-    }
-    intptr_t offset = 0;
-    asection* section = find_containing_section(*currBfd, address, offset);
-    if (section == nullptr) {
-        return "<not sectioned address>";
-    }
-
-    const char* file = nullptr;
-    const char* func = nullptr;
-    unsigned line = 0;
-    if (bfd_find_nearest_line(
-                currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
-        if (func == nullptr) {
+    const std::string name = function_name_of(look_up(*object, address));
+    if (name.empty()) {
+        // Neither the debug information nor the symbol table of the file
+        // names this address. With a dynamic symbol we can still name the
+        // frame; without one there is no name from any source, so the frame is
+        // not loggable (a bare line would say nothing).
+        if (info.dli_sname == nullptr) {
             return std::nullopt;
         }
+        return demangle_cxa(info.dli_sname);
+    }
 #ifdef __clang__
-        // Re-apply the std-library filter to the BFD-derived name: the dladdr
-        // check above only sees dli_sname, which can be null (no dynamic symbol
-        // — internal-linkage std instantiations and std-internal lambdas)
-        // or a different, nearest-exported symbol than the precise symtab entry
-        // BFD finds here. Either way a std-library frame could slip past the
-        // first check and get logged. Cold path only: this runs once per
-        // address, after which the cached nullopt makes repeats a hash hit.
-        if (is_std_library_symbol(func)) {
-            return std::nullopt;
-        }
-#endif
-        auto demangled = demangle_cxa(func);
-        return demangled.empty() ? std::nullopt : std::make_optional(demangled);
-    }
-    // BFD found nothing for this address. With a dynamic symbol we can still
-    // name the frame; without one there is no name from either source, so the
-    // frame is not loggable (a bare " <bfd_error>" line would say nothing).
-    if (info.dli_sname == nullptr) {
+    // Re-apply the std-library filter to the resolved name: the dladdr check
+    // above only sees dli_sname, which can be null (no dynamic symbol —
+    // internal-linkage std instantiations and std-internal lambdas) or a
+    // different, nearest-exported symbol than the precise symbol table entry
+    // found here. Either way a std-library frame could slip past the first
+    // check and get logged. Cold path only: this runs once per address, after
+    // which the cached nullopt makes repeats a hash hit.
+    if (is_std_library_symbol(name.c_str())) {
         return std::nullopt;
     }
-    return demangle_cxa(info.dli_sname) + " <bfd_error>";
+#endif
+    auto demangled = demangle_cxa(name.c_str());
+    return demangled.empty() ? std::nullopt : std::make_optional(demangled);
 }
 
-bfdResolver::CachedLocation bfdResolver::resolve_filename_and_line(void* address, const Dl_info* dl_info) {
+addressResolver::CachedLocation addressResolver::resolve_filename_and_line(void* address,
+                                                                           const AddressInfo& address_info) {
     CachedLocation location;
-    // A null dl_info means dladdr() failed for the caller address (see
+    // An invalid address_info means dladdr() failed for the caller address (see
     // resolve_function_name()).
-    if (dl_info == nullptr) {
+    if (!address_info.valid) {
         location.file = "<caller address to object not found>";
         return location;
     }
-    // Private copy: ensure_bfd_loaded() may redirect dli_fname to /proc/self/exe.
-    Dl_info info = *dl_info;
+    const Dl_info& info = address_info.info;
     // The dynamic symbol names the containing function when nothing better turns
-    // up below (a stripped object); BFD's symtab/DWARF answer replaces it.
+    // up below (a stripped object); the symbol table / DWARF answer replaces it.
     if (info.dli_sname != nullptr) {
         location.function_base = std::string(function_base_name(demangle_cxa(info.dli_sname)));
     }
 
-    storedBfd* currBfd = ensure_bfd_loaded(info);
-    if (currBfd == nullptr) {
+    const ObjectFile* object = ensure_object_loaded(info, address_info.load_bias);
+    if (object == nullptr) {
         location.file = "<could not open caller object file>";
         return location;
     }
 
-    if (currBfd->abfd->sections == nullptr) {
-        location.file = "<no sections in caller object>";
-        return location;
+    const Lookup lookup = look_up(*object, address);
+    // The innermost function containing the address — an inlined copy's own
+    // name when the site lies inside one (DWARF inline info) — chosen as BFD
+    // chose it (see function_name_of).
+    const std::string function = function_name_of(lookup);
+    if (!function.empty()) {
+        location.function_base = std::string(function_base_name(demangle_cxa(function.c_str())));
     }
-    intptr_t offset = 0;
-    asection* section = find_containing_section(*currBfd, address, offset);
-    if (section == nullptr) {
-        location.file = "<not sectioned address>";
-        return location;
-    }
-
-    const char* file = nullptr;
-    const char* func = nullptr;
-    unsigned int line = 0;
-    if (bfd_find_nearest_line(
-                currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
-        // `func` is the innermost function containing the address — an inlined
-        // copy's own name when the site lies inside one (DWARF inline info).
-        if (func != nullptr && func[0] != '\0') {
-            location.function_base = std::string(function_base_name(demangle_cxa(func)));
-        }
-        // BFD "success" can still carry no usable location: `file` may be
-        // non-null but EMPTY with line 0 (DWARF's "no source line" sentinel) —
-        // observed with GCC 16 / binutils 2.46 for libc frames of optimized
-        // binaries, which used to render as "(called from: :0)". Treat an empty
-        // file like a null one and line 0 like an unknown line, so such frames
-        // degrade through the same fallbacks as an outright lookup failure
-        // (function name with ":???", then "<unknown function>").
-        if (file != nullptr && file[0] != '\0') {
-            location.file = file;
-            if (line != 0) {
-                location.line = line;
-            }
+    // A DWARF position needs both a file and a line: libbacktrace reports the
+    // compilation unit's file with line 0 for an address no line row covers,
+    // and BFD's "success" could carry an empty file with line 0 (DWARF's "no
+    // source line" sentinel, observed for libc frames of optimized binaries,
+    // which used to render as "(called from: :0)"). Such frames degrade
+    // through the same fallbacks as an address without debug information: the
+    // function name with ":???", then "<unknown function>".
+    if (!lookup.entries.empty()) {
+        const DwarfEntry& innermost = lookup.entries.front();
+        if (!innermost.file.empty() && innermost.line != 0) {
+            location.file = innermost.file;
+            location.line = innermost.line;
             return location;
         }
-        if (func != nullptr && func[0] != '\0') {
-            location.file = demangle_cxa(func);
-            return location;
-        }
-        location.file = "<unknown function>";
+    }
+    if (!function.empty()) {
+        location.file = demangle_cxa(function.c_str());
         return location;
     }
-    // bfd_find_nearest_line failed for the section containing the address
-    // (typical for stripped objects: no symtab, no DWARF). Degrade to the
-    // <bfd_error> fallback — the address cannot be in any other section.
-    // Mirrors the <bfd_error> return in resolve_function_name().
+    // Nothing in the file describes the address (typical for stripped objects:
+    // no symbol table, no DWARF). The dynamic symbol, when there is one, is
+    // the last source of a name.
     if (info.dli_sname != nullptr) {
-        location.file = demangle_cxa(info.dli_sname) + " <bfd_error>";
+        location.file = demangle_cxa(info.dli_sname);
         return location;
     }
-    location.file = "<bfd_error>";
+    location.file = "<unknown function>";
     return location;
 }
 
-bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out) {
+bool addressResolver::resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out) {
     bool have_name = false;
     bool have_location = false;
     {
-        // Lock covers ALL BFD operations: initialization, loading, symbol/section
-        // iteration, and bfd_find_nearest_line(). BFD library is not thread-safe —
-        // concurrent calls on the same bfd* object corrupt internal state. This lock
-        // serializes all BFD access and also protects the name_cache() /
-        // location_cache() memoization maps. Timestamping and formatting happen in
-        // the callers, after the lock is released, so the global serialization
-        // window every traced call shares stays as small as the lookups themselves.
+        // Lock covers ALL libbacktrace operations: the state's creation, every
+        // registration and every lookup (libbacktrace parses a compilation
+        // unit's line table lazily on first use and, in threaded mode, lets
+        // two threads both parse it, keeping one copy and leaking the other).
+        // The lock also protects the name_cache() / location_cache()
+        // memoization maps. Timestamping and formatting happen in the callers,
+        // after the lock is released, so the global serialization window every
+        // traced call shares stays as small as the lookups themselves.
         //
         // Warm path: both memoized lookups hit (see the cache comments in
-        // callStack.h) and no BFD work happens at all. The cached values are handed
-        // out as pointers into the cache nodes: valid for the process lifetime and
-        // safe to read after the lock is dropped (node-based maps, entries never
-        // erased or modified, containers leaked — see ResolvedFrameView in types.h).
-        // A cached nullopt name means "filtered / not loggable" and is honored as such.
-        std::lock_guard<std::mutex> lock(s_bfd_mutex);
-        check_bfd_initialized();
+        // callStack.h) and no symbolizer work happens at all. The cached values
+        // are handed out as pointers into the cache nodes: valid for the process
+        // lifetime and safe to read after the lock is dropped (node-based maps,
+        // entries never erased or modified, containers leaked — see
+        // ResolvedFrameView in types.h). A cached nullopt name means "filtered /
+        // not loggable" and is honored as such.
+        std::lock_guard<std::mutex> lock(s_resolver_mutex);
         auto name_it = name_cache().find(callee_address);
         if (name_it != name_cache().end()) {
             if (!name_it->second.name) {
@@ -428,32 +500,30 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
     if (!have_name || !have_location) {
         // Cold path: first sight of the callee and/or the call site.
         //
-        // dladdr() runs OUTSIDE s_bfd_mutex, deliberately. glibc's _dl_addr takes
-        // the loader lock (dl_load_lock), and dlopen() holds that same lock while it
-        // runs the loaded object's constructors. The static initializer of an
-        // instrumented plugin fires the enter hook on the dlopen() thread with the
-        // loader lock held, and that hook takes s_bfd_mutex. A resolver that called
-        // dladdr() with s_bfd_mutex held could therefore deadlock against it:
-        //   thread A: s_bfd_mutex held  -> dladdr() waits for dl_load_lock
-        //   thread B: dl_load_lock held -> enter hook waits for s_bfd_mutex
+        // dladdr() runs OUTSIDE s_resolver_mutex, deliberately. glibc's _dl_addr
+        // takes the loader lock (dl_load_lock), and dlopen() holds that same lock
+        // while it runs the loaded object's constructors. The static initializer
+        // of an instrumented plugin fires the enter hook on the dlopen() thread
+        // with the loader lock held, and that hook takes s_resolver_mutex. A
+        // resolver that called dladdr() with s_resolver_mutex held could
+        // therefore deadlock against it:
+        //   thread A: s_resolver_mutex held -> dladdr() waits for dl_load_lock
+        //   thread B: dl_load_lock held     -> enter hook waits for s_resolver_mutex
         // (reproduced with a plugin dlopen()ed while another thread traced not-yet-
         // cached addresses; pinned by DlopenConstructorTest). dladdr() is thread-safe
-        // on its own; only BFD and the caches need the mutex. On failure the Dl_info
-        // contents are undefined, so a failed lookup is passed on as a null pointer.
-        Dl_info callee_info {};
-        Dl_info caller_info {};
-        const Dl_info* callee_dl = nullptr;
-        const Dl_info* caller_dl = nullptr;
-        if (!have_name && dladdr(callee_address, &callee_info) != 0
-            && callee_info.dli_fbase != nullptr) {
-            callee_dl = &callee_info;
+        // on its own; only libbacktrace and the caches need the mutex. On failure
+        // the Dl_info contents are undefined, so a failed lookup is passed on as
+        // an invalid AddressInfo.
+        AddressInfo callee_info;
+        AddressInfo caller_info;
+        if (!have_name) {
+            callee_info = query_address(callee_address);
         }
-        if (!have_location && dladdr(caller_address, &caller_info) != 0
-            && caller_info.dli_fbase != nullptr) {
-            caller_dl = &caller_info;
+        if (!have_location) {
+            caller_info = query_address(caller_address);
         }
 
-        std::lock_guard<std::mutex> lock(s_bfd_mutex);
+        std::lock_guard<std::mutex> lock(s_resolver_mutex);
         // Another thread may have resolved the same address while the mutex was
         // released; find-or-emplace keeps exactly one entry per address either way,
         // and on a miss the freshly resolved value moves straight into the map.
@@ -462,7 +532,7 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
             if (name_it == name_cache().end()) {
                 name_it = name_cache()
                                   .emplace(callee_address,
-                                           cache_name(resolve_function_name(callee_address, callee_dl)))
+                                           cache_name(resolve_function_name(callee_address, callee_info)))
                                   .first;
             }
             if (!name_it->second.name) {
@@ -476,7 +546,7 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
             if (loc_it == location_cache().end()) {
                 loc_it = location_cache()
                                  .emplace(caller_address,
-                                          resolve_filename_and_line(caller_address, caller_dl))
+                                          resolve_filename_and_line(caller_address, caller_info))
                                  .first;
             }
             out.caller_filename = &loc_it->second.file;
@@ -491,7 +561,7 @@ bool bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address, 
     return true;
 }
 
-bfdResolver::CachedName bfdResolver::cache_name(std::optional<std::string> name) {
+addressResolver::CachedName addressResolver::cache_name(std::optional<std::string> name) {
     CachedName cached;
     if (name) {
         cached.base = std::string(function_base_name(*name));
@@ -500,14 +570,13 @@ bfdResolver::CachedName bfdResolver::cache_name(std::optional<std::string> name)
     return cached;
 }
 
-void bfdResolver::resolve_location(void* address, ResolvedFrameView& out) {
+void addressResolver::resolve_location(void* address, ResolvedFrameView& out) {
     // Same two-phase shape as resolve_no_unwind(): the cache is consulted under
-    // s_bfd_mutex, and on a miss dladdr() runs with the mutex RELEASED (it takes
-    // glibc's loader lock — see the lock-order rule in resolve_no_unwind) before
-    // the BFD work and the insertion re-take it.
+    // s_resolver_mutex, and on a miss dladdr() runs with the mutex RELEASED (it
+    // takes glibc's loader lock — see the lock-order rule in resolve_no_unwind)
+    // before the lookup and the insertion re-take it.
     {
-        std::lock_guard<std::mutex> lock(s_bfd_mutex);
-        check_bfd_initialized();
+        std::lock_guard<std::mutex> lock(s_resolver_mutex);
         auto loc_it = location_cache().find(address);
         if (loc_it != location_cache().end()) {
             out.caller_filename = &loc_it->second.file;
@@ -516,15 +585,11 @@ void bfdResolver::resolve_location(void* address, ResolvedFrameView& out) {
             return;
         }
     }
-    Dl_info info {};
-    const Dl_info* dl = nullptr;
-    if (dladdr(address, &info) != 0 && info.dli_fbase != nullptr) {
-        dl = &info;
-    }
-    std::lock_guard<std::mutex> lock(s_bfd_mutex);
+    const AddressInfo address_info = query_address(address);
+    std::lock_guard<std::mutex> lock(s_resolver_mutex);
     auto loc_it = location_cache().find(address);
     if (loc_it == location_cache().end()) {
-        loc_it = location_cache().emplace(address, resolve_event_site_location(address, dl)).first;
+        loc_it = location_cache().emplace(address, resolve_event_site_location(address, address_info)).first;
     }
     out.caller_filename = &loc_it->second.file;
     out.caller_line_number = loc_it->second.line;
@@ -533,45 +598,40 @@ void bfdResolver::resolve_location(void* address, ResolvedFrameView& out) {
 
 namespace {
 
-// One line-table answer for an offset in a section, for comparing rows. `file`
-// points into BFD's own storage, valid for as long as the bfd is open.
+// One line-table answer for an address, for comparing rows.
 struct LineRow {
-    const char* file = nullptr;
+    std::string file;
     unsigned int line = 0;
 
     NO_INSTRUMENT bool same_as(const LineRow& other) const {
-        return line != 0 && line == other.line && file != nullptr && other.file != nullptr
-               && std::strcmp(file, other.file) == 0;
+        return line != 0 && line == other.line && !file.empty() && file == other.file;
     }
 };
 
+// The row covering `address`: the innermost entry's position.
 NO_INSTRUMENT
-LineRow line_row_at(bfdResolver::storedBfd& currBfd, asection* section, bfd_vma offset) {
+LineRow line_row_at(const addressResolver::Lookup& lookup) {
     LineRow row;
-    const char* func = nullptr;
-    if (!bfd_find_nearest_line(currBfd.abfd.get(), section, currBfd.symbols.get(), offset, &row.file, &func,
-                               &row.line)) {
-        return LineRow {};
+    if (!lookup.entries.empty()) {
+        row.file = lookup.entries.front().file;
+        row.line = lookup.entries.front().line;
     }
     return row;
 }
 
-// The row at `offset` resolved to its OUTERMOST inline frame: when the offset
+// The row at `address` resolved to its OUTERMOST inline frame: when the address
 // lies inside code inlined from elsewhere, the line where the enclosing
-// function called it.
+// function called it (the last entry of the chain that has a position).
 NO_INSTRUMENT
-LineRow outermost_line_row_at(bfdResolver::storedBfd& currBfd, asection* section, bfd_vma offset) {
-    LineRow row = line_row_at(currBfd, section, offset);
+LineRow outermost_line_row_at(const addressResolver::Lookup& lookup) {
+    LineRow row = line_row_at(lookup);
     if (row.line == 0) {
         return row;
     }
-    const char* file = nullptr;
-    const char* func = nullptr;
-    unsigned int line = 0;
-    while (bfd_find_inliner_info(currBfd.abfd.get(), &file, &func, &line)) {
-        if (file != nullptr && file[0] != '\0' && line != 0) {
-            row.file = file;
-            row.line = line;
+    for (const addressResolver::DwarfEntry& entry : lookup.entries) {
+        if (!entry.file.empty() && entry.line != 0) {
+            row.file = entry.file;
+            row.line = entry.line;
         }
     }
     return row;
@@ -579,9 +639,10 @@ LineRow outermost_line_row_at(bfdResolver::storedBfd& currBfd, asection* section
 
 } // namespace
 
-bfdResolver::CachedLocation bfdResolver::resolve_event_site_location(void* address, const Dl_info* dl_info) {
-    CachedLocation location = resolve_filename_and_line(address, dl_info);
-    if (!location.line || dl_info == nullptr) {
+addressResolver::CachedLocation addressResolver::resolve_event_site_location(void* address,
+                                                                             const AddressInfo& address_info) {
+    CachedLocation location = resolve_filename_and_line(address, address_info);
+    if (!location.line || !address_info.valid) {
         return location;
     }
     // GCC 13 at -O2 gives the entry of a landing pad no location of its own.
@@ -596,40 +657,24 @@ bfdResolver::CachedLocation bfdResolver::resolve_event_site_location(void* addre
     // The site is then taken from the first instruction after the call — the
     // handler's first statement, resolved to its outermost inline frame — or
     // reported without a line when that one leaks too.
-    Dl_info info = *dl_info;
-    storedBfd* currBfd = ensure_bfd_loaded(info);
-    if (currBfd == nullptr || currBfd->abfd->sections == nullptr || currBfd->symbols == nullptr) {
+    const ObjectFile* object = ensure_object_loaded(address_info.info, address_info.load_bias);
+    if (object == nullptr || !object->has_symtab) {
         return location;
     }
-    intptr_t offset = 0;
-    asection* section = find_containing_section(*currBfd, address, offset);
-    if (section == nullptr) {
+    // The containing symbol: the function (or object) symbol whose range holds
+    // the address, and its first byte.
+    const Lookup at_site_lookup = look_up(*object, address);
+    if (at_site_lookup.symbol.empty() || at_site_lookup.symbol_value == 0) {
         return location;
     }
-    // The containing symbol: the highest symbol of the section at or below the
-    // offset (bfd_canonicalize_symtab terminates the array with a null).
-    bfd_vma symbol_start = 0;
-    bool symbol_found = false;
-    for (asymbol** it = currBfd->symbols.get(); *it != nullptr; ++it) {
-        const asymbol& symbol = **it;
-        if (symbol.section != section || (symbol.flags & BSF_SECTION_SYM) != 0
-            || symbol.value > static_cast<bfd_vma>(offset)) {
-            continue;
-        }
-        if (!symbol_found || symbol.value > symbol_start) {
-            symbol_start = symbol.value;
-            symbol_found = true;
-        }
-    }
-    if (!symbol_found || symbol_start == 0) {
-        return location; // nothing precedes the symbol in its section: nothing to leak from
-    }
-    const LineRow at_site = line_row_at(*currBfd, section, static_cast<bfd_vma>(offset));
-    if (!at_site.same_as(line_row_at(*currBfd, section, symbol_start))
-        || !at_site.same_as(line_row_at(*currBfd, section, symbol_start - 1))) {
+    const uintptr_t symbol_start = at_site_lookup.symbol_value;
+    const LineRow at_site = line_row_at(at_site_lookup);
+    if (!at_site.same_as(line_row_at(look_up(*object, reinterpret_cast<void*>(symbol_start))))
+        || !at_site.same_as(line_row_at(look_up(*object, reinterpret_cast<void*>(symbol_start - 1))))) {
         return location;
     }
-    const LineRow after_call = outermost_line_row_at(*currBfd, section, static_cast<bfd_vma>(offset) + 1);
+    const LineRow after_call = outermost_line_row_at(
+            look_up(*object, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(address) + 1)));
     if (after_call.line == 0 || after_call.same_as(at_site)) {
         location.line.reset();
         return location;
@@ -639,71 +684,57 @@ bfdResolver::CachedLocation bfdResolver::resolve_event_site_location(void* addre
     return location;
 }
 
-std::vector<std::string> bfdResolver::read_inline_chain(void* address, const Dl_info* dl_info) {
+std::vector<std::string> addressResolver::read_inline_chain(void* address, const AddressInfo& address_info) {
     std::vector<std::string> chain;
-    if (dl_info == nullptr) {
+    if (!address_info.valid) {
         return chain;
     }
-    Dl_info info = *dl_info;
-    storedBfd* currBfd = ensure_bfd_loaded(info);
-    if (currBfd == nullptr || currBfd->abfd->sections == nullptr) {
+    const ObjectFile* object = ensure_object_loaded(address_info.info, address_info.load_bias);
+    if (object == nullptr) {
         return chain;
     }
-    intptr_t offset = 0;
-    asection* section = find_containing_section(*currBfd, address, offset);
-    if (section == nullptr) {
-        return chain;
-    }
-    const char* file = nullptr;
-    const char* func = nullptr;
-    unsigned line = 0;
-    if (!bfd_find_nearest_line(
-                currBfd->abfd.get(), section, currBfd->symbols.get(), offset, &file, &func, &line)) {
-        return chain;
-    }
+    const Lookup lookup = look_up(*object, address);
     // Without a DWARF location there is no DWARF inline information either: an
     // empty chain tells the caller that nothing is known, which it treats as
     // "no inlining" only where that is provably safe.
-    if (file == nullptr || file[0] == '\0' || line == 0 || func == nullptr) {
+    if (lookup.entries.empty() || lookup.entries.front().file.empty() || lookup.entries.front().line == 0) {
         return chain;
     }
-    // The innermost function, then each function it was inlined into. BFD keeps
-    // the walk's state in the bfd object, which s_bfd_mutex (held by the caller)
-    // protects between the two calls.
-    chain.emplace_back(function_base_name(demangle_cxa(func)));
-    while (bfd_find_inliner_info(currBfd->abfd.get(), &file, &func, &line)) {
-        if (func != nullptr) {
-            chain.emplace_back(function_base_name(demangle_cxa(func)));
+    const std::string innermost = function_name_of(lookup);
+    if (innermost.empty()) {
+        return chain;
+    }
+    // The innermost function (named as every lookup names it), then each
+    // function it was inlined into, outward — the order libbacktrace reports.
+    chain.emplace_back(function_base_name(demangle_cxa(innermost.c_str())));
+    for (size_t i = 1; i < lookup.entries.size(); ++i) {
+        if (!lookup.entries[i].function.empty()) {
+            chain.emplace_back(function_base_name(demangle_cxa(lookup.entries[i].function.c_str())));
         }
     }
     return chain;
 }
 
-const std::vector<std::string>* bfdResolver::resolve_inline_chain(void* address) {
-    // Same two-phase shape as resolve_no_unwind(): cache under s_bfd_mutex,
-    // dladdr() with the mutex released, BFD work and insertion under it again.
+const std::vector<std::string>* addressResolver::resolve_inline_chain(void* address) {
+    // Same two-phase shape as resolve_no_unwind(): cache under s_resolver_mutex,
+    // dladdr() with the mutex released, lookup and insertion under it again.
     {
-        std::lock_guard<std::mutex> lock(s_bfd_mutex);
-        check_bfd_initialized();
+        std::lock_guard<std::mutex> lock(s_resolver_mutex);
         auto it = inline_chain_cache().find(address);
         if (it != inline_chain_cache().end()) {
             return &it->second;
         }
     }
-    Dl_info info {};
-    const Dl_info* dl = nullptr;
-    if (dladdr(address, &info) != 0 && info.dli_fbase != nullptr) {
-        dl = &info;
-    }
-    std::lock_guard<std::mutex> lock(s_bfd_mutex);
+    const AddressInfo address_info = query_address(address);
+    std::lock_guard<std::mutex> lock(s_resolver_mutex);
     auto it = inline_chain_cache().find(address);
     if (it == inline_chain_cache().end()) {
-        it = inline_chain_cache().emplace(address, read_inline_chain(address, dl)).first;
+        it = inline_chain_cache().emplace(address, read_inline_chain(address, address_info)).first;
     }
     return &it->second;
 }
 
-std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(void* callee_address, void* caller_address) {
+std::optional<ResolvedFrame> addressResolver::resolve_no_unwind(void* callee_address, void* caller_address) {
     ResolvedFrameView view;
     if (!resolve_no_unwind(callee_address, caller_address, view)) {
         return std::nullopt;
@@ -711,7 +742,7 @@ std::optional<ResolvedFrame> bfdResolver::resolve_no_unwind(void* callee_address
     return std::make_optional(own_frame(view));
 }
 
-bool bfdResolver::resolve(void* callee_address, void* caller_address, ResolvedFrameView& out) {
+bool addressResolver::resolve(void* callee_address, void* caller_address, ResolvedFrameView& out) {
     // The hook's `caller` argument is NOT the address of the call into
     // __cyg_profile_func_enter: both GCC and Clang emit the hook call as
     // `__cyg_profile_func_enter(fn, __builtin_return_address(0))` inside the
@@ -756,12 +787,12 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
     //     for function-name resolution.
     //   - The call site INTO frame i's function lives in frame i+1's body, just
     //     before the resume point at stack[i+1]. Subtract 1 byte to point inside
-    //     the call instruction (the same step-back bfdResolver::resolve applies
+    //     the call instruction (the same step-back addressResolver::resolve applies
     //     to the return address the enter hook receives).
     //   - For the outermost frame there is no parent, so caller falls back to
     //     stack[i] itself; resolve will report the function's own location.
     //
-    // Use bfdResolver::resolve_no_unwind here: the step-back is already applied
+    // Use addressResolver::resolve_no_unwind here: the step-back is already applied
     // above, so resolve() would move the address one byte too far.
     const size_t n = static_cast<size_t>(num);
     for (size_t i = 1; i < n; ++i) {
@@ -769,7 +800,7 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
         if (i + 1 < n) {
             caller = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(stack[i + 1]) - 1);
         }
-        res.push_back(bfdResolver::resolve_no_unwind(stack[i], caller));
+        res.push_back(addressResolver::resolve_no_unwind(stack[i], caller));
     }
     return res;
 }
@@ -778,15 +809,15 @@ bool resolve(void* callee_address, void* caller_address, ResolvedFrameView& out)
     // Entry point for the enter hook — same guard as get_call_stack(). The hook
     // already holds the guard, so this saves/restores it unchanged.
     TracerScope guard;
-    return bfdResolver::resolve(callee_address, caller_address, out);
+    return addressResolver::resolve(callee_address, caller_address, out);
 }
 
 std::optional<ResolvedFrame> resolve(void* callee_address, void* caller_address) {
     // Public, owning API entry point — same guard as get_call_stack(). The copy
-    // into a ResolvedFrame happens outside s_bfd_mutex.
+    // into a ResolvedFrame happens outside s_resolver_mutex.
     TracerScope guard;
     ResolvedFrameView view;
-    if (!bfdResolver::resolve(callee_address, caller_address, view)) {
+    if (!addressResolver::resolve(callee_address, caller_address, view)) {
         return std::nullopt;
     }
     return std::make_optional(own_frame(view));
@@ -796,7 +827,7 @@ void resolve_site(void* address, ResolvedFrameView& out) {
     // Same guard as the other entry points (the interposers call this from
     // inside their own guard, so it saves/restores it unchanged).
     TracerScope guard;
-    bfdResolver::resolve_location(address, out);
+    addressResolver::resolve_location(address, out);
 }
 
 std::string demangle_symbol(const char* mangled) {
@@ -806,7 +837,7 @@ std::string demangle_symbol(const char* mangled) {
 const std::vector<std::string>* inline_chain_at(void* address) {
     // Same guard as the other entry points; the hooks already hold it.
     TracerScope guard;
-    return bfdResolver::resolve_inline_chain(address);
+    return addressResolver::resolve_inline_chain(address);
 }
 
 } // namespace instrumentation
