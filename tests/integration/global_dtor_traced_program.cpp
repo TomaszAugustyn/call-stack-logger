@@ -26,7 +26,7 @@
  *
  * Functions have external linkage so dladdr() names them directly (the
  * anonymous-namespace struct's destructor has internal linkage, which the
- * resolver names via BFD instead — its hook fires in the disabled exit window
+ * resolver names from the symbol table instead — its hook fires in the disabled exit window
  * either way).
  */
 

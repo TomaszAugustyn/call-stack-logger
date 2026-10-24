@@ -17,14 +17,14 @@
  *
  * After the main-thread capture, two worker threads capture their own stacks
  * CONCURRENTLY (each through its own noinline chain), exercising the API's
- * thread safety: the per-thread re-entrancy guard and s_bfd_mutex contention
+ * thread safety: the per-thread re-entrancy guard and s_resolver_mutex contention
  * from non-main threads outside any hook. Each worker formats its result into
  * a private string ("W1_FRAME: <name>" / "W2_FRAME: <name>" lines, names
  * only); main prints both after join so stdout never interleaves.
  *
  * Compiled WITHOUT -finstrument-functions (we don't need trace output — we
  * exercise the on-demand stack-capture API directly). Must still be compiled
- * with -g + -rdynamic so BFD / dladdr can resolve the symbols.
+ * with -g so the symbolizer can resolve the symbols and lines.
  */
 
 #include "callStack.h"
@@ -123,7 +123,7 @@ __attribute__((noinline)) std::string worker_stack_top(const char* prefix) {
 // "FRAME: main" vanished from the output.
 __attribute__((noinline)) void run_worker_captures() {
     // Concurrent captures from two worker threads — both contend on
-    // s_bfd_mutex inside the resolver while neither is the thread that ran
+    // s_resolver_mutex inside the resolver while neither is the thread that ran
     // trace_begin(). Output is buffered per thread and printed after join.
     std::string out1;
     std::string out2;

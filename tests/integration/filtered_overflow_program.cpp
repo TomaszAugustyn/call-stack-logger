@@ -16,7 +16,7 @@
  * every recursion level also calls filtered_overflow_call(), an exported
  * function of a stripped, instrumented shared library (filtered_overflow_lib.cpp)
  * that in turn calls a file-local helper. After stripping, neither dladdr() nor
- * BFD can name that helper, so the resolver drops its frame — its enter hook
+ * the symbolizer can name that helper, so the resolver drops its frame — its enter hook
  * fires but writes no line. That makes a third of the frames beyond the
  * initial capacity "entered but not logged".
  *

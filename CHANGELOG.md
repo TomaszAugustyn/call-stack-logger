@@ -1,0 +1,74 @@
+# Changelog
+
+## v1.0.0
+
+The first numbered release. The library's behavior is the one documented in
+the README; this entry lists what changed against the last unnumbered state
+of `master`.
+
+### Symbol resolution without GPL code
+
+- Addresses are resolved with [libbacktrace](https://github.com/ianlancetaylor/libbacktrace)
+  (BSD-3-Clause) instead of libbfd from GNU binutils (GPL-3.0-or-later). A
+  program built with `callstacklogger::instrumented` no longer contains GPL
+  code, so a diagnostic build can ship under the commercial license. The
+  dependency tables before and after, with every license, are in
+  `THIRD_PARTY.md`.
+- `binutils-dev` / `binutils-devel` / `libzstd-devel` are no longer needed.
+  libbacktrace's sources are downloaded at configure time from a pinned
+  commit (SHA-256 checked) and compiled into the library; set
+  `FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE` to a local copy for offline builds.
+- The public header `include/callStack.h` includes no third-party header any
+  more (it included `bfd.h`). The resolver struct it declares is now called
+  `addressResolver` (was `bfdResolver`); the free functions of the API are
+  unchanged.
+- Trace output is unchanged wherever a name or a line could be resolved. The
+  degraded texts changed: `<bfd_error>` is now `<unknown function>`, a name
+  that only the dynamic symbol table knows is printed without the
+  ` <bfd_error>` suffix, and `<no sections in object file>` /
+  `<not sectioned address>` no longer occur. Separate debug files
+  (`.gnu_debuglink`, build IDs under `/usr/lib/debug`), zlib- and
+  zstd-compressed debug sections and MiniDebugInfo (`.gnu_debugdata`) are read.
+- A truncated object file (a half-copied plugin, for example) is rejected and
+  reported as `<could not open object file>`; libbacktrace alone would map
+  the missing bytes and fault when reading them.
+- Under Clang, `callstacklogger::instrumented` no longer adds `-gdwarf-4`
+  with `LOG_EXCEPTIONS`: libbacktrace walks Clang's DWARF 5 inline chains, so
+  the frame reconciliation of inlined frames is exact with Clang's default
+  debug format.
+
+### Linking
+
+- Programs export only the symbols that must be visible in the dynamic symbol
+  table — the two hooks, for `dlopen()`ed plugins, and with `LOG_EXCEPTIONS`
+  the five interposed runtime entry points — through
+  `--export-dynamic-symbol`, instead of every symbol through `-rdynamic`.
+  `-rdynamic` remains the fallback for linkers without that option (GNU ld
+  before binutils 2.35) and the choice behind the new CMake option
+  `CSLG_EXPORT_ALL_SYMBOLS=ON`. Visible difference: an executable stripped
+  of its symbol table without a separate debug file shows no names at all
+  with the narrow export (it showed names without lines before); keep a
+  `.gnu_debuglink` debug file next to a stripped binary.
+- `DISABLE_INSTRUMENTATION=ON` now makes `callstacklogger::instrumented`
+  contribute nothing to a program: no `-finstrument-functions`, no `-g`, no
+  exported symbols, no library. A program that calls `get_call_stack()` in
+  such a build links `callstacklogger::callstacklogger` explicitly. The test
+  suite proves the target inert by comparing a program built with it against
+  one built without (`tests/disabled/`).
+- The static library is compiled position-independent, so it links into
+  position-independent executables on hosts whose compiler defaults to
+  fixed-address ones.
+
+### Tests, benchmark, CI
+
+- New integration tests: a separate debug file made with `objcopy` in the
+  build, zlib- and zstd-compressed debug sections, a plugin deleted after
+  loading, a truncated plugin, addresses outside every object, PIE and
+  non-PIE executables, a stripped executable with and without a debug file.
+- `bench/`: a benchmark of the warm per-call cost, the cold resolution cost
+  and the resident memory, buildable against any checkout
+  (`bench/run_bench.sh`), with a `bench` target behind `BUILD_BENCH=ON`.
+- CI and the Docker image install no `binutils-dev`; the LeakSanitizer
+  suppression file for libbfd is gone (the sanitizer jobs run without
+  suppressions); the Docker image installs `ca-certificates` for the
+  configure-time downloads.

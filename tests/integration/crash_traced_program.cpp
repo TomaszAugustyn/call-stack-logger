@@ -22,7 +22,7 @@
  * when abort() fires.
  *
  * Functions have external linkage so dladdr() names them directly; the
- * resolver would also name static ones via BFD, but the test's assertions
+ * resolver would also name static ones from the symbol table, but the test's assertions
  * are simpler against plain function names.
  */
 

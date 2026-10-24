@@ -289,3 +289,10 @@ if(BUILD_TESTS AND CSLG_TOP_LEVEL)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# The cost benchmark (bench/): a `bench` target that builds and runs it.
+# Standalone builds against any checkout go through bench/run_bench.sh.
+option(BUILD_BENCH "Build the cost benchmark (top-level builds only)" OFF)
+if(BUILD_BENCH AND CSLG_TOP_LEVEL)
+    add_subdirectory(bench)
+endif()

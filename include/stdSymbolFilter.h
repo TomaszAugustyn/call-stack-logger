@@ -30,7 +30,7 @@ namespace instrumentation {
  * instrumentation from within the resolve/format pipeline. It does NOT prevent std library
  * functions called from user code (where t_in_instrumentation is false) from being traced.
  * This filter catches those calls by checking the Itanium C++ ABI mangled name for known
- * std library prefixes before the expensive BFD symbol resolution.
+ * std library prefixes before the expensive symbol resolution.
  *
  * Matched patterns:
  *   __cxa_*              — C++ ABI runtime (atexit, guard_acquire, etc.)

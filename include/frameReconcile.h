@@ -231,7 +231,7 @@ NO_INSTRUMENT inline std::size_t exiting_record_index(const Record* records, std
 // its level and its caller, and the rules above cannot see whether such a
 // record is a live host of the current frame or a dead inlined callee that an
 // exception unwound (Clang) or a longjmp skipped. What can: the INLINE CHAIN of
-// the current site, read from DWARF through BFD (bfd_find_inliner_info) — the
+// the current site, read from DWARF (the inline chain libbacktrace reports) — the
 // list of functions inlined into each other at that address, innermost first.
 // At a catch, the innermost entry is the function that caught; at an enter, the
 // entry after the innermost is the entering function's inline host. Records of

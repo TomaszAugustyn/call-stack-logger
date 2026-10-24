@@ -51,7 +51,7 @@ struct ResolvedFrame {
 // resolver — the caller points it at its own stack buffer (see
 // utils::pretty_time_into) before formatting.
 //
-// Lifetime: the pointed-to strings live in bfdResolver's name_cache() /
+// Lifetime: the pointed-to strings live in addressResolver's name_cache() /
 // location_cache(). Both are std::unordered_map (node-based, so a rehash
 // never relocates an element), entries are never erased or modified after
 // insertion, and the maps themselves are deliberately leaked — the pointers

@@ -12,7 +12,7 @@
  *
  * Thread A keeps the resolver on its cold path: cold<N>() is a chain of
  * distinct template instantiations, so every call is a never-seen callee at a
- * never-seen call site and goes through dladdr() plus BFD. Thread B meanwhile
+ * never-seen call site and goes through dladdr() plus the symbolizer. Thread B meanwhile
  * dlopen()s and dlclose()s the instrumented plugin in a loop; each dlopen()
  * runs the plugin's static initializer with glibc's loader lock held, and that
  * initializer's enter hook takes the resolver mutex.

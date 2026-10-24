@@ -19,7 +19,7 @@
  * - Self-recursion (same callee address at several depths)
  * - Internal-linkage functions (static, anonymous namespace, lambda) — these
  *   have no dynamic symbol, so dladdr() cannot name them and the resolver must
- *   fall through to BFD's symtab / DWARF lookup
+ *   fall through to the symbol table / DWARF lookup
  *
  * The integration tests execute this program and parse its trace output.
  */
@@ -65,7 +65,7 @@ int recursive_countdown(int n) {
 }
 
 // Internal linkage: no .dynsym entry, so dladdr() reports dli_sname == nullptr
-// for both. They must still be traced, named via BFD (see
+// for both. They must still be traced, named from the symbol table (see
 // InternalLinkageFunctionsResolved in test_integration.cpp).
 static int file_static_func(int x) {
     return x + 1;

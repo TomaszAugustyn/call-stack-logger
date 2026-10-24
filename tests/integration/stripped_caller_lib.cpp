@@ -13,7 +13,7 @@
  * .symtab and debug info post-build (see CMakeLists.txt), so the callback's
  * caller address lands in an object where dladdr() finds no symbol (the call
  * site is in a file-local function not covered by .dynsym) and
- * bfd_find_nearest_line() fails. Regression fixture for the
+ * the symbolizer finds no line. Regression fixture for the
  * resolve_filename_and_line() infinite-loop fix — see StrippedCallerTest in
  * test_integration.cpp.
  */

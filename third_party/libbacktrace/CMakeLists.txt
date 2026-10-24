@@ -13,13 +13,15 @@
 # is a GPL program, which the commercial license cannot change. See
 # THIRD_PARTY.md at the repository root.
 #
-# The sources are fetched from the pinned commit below at configure time and
-# compiled here with hand-written config/config.h and
-# config/backtrace-supported.h instead of upstream's configure script (which
-# the GPL-licensed autotools helpers in the repository serve; only the C
-# sources, the headers and LICENSE are used). Nothing in the fetched tree is
-# modified. To build without network access, point
-# FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE at a checkout of that commit.
+# The sources are downloaded from the pinned commit below at configure time
+# (FetchContent, the archive's SHA-256 checked, no git needed — the same
+# mechanism as the Google Test download in tests/) and compiled here with
+# hand-written config/config.h and config/backtrace-supported.h instead of
+# upstream's configure script (which the GPL-licensed autotools helpers in
+# the repository serve; only the C sources, the headers and LICENSE are
+# used). Nothing in the downloaded tree is modified. To build without
+# network access, point FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE at an unpacked
+# copy of that commit.
 #
 # Only the files the resolver needs are compiled: the ELF/DWARF reader, the
 # mmap-based allocator and file views (not alloc.c / read.c), the sorting and
@@ -32,16 +34,20 @@ include(FetchContent)
 
 # 2026-09-03, "libbacktrace: make backtrace_syminfo_to_full_callback_moredata static"
 set(CSLG_LIBBACKTRACE_COMMIT 0b9b49cf4a2c9229fc052d6716e1528b2f23e91a)
+set(CSLG_LIBBACKTRACE_SHA256 fabcb6868b3d09734d4c537637dacac0bf8c9aa28e07486de5c6ce2eb749d413)
 
 # Once a build directory holds the sources, reconfiguring never touches the
 # network again (same policy as the Google Test download in tests/).
 set(FETCHCONTENT_UPDATES_DISCONNECTED_LIBBACKTRACE ON)
 FetchContent_Declare(
     libbacktrace
-    GIT_REPOSITORY https://github.com/ianlancetaylor/libbacktrace.git
-    GIT_TAG        ${CSLG_LIBBACKTRACE_COMMIT}
+    URL      https://github.com/ianlancetaylor/libbacktrace/archive/${CSLG_LIBBACKTRACE_COMMIT}.tar.gz
+    URL_HASH SHA256=${CSLG_LIBBACKTRACE_SHA256}
+    # Extracted files get the extraction time as their timestamp (CMP0135 NEW
+    # behavior); see the Google Test declaration for why.
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-# Upstream has no CMakeLists.txt, so this only downloads the sources.
+# Upstream has no CMakeLists.txt, so this only downloads and unpacks the sources.
 FetchContent_MakeAvailable(libbacktrace)
 
 set(CSLG_LIBBACKTRACE_SOURCE_DIR "${libbacktrace_SOURCE_DIR}" CACHE INTERNAL "libbacktrace sources in use")

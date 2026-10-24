@@ -19,7 +19,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y binutils-dev libc6-dbg lcov
+      run: sudo apt-get update && sudo apt-get install -y libc6-dbg lcov
 
     - name: Configure CMake
       run: cmake -B build -DBUILD_TESTS=ON -DCOVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
@@ -60,7 +60,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y binutils-dev libc6-dbg
+      run: sudo apt-get update && sudo apt-get install -y libc6-dbg
 
     # RelWithDebInfo (-O2 -g) is the build type the README recommends to
     # integrators. Caller resolution and the documented inlining semantics
@@ -86,7 +86,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y clang binutils-dev libc6-dbg
+      run: sudo apt-get update && sudo apt-get install -y clang libc6-dbg
 
     - name: Configure CMake
       run: cmake -B build -DBUILD_TESTS=ON -DCMAKE_CXX_COMPILER=clang++
@@ -106,7 +106,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y clang binutils-dev libc6-dbg
+      run: sudo apt-get update && sudo apt-get install -y clang libc6-dbg
 
     # Clang at -O2 lays the instrumented code out differently from GCC at -O2
     # and from Clang at -O0: tail-called exit hooks, its own inlining and
@@ -131,22 +131,22 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y binutils-dev
-
     # DISABLE_INSTRUMENTATION compiles the hooks and the interposers out. With
     # every LOG_* option on at the same time, the #ifdef seams between the
     # options and the kill switch are what this job keeps building; nothing
     # else exercises that configuration. The integration tests are skipped at
     # configure time by design (the hooks can produce no trace); the unit tests
-    # still run.
+    # still run, and so does the inertness check of tests/disabled/, which
+    # builds a consumer program with and without callstacklogger::instrumented
+    # in its link line and requires the two binaries to agree on their NEEDED
+    # libraries, debug sections and exported symbols.
     - name: Configure CMake
       run: cmake -B build -DBUILD_TESTS=ON -DDISABLE_INSTRUMENTATION=ON -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON
 
     - name: Build
       run: cmake --build build
 
-    - name: Run unit tests
+    - name: Run unit tests and the inertness check
       run: cd build && ctest --output-on-failure
 
   sanitize-asan:
@@ -158,7 +158,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y binutils-dev libc6-dbg
+      run: sudo apt-get update && sudo apt-get install -y libc6-dbg
 
     # Every LOG_* option on: the sanitizers then also run the shipped library
     # with the exception interposers, the in-place patching and the address
@@ -174,9 +174,6 @@ jobs:
       env:
         ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
         UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        # libbfd keeps its symbol-table / object-file caches live to program exit;
-        # these are not leaks in cslg's code — see tests/lsan-suppressions.txt.
-        LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan-suppressions.txt:print_suppressions=0
       run: cd build && ctest --output-on-failure
 
   sanitize-tsan:
@@ -188,7 +185,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y binutils-dev libc6-dbg
+      run: sudo apt-get update && sudo apt-get install -y libc6-dbg
 
     - name: Configure CMake
       run: cmake -B build -DBUILD_TESTS=ON -DSANITIZE=thread -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON

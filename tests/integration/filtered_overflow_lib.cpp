@@ -11,13 +11,13 @@
  * Shared library for the filtered-overflow test. Compiled WITH
  * -finstrument-functions and stripped of its symbol table and debug info after
  * the build (see CMakeLists.txt). hidden_helper() is file-local: after stripping
- * it has neither a dynamic symbol nor a symbol-table entry, so dladdr() and BFD
+ * it has neither a dynamic symbol nor a symbol-table entry, so dladdr() and the symbolizer
  * both fail to name it and the resolver drops its frame — but its enter hook
  * still fires. That gives filtered_overflow_program an "entered but not logged"
  * frame at every recursion level, which is what the depth accounting must
  * survive past the frame stack's initial capacity. filtered_overflow_call() is
  * exported, keeps its dynamic symbol and is therefore logged (with the
- * "<bfd_error>" suffix, since the stripped object has no line info). noinline
+ * no line info in the stripped object). noinline
  * and the asm barriers keep both calls genuine at any optimization level.
  */
 

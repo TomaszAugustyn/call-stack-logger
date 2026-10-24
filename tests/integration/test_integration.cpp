@@ -25,6 +25,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
+#include <link.h> // ElfW, for the ELF section-name check of the fixture files
 #include <map>
 #include <regex>
 #include <set>
@@ -356,7 +357,7 @@ TEST_F(IntegrationTest, StlUsageFunctionPresent) {
 
 // Verify internal-linkage callees are traced and named. None of these has a
 // dynamic symbol (dladdr() yields dli_sname == nullptr), so the resolver must
-// fall through to BFD's symtab / DWARF lookup instead of dropping the frame.
+// fall through to the symbol table / DWARF lookup instead of dropping the frame.
 // The lambda's operator() is spelled differently by the two compilers —
 // "main::{lambda(int)#1}::operator()(int) const" on GCC,
 // "main::$_0::operator()(int) const" on Clang — so the check accepts both.
@@ -771,14 +772,13 @@ TEST(BadOutputPathTest, SymlinkOutputPathIsRejectedAndWarns) {
 // Stripped-caller regression test — the callback's caller address lives in a
 // shared library with no .symtab and no debug info (stripped post-build), in a
 // file-local function not covered by .dynsym. dladdr() then yields no symbol
-// name and bfd_find_nearest_line() fails. resolve_filename_and_line() once
-// looped forever on exactly this input (holding the global BFD mutex), hanging
-// the traced program. The program runs under `timeout`, so a regression shows
-// up as exit code 124 instead of hanging the test suite. DEBUGINFOD_URLS is
-// cleared as a precaution: libbfd itself only searches local separate-debug
-// locations (.build-id/ and .gnu_debuglink paths, verified with strace) and
-// never contacts a debuginfod server, but keeping the variable empty makes the
-// stripped-object condition independent of any future toolchain that might.
+// name and the symbolizer finds neither a symbol nor a line.
+// resolve_filename_and_line() once looped forever on exactly this input
+// (holding the resolver's mutex), hanging the traced program. The program runs
+// under `timeout`, so a regression shows up as exit code 124 instead of hanging
+// the test suite. (The symbolizer searches only local separate-debug locations
+// — next to the file, .debug/, /usr/lib/debug — and never contacts a
+// debuginfod server.)
 // ============================================================================
 
 TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {
@@ -787,7 +787,7 @@ TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {
     ASSERT_GE(fd, 0) << "mkstemp failed";
     close(fd);
 
-    std::string cmd = "DEBUGINFOD_URLS= CSLG_OUTPUT_FILE=\"" + std::string(tmp_path)
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(tmp_path)
                     + "\" timeout 10 \"" + STRIPPED_CALLER_PROGRAM_PATH + "\" > /dev/null 2>&1";
     int ret = system(cmd.c_str());
     // timeout(1) exits 124 when it had to kill the program — the historical
@@ -800,7 +800,7 @@ TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {
     unlink(tmp_path);
 
     // The callback must still be traced; its caller degrades gracefully (no
-    // symbol, no line info in the stripped .so — e.g. "<bfd_error>:???").
+    // symbol, no line info in the stripped .so: "<unknown function>:???").
     EXPECT_NE(content.find("traced_callback"), std::string::npos)
             << "traced_callback entry missing from trace. Trace:\n" << content;
 }
@@ -808,7 +808,7 @@ TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {
 // ============================================================================
 // dlopen()/chdir() regression test — the plugin is loaded by a RELATIVE path
 // and first entered after the host chdir()ed to "/". dladdr() reports that
-// relative string as dli_fname; the resolver used to hand it to bfd_openr()
+// relative string as dli_fname; the resolver used to open that string
 // at first sight of a plugin address, i.e. from the new working directory —
 // opening nothing (every plugin frame became "<could not open object file>")
 // or, with a same-named file there, an unrelated object whose symbol names
@@ -822,7 +822,7 @@ TEST(DlopenPluginTest, RelativeDlopenPathResolvesAfterChdir) {
     ASSERT_GE(fd, 0) << "mkstemp failed";
     close(fd);
 
-    std::string cmd = "DEBUGINFOD_URLS= CSLG_OUTPUT_FILE=\"" + std::string(tmp_path) + "\" \""
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(tmp_path) + "\" \""
                     + DLOPEN_TRACED_PROGRAM_PATH + "\" > /dev/null 2>&1";
     int ret = system(cmd.c_str());
     ASSERT_EQ(ret, 0) << "dlopen_traced_program failed, exit=" << ret;
@@ -909,7 +909,7 @@ TEST(OverflowDepthTest, DepthBeyondMaxStaysConsistent) {
 // ============================================================================
 // Deep recursion with an UNLOGGED frame at every level. Each level calls into a
 // stripped, instrumented shared library whose file-local helper has no symbol
-// left for dladdr() or BFD, so its enter hook fires but the resolver drops the
+// left for dladdr() or the symbolizer, so its enter hook fires but the resolver drops the
 // frame and no line is written. Beyond the frame stack's initial capacity, a
 // third of the frames are therefore "entered but not logged" — the regression
 // this pins: a fixed-capacity stack that assumed every deep frame
@@ -1204,7 +1204,7 @@ TEST(CallStackApiTest, GetCallStackResolvesAncestors) {
 }
 
 // get_call_stack() must work from worker threads too — the two workers in the
-// API program capture their stacks CONCURRENTLY, contending on s_bfd_mutex
+// API program capture their stacks CONCURRENTLY, contending on s_resolver_mutex
 // from threads that never ran trace_begin(). Each worker's chain must resolve
 // with the innermost frame first, independently of the other worker.
 TEST(CallStackApiTest, GetCallStackResolvesFromConcurrentWorkerThreads) {
@@ -1238,7 +1238,7 @@ TEST(CallStackApiTest, GetCallStackResolvesFromConcurrentWorkerThreads) {
 
 // The on-demand API and the per-call hooks must coexist in one process: the
 // same program source compiled WITH -finstrument-functions calls
-// get_call_stack() (which takes s_bfd_mutex outside any hook) while the hooks
+// get_call_stack() (which takes s_resolver_mutex outside any hook) while the hooks
 // fire around it. Verifies both outputs: the printed stack (API worked) and
 // the trace file (hooks worked). Uses a temp DIRECTORY because the program's
 // worker threads produce their own <trace>_tid_<n> files that need cleanup.
@@ -1251,7 +1251,7 @@ TEST(CallStackApiTest, WorksFromInstrumentedProgram) {
     const std::string stdout_path = dir + "/stdout.txt";
 
     // timeout(1): a regression of the re-entrancy guard on the public API
-    // deadlocks on s_bfd_mutex under Clang (hook firing inside the resolver via
+    // deadlocks on s_resolver_mutex under Clang (hook firing inside the resolver via
     // user-TU COMDAT template instantiations) — fail fast with status 124<<8
     // instead of hanging the suite.
     std::string cmd = "CSLG_OUTPUT_FILE=\"" + trace_path + "\" timeout 10 \""
@@ -1970,8 +1970,8 @@ TEST(GlobalDtorTest, InstrumentedGlobalDestructorAtExitIsSafe) {
 // ============================================================================
 // dlopen() of an instrumented plugin while another thread traces. The plugin's
 // static initializer fires the enter hook on the dlopen() thread, with glibc's
-// loader lock held, and the hook takes s_bfd_mutex. The resolver used to call
-// dladdr() — which takes the loader lock — with s_bfd_mutex held, so the two
+// loader lock held, and the hook takes s_resolver_mutex. The resolver used to call
+// dladdr() — which takes the loader lock — with s_resolver_mutex held, so the two
 // threads deadlocked whenever the tracing thread was on its cold path. The
 // driver keeps one thread on the cold path (thousands of never-seen callees)
 // while another dlopen()s the plugin in a loop; it runs under `timeout`, so a
@@ -1984,7 +1984,7 @@ TEST(DlopenConstructorTest, InstrumentedPluginConstructorDoesNotDeadlock) {
     ASSERT_NE(d, nullptr) << "mkdtemp failed";
     const std::string dir = d;
 
-    std::string cmd = "DEBUGINFOD_URLS= CSLG_OUTPUT_FILE=\"" + dir + "/trace.out\" timeout 30 \""
+    std::string cmd = "CSLG_OUTPUT_FILE=\"" + dir + "/trace.out\" timeout 30 \""
                     + DLOPEN_CTOR_PROGRAM_PATH + "\" > \"" + dir + "/stdout.txt\" 2>&1";
     const int status = system(cmd.c_str());
     const std::string out = read_file(dir + "/stdout.txt");
@@ -2921,7 +2921,7 @@ TEST_F(LogExceptionsUncaughtTest, RethrowWithNoOuterHandlerEndsInTheTerminateLin
     EXPECT_EQ(field_of_line(events[3]), "[ terminate]") << events[3];
     for (size_t i = 1; i < 4; ++i) {
         EXPECT_EQ(count_indentation_depth(events[i]), 2) << "a child of the handler's function:\n" << events[i];
-        EXPECT_FALSE(has(events[i], "<bfd_error>")) << events[i];
+        EXPECT_FALSE(has(events[i], "<unknown function>")) << events[i];
     }
 }
 
@@ -2941,7 +2941,7 @@ TEST_F(LogExceptionsUncaughtTest, RethrowExceptionWithNoOuterHandlerEndsInTheTer
     EXPECT_EQ(events[3], trace_lines.back()) << trace_content;
     for (size_t i = 1; i < 4; ++i) {
         EXPECT_EQ(count_indentation_depth(events[i]), 2) << events[i];
-        EXPECT_FALSE(has(events[i], "<bfd_error>")) << events[i];
+        EXPECT_FALSE(has(events[i], "<unknown function>")) << events[i];
     }
 }
 
@@ -3103,4 +3103,291 @@ TEST_F(LogExceptionsInlinedTest, CallAfterCatchingAnInlinedLambdaSitsUnderTheCat
     EXPECT_EQ(depth_of(trace_lines, "inl_after_lambda_catch"), 2)
             << "the call after the catch must not sit under the unwound lambda:\n" << trace_content;
     EXPECT_EQ(depth_of(trace_lines, "inl_marker_c"), 1) << trace_content;
+}
+
+// ============================================================================
+// Where the resolver's input lives — separate debug files, compressed debug
+// sections, object files that cannot be read, addresses outside every object,
+// and the executable layouts (PIE, non-PIE, stripped). These pin the
+// symbolizer (libbacktrace, registered per object at its load bias) end to end.
+// ============================================================================
+
+namespace {
+
+// Runs `program` with the given arguments and a fresh trace file; returns the
+// trace. The program's stdout goes to `stdout_text`, its raw exit status to
+// `status`.
+std::string run_traced_program(const std::string& program, const std::string& args, int& status,
+                               std::string& stdout_text) {
+    char trace_path[] = "/tmp/cslg_resolver_trace_XXXXXX";
+    int fd = mkstemp(trace_path);
+    if (fd < 0) {
+        status = -1;
+        return "";
+    }
+    close(fd);
+    char out_path[] = "/tmp/cslg_resolver_stdout_XXXXXX";
+    fd = mkstemp(out_path);
+    if (fd < 0) {
+        unlink(trace_path);
+        status = -1;
+        return "";
+    }
+    close(fd);
+    const std::string cmd = "CSLG_OUTPUT_FILE=\"" + std::string(trace_path) + "\" timeout 60 \"" + program + "\" "
+                            + args + " > \"" + std::string(out_path) + "\" 2>&1";
+    status = system(cmd.c_str());
+    const std::string trace = read_file(trace_path);
+    stdout_text = read_file(out_path);
+    unlink(trace_path);
+    unlink(out_path);
+    return trace;
+}
+
+// The entry lines of a trace (everything with a "(called from:" column).
+std::vector<std::string> entry_lines_of(const std::string& trace) {
+    std::vector<std::string> entries;
+    for (const std::string& line : split_lines(trace)) {
+        if (line.find("(called from:") != std::string::npos) {
+            entries.push_back(line);
+        }
+    }
+    return entries;
+}
+
+// Whether the ELF file at `path` has a section called `name` — read from its
+// section header string table, not by searching the file's bytes: a program
+// that contains the symbolizer carries the section names of DWARF as string
+// literals in its own data. Used to confirm a fixture's post-build step
+// (strip, objcopy) really ran.
+bool elf_has_section(const std::string& path, const std::string& name) {
+    const std::string content = read_file(path);
+    if (content.size() < sizeof(ElfW(Ehdr))) {
+        return false;
+    }
+    ElfW(Ehdr) ehdr {};
+    std::memcpy(&ehdr, content.data(), sizeof ehdr);
+    if (ehdr.e_shoff == 0 || ehdr.e_shstrndx >= ehdr.e_shnum
+        || ehdr.e_shoff + static_cast<size_t>(ehdr.e_shnum) * sizeof(ElfW(Shdr)) > content.size()) {
+        return false;
+    }
+    std::vector<ElfW(Shdr)> headers(ehdr.e_shnum);
+    std::memcpy(headers.data(), content.data() + ehdr.e_shoff, headers.size() * sizeof(ElfW(Shdr)));
+    const ElfW(Shdr)& strings = headers[ehdr.e_shstrndx];
+    if (strings.sh_offset + strings.sh_size > content.size()) {
+        return false;
+    }
+    for (const ElfW(Shdr)& header : headers) {
+        if (header.sh_name >= strings.sh_size) {
+            continue;
+        }
+        const char* section_name = content.data() + strings.sh_offset + header.sh_name;
+        if (std::strncmp(section_name, name.c_str(), strings.sh_size - header.sh_name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Every build of traced_program.cpp — PIE, non-PIE, stripped with a debug
+// file — must produce the trace of the default build: the same entries, the
+// same names, the same call sites, line for line (timestamps aside). Comparing
+// against the default build keeps the check exact at every optimization level:
+// at -O2 an inlined callee reports its host's call site, and the reference
+// trace reflects the same inlining decisions.
+std::vector<std::string> entries_without_timestamps(const std::string& trace) {
+    // The columns that legitimately differ between two runs: the timestamp,
+    // the duration field of a LOG_ELAPSED build and the address column of a
+    // LOG_ADDR build (the sanitizer configurations build the default library
+    // with both on). What must agree is everything else: the tree, the names
+    // and the call sites.
+    static const std::regex varying_columns(
+            R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] (\[[^\]]{10}\] )?(addr: \[0x[0-9a-f]+\] )?)");
+    std::vector<std::string> entries;
+    for (const std::string& line : entry_lines_of(trace)) {
+        entries.push_back(std::regex_replace(line, varying_columns, ""));
+    }
+    return entries;
+}
+
+void expect_same_trace_as_default_build(const std::string& trace, const char* what) {
+    int status = 0;
+    std::string out;
+    const std::string reference = run_traced_program(TRACED_PROGRAM_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    const std::vector<std::string> expected = entries_without_timestamps(reference);
+    const std::vector<std::string> actual = entries_without_timestamps(trace);
+    ASSERT_FALSE(expected.empty());
+    EXPECT_EQ(actual, expected) << what << " differs from the default build.\nDefault build:\n" << reference
+                                << "\n" << what << ":\n" << trace;
+    EXPECT_NE(trace.find("|_ file_static_func(int)  (called from: "), std::string::npos) << what << ": trace:\n"
+                                                                                           << trace;
+}
+
+// A call line whose callee is `function` and whose site is a line of `file`.
+std::regex callee_at(const std::string& function, const std::string& file) {
+    return std::regex("\\|_ " + function + "  \\(called from: [^\\n]*" + file + ":[0-9]+\\)");
+}
+
+} // namespace
+
+// The library's DWARF data was moved to <lib>.debug after the build and the
+// library carries only a .gnu_debuglink to it. libbacktrace follows the link
+// (same directory, .debug/, /usr/lib/debug/) and checks the file's CRC; names
+// and lines must come out as if the data were still inside the library.
+TEST(SeparateDebugFileTest, DebuglinkFileSuppliesNamesAndLines) {
+    ASSERT_FALSE(elf_has_section(SEPARATE_DEBUG_LIB_PATH, ".debug_info"))
+            << "fixture still carries its debug info: the objcopy post-build step did not run";
+    ASSERT_TRUE(elf_has_section(SEPARATE_DEBUG_LIB_PATH, ".gnu_debuglink"))
+            << "fixture has no .gnu_debuglink section";
+    ASSERT_TRUE(elf_has_section(std::string(SEPARATE_DEBUG_LIB_PATH) + ".debug", ".debug_info"))
+            << "the separate debug file carries no debug info";
+
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DEBUG_OBJECTS_PROGRAM_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_TRUE(std::regex_search(trace, callee_at("separate_debug_helper\\(int\\)", "separate_debug_lib\\.cpp")))
+            << "helper's call site not resolved through the .debug file. Trace:\n" << trace;
+    EXPECT_TRUE(std::regex_search(trace, callee_at("separate_debug_entry", "debug_objects_traced_program\\.cpp")))
+            << "entry not traced by name. Trace:\n" << trace;
+}
+
+// -gz=zlib: the debug sections carry the SHF_COMPRESSED flag and a compression
+// header; libbacktrace inflates them itself (no zlib dependency).
+TEST(CompressedDebugSectionsTest, ZlibCompressedLinesResolve) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DEBUG_OBJECTS_PROGRAM_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_TRUE(std::regex_search(trace, callee_at("zlib_debug_helper\\(int\\)", "compressed_debug_lib\\.cpp")))
+            << "call site inside the zlib-compressed library not resolved. Trace:\n" << trace;
+}
+
+// -gz=zstd, where the toolchain supports it: libbacktrace has its own zstd
+// decoder as well.
+TEST(CompressedDebugSectionsTest, ZstdCompressedLinesResolve) {
+#ifndef CSLG_HAVE_ZSTD_DEBUG
+    GTEST_SKIP() << "the toolchain does not support -gz=zstd";
+#else
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DEBUG_OBJECTS_PROGRAM_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_TRUE(std::regex_search(trace, callee_at("zstd_debug_helper\\(int\\)", "compressed_debug_lib\\.cpp")))
+            << "call site inside the zstd-compressed library not resolved. Trace:\n" << trace;
+#endif
+}
+
+// A plugin whose file was deleted after loading: the mapping's path ends in
+// " (deleted)", the open fails, and every frame inside the plugin degrades to
+// the documented text — the callee's name and the caller's location alike —
+// while the program runs to completion.
+TEST(DamagedObjectTest, DeletedPluginFileIsReportedNotRead) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "deleted", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
+    EXPECT_NE(trace.find("|_ <could not open object file>  (called from: "), std::string::npos)
+            << "plugin callee not reported as unreadable. Trace:\n" << trace;
+    EXPECT_NE(trace.find("(called from: <could not open caller object file>:???)"), std::string::npos)
+            << "call site inside the plugin not reported as unreadable. Trace:\n" << trace;
+    EXPECT_EQ(trace.find("dlopen_plugin_helper"), std::string::npos)
+            << "a name came from a file that no longer exists. Trace:\n" << trace;
+}
+
+// A plugin file cut right after its last PT_LOAD segment: the loader maps it
+// fine, but its section headers and debug sections lie beyond the end of the
+// file. libbacktrace would mmap the missing range and take SIGBUS reading it;
+// the resolver's layout check rejects the file first. The program must finish
+// with the same degraded text as for a deleted file.
+TEST(DamagedObjectTest, TruncatedPluginFileIsRejectedNotMapped) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "truncated", status, out);
+    ASSERT_EQ(status, 0) << "the program did not finish cleanly (a signal means the truncated file was mapped "
+                            "and read): "
+                         << out;
+    EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
+    EXPECT_NE(trace.find("|_ <could not open object file>  (called from: "), std::string::npos)
+            << "truncated plugin not reported as unreadable. Trace:\n" << trace;
+    EXPECT_NE(trace.find("(called from: <could not open caller object file>:???)"), std::string::npos)
+            << trace;
+}
+
+// Addresses no loaded object contains (dladdr fails): the public API reports
+// them with the documented texts instead of failing or crashing.
+TEST(DamagedObjectTest, AddressOutsideEveryObjectIsReported) {
+    int status = 0;
+    std::string out;
+    run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "nomodule", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_NE(out.find("tiny: NAME=<address to object not found> FILE=<caller address to object not found> LINE=none"),
+              std::string::npos)
+            << out;
+    EXPECT_NE(out.find("heap: NAME=<address to object not found> FILE=<caller address to object not found> LINE=none"),
+              std::string::npos)
+            << out;
+}
+
+// The same program as a position-independent executable (load bias = map
+// start) and as a fixed-address one (load bias 0, map start 0x400000): both
+// resolve every name and line. A resolver that handed libbacktrace dli_fbase
+// instead of link_map::l_addr would miss every address of the non-PIE build.
+TEST(PieTest, PieAndNonPieExecutablesResolveAlike) {
+    int status = 0;
+    std::string out;
+    const std::string pie = run_traced_program(TRACED_PROGRAM_PIE_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    expect_same_trace_as_default_build(pie, "PIE executable");
+    const std::string nopie = run_traced_program(TRACED_PROGRAM_NOPIE_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    expect_same_trace_as_default_build(nopie, "non-PIE executable");
+}
+
+// A stripped executable with its debug file next to it (objcopy
+// --only-keep-debug + strip + --add-gnu-debuglink): the debug file carries
+// the symbol table and the DWARF data, so the trace is complete.
+TEST(StrippedExecutableTest, StrippedWithDebuglinkResolvesFully) {
+    ASSERT_FALSE(elf_has_section(STRIPPED_DEBUGLINK_PROGRAM_PATH, ".debug_info"))
+            << "fixture was not stripped: the post-build step did not run";
+    ASSERT_TRUE(elf_has_section(STRIPPED_DEBUGLINK_PROGRAM_PATH, ".gnu_debuglink"));
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(STRIPPED_DEBUGLINK_PROGRAM_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    expect_same_trace_as_default_build(trace, "stripped executable with a .gnu_debuglink file");
+}
+
+// A stripped executable with nothing to fall back on: the program runs to
+// completion and the trace file is well-formed. What it contains depends on
+// the dynamic symbol table: with the narrow symbol export of this build only
+// the hooks are in it, so no frame can be named and none is written; with
+// -rdynamic (CSLG_EXPORT_ALL_SYMBOLS, or a linker without
+// --export-dynamic-symbol) every global function keeps its name there and is
+// traced without a line. Either way nothing crashes and every line keeps the
+// trace format.
+TEST(StrippedExecutableTest, StrippedWithoutSymbolsDegradesGracefully) {
+    ASSERT_FALSE(elf_has_section(STRIPPED_PROGRAM_PATH, ".debug_info"))
+            << "fixture was not stripped: the post-build step did not run";
+    ASSERT_FALSE(elf_has_section(STRIPPED_PROGRAM_PATH, ".gnu_debuglink"));
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(STRIPPED_PROGRAM_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_NE(trace.find("=== New trace run: "), std::string::npos) << trace;
+    const std::regex well_formed(
+            R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] (\|  )*(\|_ )?[^ ].*  \(called from: .+:(\d+|\?\?\?)\)$)");
+    const std::vector<std::string> entries = entry_lines_of(trace);
+    for (const std::string& entry : entries) {
+        EXPECT_TRUE(std::regex_match(entry, well_formed)) << entry;
+        EXPECT_NE(entry.find(":???)"), std::string::npos) << "a line number without debug information: " << entry;
+    }
+#ifdef CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS
+    EXPECT_NE(trace.find("|_ func_a()  (called from: "), std::string::npos)
+            << "with -rdynamic the dynamic symbol table still names the global functions. Trace:\n" << trace;
+#else
+    EXPECT_TRUE(entries.empty()) << "only the hooks are exported, so no frame can be named. Trace:\n" << trace;
+#endif
 }

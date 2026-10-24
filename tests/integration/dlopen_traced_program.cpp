@@ -15,7 +15,7 @@
  *
  * dladdr() reports the relative dlopen string as dli_fname. The resolver
  * opens the object file lazily, at first sight of an address inside it — here
- * after the chdir — so a resolver that hands dli_fname to bfd_openr() opens
+ * after the chdir — so a resolver that opens dli_fname as given opens
  * nothing (or, if a same-named file exists in the new directory, the wrong
  * object) and every plugin frame degrades to "<could not open object file>".
  * DLOPEN_PLUGIN_DIR / DLOPEN_PLUGIN_FILE come from CMake.

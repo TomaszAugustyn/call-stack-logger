@@ -14,6 +14,10 @@ file(GLOB_RECURSE HEADERS "../include/*.h")
 # throw/catch entry points; it compiles to nothing without that option.
 add_library(callstacklogger STATIC callStack.cpp trace.cpp exceptions.cpp ${HEADERS})
 cslg_apply_sanitizers(callstacklogger)
+# Position-independent, so that the archive links into position-independent
+# executables (the default on Debian, Ubuntu and most distributions) and into
+# fixed-address ones alike, whatever the host compiler's own default is.
+set_target_properties(callstacklogger PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # PUBLIC include dir: consumers get the include path automatically when they link
 # callstacklogger — no manual target_include_directories needed in user code.

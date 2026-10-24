@@ -131,7 +131,7 @@ struct FrameRecord {
 
 // RAII: blocks thread cancellation for the enclosing scope and restores the previous
 // state on exit. Used by every tracer scope that contains a POSIX cancellation point
-// (fwrite -> write, the lazy open, BFD's reads, pwrite, close). Two facts make this
+// (fwrite -> write, the lazy open, the symbolizer's reads, pwrite, close). Two facts make this
 // load-bearing rather than cosmetic:
 //   * Both GCC and Clang emit the call to __cyg_profile_func_enter/exit as
 //     non-throwing, so the instrumented function has no unwind entry for that call

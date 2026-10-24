@@ -47,7 +47,7 @@ cslg_apply_sanitizers(cslg_callstack_api_program)
 # Same source as cslg_callstack_api_program, but compiled WITH instrumentation and
 # linked against callstacklogger_instrumented — proves the on-demand
 # get_call_stack() API and the per-call hooks coexist in one process (the API
-# takes s_bfd_mutex outside any hook while hooks fire around it).
+# takes s_resolver_mutex outside any hook while hooks fire around it).
 add_executable(cslg_callstack_api_program_instrumented callstack_api_program.cpp)
 target_compile_features(cslg_callstack_api_program_instrumented PRIVATE cxx_std_17)
 target_link_libraries(cslg_callstack_api_program_instrumented PRIVATE callstacklogger_instrumented
@@ -58,7 +58,7 @@ cslg_apply_sanitizers(cslg_callstack_api_program_instrumented)
 # invokes a callback in instrumented user code. Post-build, strip --strip-all
 # removes .symtab and all debug sections (.dynsym survives — it's needed at
 # runtime), so the callback's caller address resolves to an object where
-# dladdr() finds no symbol and BFD finds no line info — the exact input that
+# dladdr() finds no symbol and the symbolizer finds no line info — the exact input that
 # once made resolve_filename_and_line() loop forever (see StrippedCallerTest).
 add_library(cslg_stripped_caller SHARED stripped_caller_lib.cpp)
 target_compile_features(cslg_stripped_caller PRIVATE cxx_std_17)
@@ -84,7 +84,7 @@ cslg_apply_sanitizers(cslg_stripped_caller_program)
 # hook on the dlopen() thread, i.e. with glibc's loader lock held. The driver
 # dlopen()s/dlclose()s it in a loop while another thread resolves thousands of
 # never-seen addresses. Before the fix the resolver called dladdr() (which takes
-# the loader lock) with s_bfd_mutex held and the two threads deadlocked; the test
+# the loader lock) with s_resolver_mutex held and the two threads deadlocked; the test
 # runs the driver under `timeout` (see DlopenConstructorTest).
 add_library(cslg_dlopen_ctor_plugin SHARED dlopen_ctor_plugin.cpp)
 target_compile_features(cslg_dlopen_ctor_plugin PRIVATE cxx_std_17)
@@ -131,7 +131,7 @@ cslg_apply_sanitizers(cslg_overflow_depth_program)
 
 # Same recursion, but with an unlogged frame at every level: an instrumented
 # shared library, stripped after the build like cslg_stripped_caller, whose
-# file-local helper has no symbol left for dladdr() or BFD to name — its enter
+# file-local helper has no symbol left for dladdr() or the symbolizer to name — its enter
 # hook fires but the resolver drops the frame. Frames beyond the initial
 # capacity are then a mix of logged and unlogged, and the depth accounting must
 # stay exact regardless (see FilteredOverflowTest). Not sanitized, for the same
@@ -224,6 +224,7 @@ function(cslg_add_flag_variant variant driver)
         ${PROJECT_SOURCE_DIR}/src/exceptions.cpp)
     target_include_directories(callstacklogger_${variant} PUBLIC
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
+    set_target_properties(callstacklogger_${variant} PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_definitions(callstacklogger_${variant} PRIVATE ${ARGN})
     # Mirror the main library's private 64-bit off_t setting (src/CMakeLists.txt)
     # so the variant libraries compile the same code the shipped library does.
@@ -329,6 +330,112 @@ target_compile_options(cslg_traced_test_program_log_exceptions_inlined PRIVATE -
 # of the tail layout and that pwrite() never stomps the addr column.
 cslg_add_flag_variant(log_elapsed_addr traced_program.cpp LOG_ELAPSED LOG_ADDR)
 
+# ---------------------------------------------------------------------------
+# Debug-information fixtures: where the resolver's input lives in a separate
+# debug file, in compressed sections, or cannot be read at all, and the
+# executable layouts (PIE, non-PIE, stripped) the resolver has to handle.
+# All instrumented libraries here follow the cslg_dlopen_plugin pattern
+# (INSTRUMENT_FLAGS plus -g, no link to a cslg target). Not sanitized, like
+# the other fixture libraries.
+# ---------------------------------------------------------------------------
+
+# A library whose DWARF data is moved to <lib>.debug after the build and
+# linked back with a .gnu_debuglink (how distributions ship debug symbols,
+# e.g. libc6-dbg). The resolver must follow the link (see SeparateDebugFileTest).
+add_library(cslg_separate_debug_lib SHARED separate_debug_lib.cpp)
+target_compile_features(cslg_separate_debug_lib PRIVATE cxx_std_17)
+target_compile_options(cslg_separate_debug_lib PRIVATE ${INSTRUMENT_FLAGS} -g)
+add_custom_command(TARGET cslg_separate_debug_lib POST_BUILD
+    COMMAND objcopy --only-keep-debug $<TARGET_FILE:cslg_separate_debug_lib> $<TARGET_FILE:cslg_separate_debug_lib>.debug
+    COMMAND objcopy --strip-debug $<TARGET_FILE:cslg_separate_debug_lib>
+    COMMAND objcopy --add-gnu-debuglink=$<TARGET_FILE:cslg_separate_debug_lib>.debug $<TARGET_FILE:cslg_separate_debug_lib>
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:cslg_separate_debug_lib>
+    COMMENT "Moving the debug info of cslg_separate_debug_lib to a .gnu_debuglink file")
+
+# Libraries with compressed debug sections: zlib always, zstd when the
+# compiler and linker support -gz=zstd (binutils >= 2.40, LLVM built with
+# zstd). libbacktrace decompresses both on its own (see
+# CompressedDebugSectionsTest).
+add_library(cslg_zlib_debug_lib SHARED compressed_debug_lib.cpp)
+target_compile_features(cslg_zlib_debug_lib PRIVATE cxx_std_17)
+target_compile_definitions(cslg_zlib_debug_lib PRIVATE CDL_NAME=zlib)
+target_compile_options(cslg_zlib_debug_lib PRIVATE ${INSTRUMENT_FLAGS} -g -gz=zlib)
+target_link_options(cslg_zlib_debug_lib PRIVATE -gz=zlib)
+
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "-g -gz=zstd")
+check_cxx_source_compiles("int main() { return 0; }" CSLG_HAVE_ZSTD_DEBUG_SECTIONS)
+unset(CMAKE_REQUIRED_FLAGS)
+set(CSLG_DEBUG_OBJECT_LIBS cslg_separate_debug_lib cslg_zlib_debug_lib)
+if(CSLG_HAVE_ZSTD_DEBUG_SECTIONS)
+    add_library(cslg_zstd_debug_lib SHARED compressed_debug_lib.cpp)
+    target_compile_features(cslg_zstd_debug_lib PRIVATE cxx_std_17)
+    target_compile_definitions(cslg_zstd_debug_lib PRIVATE CDL_NAME=zstd)
+    target_compile_options(cslg_zstd_debug_lib PRIVATE ${INSTRUMENT_FLAGS} -g -gz=zstd)
+    target_link_options(cslg_zstd_debug_lib PRIVATE -gz=zstd)
+    list(APPEND CSLG_DEBUG_OBJECT_LIBS cslg_zstd_debug_lib)
+endif()
+
+add_executable(cslg_debug_objects_traced_program debug_objects_traced_program.cpp)
+target_compile_features(cslg_debug_objects_traced_program PRIVATE cxx_std_17)
+target_link_libraries(cslg_debug_objects_traced_program PRIVATE callstacklogger_instrumented ${CSLG_DEBUG_OBJECT_LIBS})
+if(CSLG_HAVE_ZSTD_DEBUG_SECTIONS)
+    target_compile_definitions(cslg_debug_objects_traced_program PRIVATE CSLG_HAVE_ZSTD_DEBUG)
+endif()
+cslg_apply_sanitizers(cslg_debug_objects_traced_program)
+
+# Object files the resolver cannot read (deleted after loading, truncated) and
+# addresses outside every object; reuses the dlopen plugin as the victim (see
+# DamagedObjectTest).
+add_executable(cslg_damaged_objects_traced_program damaged_objects_traced_program.cpp)
+target_compile_features(cslg_damaged_objects_traced_program PRIVATE cxx_std_17)
+target_compile_definitions(cslg_damaged_objects_traced_program PRIVATE
+    DAMAGED_PLUGIN_PATH="$<TARGET_FILE:cslg_dlopen_plugin>")
+target_link_libraries(cslg_damaged_objects_traced_program PRIVATE callstacklogger_instrumented)
+add_dependencies(cslg_damaged_objects_traced_program cslg_dlopen_plugin)
+cslg_apply_sanitizers(cslg_damaged_objects_traced_program)
+
+# The traced program as a position-independent and as a fixed-address
+# executable, explicitly (the default differs between distributions): the
+# load bias the resolver hands libbacktrace is the map start for the first
+# and 0 for the second (see PieTest).
+add_executable(cslg_traced_test_program_pie traced_program.cpp)
+target_compile_features(cslg_traced_test_program_pie PRIVATE cxx_std_17)
+target_compile_options(cslg_traced_test_program_pie PRIVATE -fPIE)
+target_link_options(cslg_traced_test_program_pie PRIVATE -pie)
+target_link_libraries(cslg_traced_test_program_pie PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(cslg_traced_test_program_pie)
+
+add_executable(cslg_traced_test_program_nopie traced_program.cpp)
+target_compile_features(cslg_traced_test_program_nopie PRIVATE cxx_std_17)
+target_compile_options(cslg_traced_test_program_nopie PRIVATE -fno-pie)
+target_link_options(cslg_traced_test_program_nopie PRIVATE -no-pie)
+target_link_libraries(cslg_traced_test_program_nopie PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(cslg_traced_test_program_nopie)
+
+# The traced program stripped of its symbol table and debug information after
+# the build: once with a separate debug file linked back in (the way to ship
+# a stripped diagnostic build), once without anything (see
+# StrippedExecutableTest).
+add_executable(cslg_stripped_debuglink_traced_program traced_program.cpp)
+target_compile_features(cslg_stripped_debuglink_traced_program PRIVATE cxx_std_17)
+target_link_libraries(cslg_stripped_debuglink_traced_program PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(cslg_stripped_debuglink_traced_program)
+add_custom_command(TARGET cslg_stripped_debuglink_traced_program POST_BUILD
+    COMMAND objcopy --only-keep-debug $<TARGET_FILE:cslg_stripped_debuglink_traced_program> $<TARGET_FILE:cslg_stripped_debuglink_traced_program>.debug
+    COMMAND strip --strip-all $<TARGET_FILE:cslg_stripped_debuglink_traced_program>
+    COMMAND objcopy --add-gnu-debuglink=$<TARGET_FILE:cslg_stripped_debuglink_traced_program>.debug $<TARGET_FILE:cslg_stripped_debuglink_traced_program>
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:cslg_stripped_debuglink_traced_program>
+    COMMENT "Stripping cslg_stripped_debuglink_traced_program, keeping a .gnu_debuglink file")
+
+add_executable(cslg_stripped_traced_program traced_program.cpp)
+target_compile_features(cslg_stripped_traced_program PRIVATE cxx_std_17)
+target_link_libraries(cslg_stripped_traced_program PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(cslg_stripped_traced_program)
+add_custom_command(TARGET cslg_stripped_traced_program POST_BUILD
+    COMMAND strip --strip-all $<TARGET_FILE:cslg_stripped_traced_program>
+    COMMENT "Stripping cslg_stripped_traced_program entirely")
+
 # The integration test runner executes cslg_traced_test_program and parses output.
 # Compiled WITHOUT instrumentation — just gtest code.
 add_executable(cslg_integration_tests test_integration.cpp)
@@ -365,7 +472,24 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     TRACED_PROGRAM_LOG_EXCEPTIONS_ALL_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_all>"
     UNCAUGHT_PROGRAM_LOG_EXCEPTIONS_ELAPSED_PATH="$<TARGET_FILE:cslg_uncaught_traced_program_log_exceptions_elapsed>"
     TRACED_PROGRAM_LOG_EXCEPTIONS_INLINED_PATH="$<TARGET_FILE:cslg_traced_test_program_log_exceptions_inlined>"
+    DEBUG_OBJECTS_PROGRAM_PATH="$<TARGET_FILE:cslg_debug_objects_traced_program>"
+    SEPARATE_DEBUG_LIB_PATH="$<TARGET_FILE:cslg_separate_debug_lib>"
+    ZLIB_DEBUG_LIB_PATH="$<TARGET_FILE:cslg_zlib_debug_lib>"
+    DAMAGED_OBJECTS_PROGRAM_PATH="$<TARGET_FILE:cslg_damaged_objects_traced_program>"
+    TRACED_PROGRAM_PIE_PATH="$<TARGET_FILE:cslg_traced_test_program_pie>"
+    TRACED_PROGRAM_NOPIE_PATH="$<TARGET_FILE:cslg_traced_test_program_nopie>"
+    STRIPPED_DEBUGLINK_PROGRAM_PATH="$<TARGET_FILE:cslg_stripped_debuglink_traced_program>"
+    STRIPPED_PROGRAM_PATH="$<TARGET_FILE:cslg_stripped_traced_program>"
 )
+if(CSLG_HAVE_ZSTD_DEBUG_SECTIONS)
+    target_compile_definitions(cslg_integration_tests PRIVATE CSLG_HAVE_ZSTD_DEBUG
+        ZSTD_DEBUG_LIB_PATH="$<TARGET_FILE:cslg_zstd_debug_lib>")
+endif()
+if(CSLG_EXPORT_ALL_SYMBOLS OR NOT CSLG_LINKER_HAS_EXPORT_DYNAMIC_SYMBOL)
+    # Programs are linked with -rdynamic: a stripped executable keeps its
+    # function names in the dynamic symbol table (see StrippedExecutableTest).
+    target_compile_definitions(cslg_integration_tests PRIVATE CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS)
+endif()
 
 # When the user passes -DLOG_ADDR=ON or -DLOG_ELAPSED=ON globally, the default
 # callstacklogger target is built with that macro too (PRIVATE to the library,

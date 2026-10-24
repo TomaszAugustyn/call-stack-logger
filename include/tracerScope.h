@@ -30,10 +30,10 @@ NO_INSTRUMENT void exit_no_instrument_scope(bool previous);
 // __cyg_profile_func_enter/exit return at once. Held by
 //   * the public API entry points (get_call_stack(), instrumentation::resolve(),
 //     resolve_site(), inline_chain_at()) for their whole duration: the resolver
-//     holds s_bfd_mutex while running std container/string template code, and
+//     holds s_resolver_mutex while running std container/string template code, and
 //     under Clang the linker may pick those templates' COMDAT instantiations
 //     from the USER's instrumented TU — a hook firing there would re-lock
-//     s_bfd_mutex on the same thread (a self-deadlock, observed via
+//     s_resolver_mutex on the same thread (a self-deadlock, observed via
 //     unordered_map::find inside resolve_no_unwind). The scope also keeps the
 //     resolver's own std internals out of the trace when the calling program
 //     is instrumented;

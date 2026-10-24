@@ -14,7 +14,7 @@
  * traced_callback() is entered from a file-local function inside the stripped
  * library, so its caller address resolves to an object with no symbol and no
  * line info. resolve_filename_and_line() once looped forever on exactly this
- * input (holding the global BFD mutex); the integration test runs this program
+ * input (holding the resolver's mutex); the integration test runs this program
  * under `timeout` and expects normal completion with the callback traced.
  */
 
