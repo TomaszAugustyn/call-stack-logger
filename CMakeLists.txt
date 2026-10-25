@@ -251,7 +251,12 @@ unset(CMAKE_REQUIRED_LINK_OPTIONS)
 # Attaches, as INTERFACE link options of `target` (a library every tracing
 # program links), the exports described above. Used for the shipped library in
 # src/ and for the per-flag library variants the integration tests build.
+# With DISABLE_INSTRUMENTATION there are no hooks and no interposers to export,
+# so nothing is attached.
 function(cslg_set_consumer_link_options target)
+    if(DISABLE_INSTRUMENTATION)
+        return()
+    endif()
     if(CSLG_EXPORT_ALL_SYMBOLS OR NOT CSLG_LINKER_HAS_EXPORT_DYNAMIC_SYMBOL)
         target_link_options(${target} INTERFACE -rdynamic)
         return()
@@ -267,6 +272,63 @@ function(cslg_set_consumer_link_options target)
     foreach(symbol IN LISTS symbols)
         target_link_options(${target} INTERFACE "-Wl,--export-dynamic-symbol=${symbol}")
     endforeach()
+endfunction()
+
+# ============================================================================
+# Keeping names and lines through a later strip
+# ============================================================================
+# The resolver reads names from an object file's symbol table and lines from
+# its DWARF data. A binary stripped with `strip --strip-all` (what
+# `cmake --install --strip` and a plain `strip` do) has neither left, and its
+# traced calls can no longer be named. The usual remedy is the distributions'
+# own: move the debug information to a separate file before stripping and
+# leave a .gnu_debuglink to it in the binary; the resolver follows the link
+# (same directory, .debug/, /usr/lib/debug, or the build ID). The link
+# survives a later `strip --strip-all`, only the debug sections and the symbol
+# table go.
+#
+# cslg_keep_debug_info(<target> [INSTALL_DESTINATION <dir>]) does that for an
+# executable (or shared library) target after each link: it writes
+# <target-file>.debug with `objcopy --only-keep-debug` and adds the link to the
+# target file with `objcopy --add-gnu-debuglink`. The binary itself is not
+# stripped; whoever strips it later keeps a complete trace as long as the
+# .debug file ships next to it (INSTALL_DESTINATION installs it there) or is
+# installed under /usr/lib/debug. A library cannot attach a post-build step to
+# a consumer's targets through an INTERFACE target, so the call is explicit.
+#
+# Costs to know about: the .debug file is as large as the binary's debug
+# information; and once the link exists, the resolver reads the debug file
+# (and checks its CRC over its whole length) instead of the binary's own
+# sections, a one-time cost per object file at its first traced call.
+function(cslg_keep_debug_info target)
+    cmake_parse_arguments(CSLG_KDI "" "INSTALL_DESTINATION" "" ${ARGN})
+    if(NOT TARGET ${target})
+        message(FATAL_ERROR "cslg_keep_debug_info: ${target} is not a target")
+    endif()
+    # CMAKE_OBJCOPY comes from the toolchain detection; llvm-objcopy does both
+    # operations as well. Without either, warn and keep the build going: the
+    # program still traces, it only loses the names once it is stripped.
+    set(objcopy "${CMAKE_OBJCOPY}")
+    if(NOT objcopy)
+        find_program(objcopy NAMES objcopy llvm-objcopy)
+    endif()
+    if(NOT objcopy)
+        message(WARNING "cslg_keep_debug_info(${target}): no objcopy or llvm-objcopy found; "
+                "no .debug file will be produced")
+        return()
+    endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${objcopy} --only-keep-debug $<TARGET_FILE:${target}> $<TARGET_FILE:${target}>.debug
+        COMMAND ${objcopy} --add-gnu-debuglink=$<TARGET_FILE_NAME:${target}>.debug $<TARGET_FILE:${target}>
+        WORKING_DIRECTORY $<TARGET_FILE_DIR:${target}>
+        COMMENT "Writing the debug information of ${target} to $<TARGET_FILE_NAME:${target}>.debug and linking it"
+        VERBATIM)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.15)
+        set_property(TARGET ${target} APPEND PROPERTY ADDITIONAL_CLEAN_FILES $<TARGET_FILE:${target}>.debug)
+    endif()
+    if(CSLG_KDI_INSTALL_DESTINATION)
+        install(FILES $<TARGET_FILE:${target}>.debug DESTINATION ${CSLG_KDI_INSTALL_DESTINATION})
+    endif()
 endfunction()
 
 # ============================================================================

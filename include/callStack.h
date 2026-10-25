@@ -59,6 +59,9 @@ public:
         /// debug information; lookups that cannot succeed are skipped.
         bool has_symtab = false;
         bool has_dwarf = false;
+        /// The file itself carries a .symtab section (a full strip removes it;
+        /// `has_symtab` is then true only through .dynsym).
+        bool has_symtab_section = false;
     };
 
     /// Returns the cached (or freshly registered) ObjectFile for the object

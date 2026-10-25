@@ -49,6 +49,14 @@ of `master`.
   of its symbol table without a separate debug file shows no names at all
   with the narrow export (it showed names without lines before); keep a
   `.gnu_debuglink` debug file next to a stripped binary.
+- New CMake helper `cslg_keep_debug_info(<target> [INSTALL_DESTINATION <dir>])`:
+  after each link it writes `<target>.debug` and adds a `.gnu_debuglink` to the
+  binary, so that a later `strip --strip-all` keeps names and lines resolvable
+  as long as the debug file ships next to the binary or under
+  `/usr/lib/debug`.
+- The library prints one warning on `stderr` when the executable has neither
+  a symbol table nor debug information, because none of its functions can be
+  named then and the trace would otherwise stay empty without explanation.
 - `DISABLE_INSTRUMENTATION=ON` now makes `callstacklogger::instrumented`
   contribute nothing to a program: no `-finstrument-functions`, no `-g`, no
   exported symbols, no library. A program that calls `get_call_stack()` in

@@ -3215,6 +3215,8 @@ void expect_same_trace_as_default_build(const std::string& trace, const char* wh
     std::string out;
     const std::string reference = run_traced_program(TRACED_PROGRAM_PATH, "", status, out);
     ASSERT_EQ(status, 0) << out;
+    EXPECT_EQ(out.find("[call-stack-logger] WARNING"), std::string::npos)
+            << "the default build printed a warning:\n" << out;
     const std::vector<std::string> expected = entries_without_timestamps(reference);
     const std::vector<std::string> actual = entries_without_timestamps(trace);
     ASSERT_FALSE(expected.empty());
@@ -3346,28 +3348,36 @@ TEST(PieTest, PieAndNonPieExecutablesResolveAlike) {
     expect_same_trace_as_default_build(nopie, "non-PIE executable");
 }
 
-// A stripped executable with its debug file next to it (objcopy
-// --only-keep-debug + strip + --add-gnu-debuglink): the debug file carries
-// the symbol table and the DWARF data, so the trace is complete.
+// A stripped executable with its debug file next to it, made the way the
+// README recommends: cslg_keep_debug_info() wrote the .debug file and the
+// .gnu_debuglink right after the link, and a plain `strip --strip-all` came
+// later. The link survives the strip, the debug file carries the symbol table
+// and the DWARF data, so the trace is complete — and no warning is printed.
 TEST(StrippedExecutableTest, StrippedWithDebuglinkResolvesFully) {
     ASSERT_FALSE(elf_has_section(STRIPPED_DEBUGLINK_PROGRAM_PATH, ".debug_info"))
             << "fixture was not stripped: the post-build step did not run";
-    ASSERT_TRUE(elf_has_section(STRIPPED_DEBUGLINK_PROGRAM_PATH, ".gnu_debuglink"));
+    ASSERT_FALSE(elf_has_section(STRIPPED_DEBUGLINK_PROGRAM_PATH, ".symtab"));
+    ASSERT_TRUE(elf_has_section(STRIPPED_DEBUGLINK_PROGRAM_PATH, ".gnu_debuglink"))
+            << "cslg_keep_debug_info() left no .gnu_debuglink, or the strip removed it";
+    ASSERT_TRUE(elf_has_section(std::string(STRIPPED_DEBUGLINK_PROGRAM_PATH) + ".debug", ".debug_info"));
     int status = 0;
     std::string out;
     const std::string trace = run_traced_program(STRIPPED_DEBUGLINK_PROGRAM_PATH, "", status, out);
     ASSERT_EQ(status, 0) << out;
     expect_same_trace_as_default_build(trace, "stripped executable with a .gnu_debuglink file");
+    EXPECT_EQ(out.find("[call-stack-logger] WARNING"), std::string::npos)
+            << "a warning although the debug file was found:\n" << out;
 }
 
 // A stripped executable with nothing to fall back on: the program runs to
-// completion and the trace file is well-formed. What it contains depends on
-// the dynamic symbol table: with the narrow symbol export of this build only
-// the hooks are in it, so no frame can be named and none is written; with
-// -rdynamic (CSLG_EXPORT_ALL_SYMBOLS, or a linker without
-// --export-dynamic-symbol) every global function keeps its name there and is
-// traced without a line. Either way nothing crashes and every line keeps the
-// trace format.
+// completion, the trace file is well-formed, and the resolver says once on
+// stderr that the executable has no symbol table and no debug information.
+// What the trace contains depends on the dynamic symbol table: with the narrow
+// symbol export of this build only the hooks are in it, so no frame can be
+// named and none is written; with -rdynamic (CSLG_EXPORT_ALL_SYMBOLS, or a
+// linker without --export-dynamic-symbol) every global function keeps its name
+// there and is traced without a line. Either way nothing crashes and every
+// line keeps the trace format.
 TEST(StrippedExecutableTest, StrippedWithoutSymbolsDegradesGracefully) {
     ASSERT_FALSE(elf_has_section(STRIPPED_PROGRAM_PATH, ".debug_info"))
             << "fixture was not stripped: the post-build step did not run";
@@ -3376,6 +3386,10 @@ TEST(StrippedExecutableTest, StrippedWithoutSymbolsDegradesGracefully) {
     std::string out;
     const std::string trace = run_traced_program(STRIPPED_PROGRAM_PATH, "", status, out);
     ASSERT_EQ(status, 0) << out;
+    EXPECT_NE(out.find("[call-stack-logger] WARNING: the executable has no symbol table and no debug "
+                       "information"),
+              std::string::npos)
+            << "no warning about the bare executable on stderr:\n" << out;
     EXPECT_NE(trace.find("=== New trace run: "), std::string::npos) << trace;
     const std::regex well_formed(
             R"(^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3}\] (\|  )*(\|_ )?[^ ].*  \(called from: .+:(\d+|\?\?\?)\)$)");

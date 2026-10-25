@@ -1319,6 +1319,29 @@ target_link_libraries(my_app PRIVATE callstacklogger::instrumented)
 No per-target `target_compile_options` or link-option boilerplate needed — everything
 propagates through the INTERFACE. See README "Integrating into your own project".
 
+`cslg_keep_debug_info(<target> [INSTALL_DESTINATION <dir>])` (root CMakeLists.txt,
+global once the project is added) is the one explicit call a consumer may make: a
+POST_BUILD step that writes `<target-file>.debug` (`objcopy --only-keep-debug`)
+and adds a `.gnu_debuglink` to the target file. The link survives a later
+`strip --strip-all` (verified: only `.gnu_debuglink` remains), so a stripped
+binary shipped with its `.debug` file next to it (or under `/usr/lib/debug`)
+keeps a complete trace. An INTERFACE target cannot attach post-build commands
+to a consumer's targets, hence the explicit call. Side effect to remember:
+once the link exists, libbacktrace
+reads the debug file (and CRC-checks it over its full length) INSTEAD of the
+binary's own sections, even while the binary still has them — identical data,
+one more open and one CRC pass per object at its first traced call. Pinned by
+`StrippedExecutableTest.StrippedWithDebuglinkResolvesFully`, whose fixture
+calls the helper and then strips. The complementary runtime side: when the
+EXECUTABLE is registered with neither a `.symtab` section (reported by the
+extension's section walk; libbacktrace's own `found_sym` is also true for a
+bare `.dynsym`) nor any DWARF, `ensure_object_loaded()` prints one
+`[call-stack-logger] WARNING` on stderr — the trace would otherwise stay
+empty without explanation. Shared libraries are not reported (system
+libraries come stripped). Pinned by
+`StrippedExecutableTest.StrippedWithoutSymbolsDegradesGracefully`; the
+default build and the debuglink fixture must stay silent.
+
 ## Testing
 
 Tests are built when `BUILD_TESTS=ON` is passed to CMake AND cslg is the top-level
@@ -1646,9 +1669,11 @@ Test pure/deterministic functions from the include headers:
   line for line (timestamp, duration and address columns aside). Pins the load-bias
   rule (`l_addr`, not `dli_fbase`).
 - `StrippedExecutableTest` (2 tests) — the traced program after `strip --strip-all`
-  with a `.gnu_debuglink` debug file next to it (trace equal to the default build's) and
-  without one (exit 0, a well-formed trace; empty with the narrow symbol export, names
-  with `:???` under `-rdynamic` — `CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS` tells the test which).
+  with a `.gnu_debuglink` debug file next to it, produced by `cslg_keep_debug_info()`
+  before the strip (trace equal to the default build's, no warning) and without one
+  (exit 0, the bare-executable warning on stderr, a well-formed trace; empty with the
+  narrow symbol export, names with `:???` under `-rdynamic` —
+  `CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS` tells the test which).
 - `cslg_disabled_instrumentation_is_inert` (ctest, only with `DISABLE_INSTRUMENTATION=ON`)
   — `ctest --build-and-test` configures `tests/disabled/` as a Release consumer project
   (with `FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE` pointing at the already-downloaded

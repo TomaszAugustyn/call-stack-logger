@@ -67,7 +67,8 @@ make run
 
 Each run appends to the trace output file with a timestamped separator header, so consecutive
 runs are easy to distinguish. Output is line-buffered for crash safety without per-call overhead.
-If the trace file cannot be opened, a warning is printed to `stderr`.
+If the trace file cannot be opened, or the executable has neither a symbol table nor debug
+information so that none of its functions can be named, a warning is printed to `stderr`.
 
 ### Compiler-specific instrumentation ###
 
@@ -263,20 +264,29 @@ caller locations at every optimization level.
 ### Shipping a stripped binary ###
 
 The resolver reads names from the symbol table and lines from the DWARF data of each
-loaded object file. If a diagnostic build is stripped before it ships, keep its debug
-information in a separate file and link it back in — the usual distribution recipe:
+loaded object file. A binary stripped with `strip --strip-all` (which is what a plain
+`strip` and `cmake --install --strip` do) has neither left, so none of its functions can
+be named and its trace stays empty; the library then prints one warning on `stderr` at
+the first traced call. The remedy is the one distributions use: keep the debug
+information in a separate file and leave a link to it in the binary. Call the helper on
+your executable target:
 
-```bash
-objcopy --only-keep-debug my_app my_app.debug
-strip --strip-all my_app
-objcopy --add-gnu-debuglink=my_app.debug my_app
+```cmake
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE callstacklogger::instrumented)
+cslg_keep_debug_info(my_app INSTALL_DESTINATION bin)   # INSTALL_DESTINATION is optional
 ```
 
-The resolver follows the link (same directory, a `.debug/` subdirectory, or the
-`/usr/lib/debug` tree, also by build ID), and the trace is complete. A binary stripped
-without such a file has no names left for the resolver, and its trace stays empty;
-shared libraries without debug information still show their function names, with
-`:???` for the line.
+After every link it writes `my_app.debug` next to the binary (`objcopy
+--only-keep-debug`) and adds a `.gnu_debuglink` to the binary (`objcopy
+--add-gnu-debuglink`); the binary itself is not stripped. Strip it whenever you like
+afterwards — the link survives a full strip — and ship or install `my_app.debug` next to
+it (or under `/usr/lib/debug`): the resolver follows the link and the trace is complete.
+Two costs to know: the `.debug` file is as large as the
+binary's debug information, and once the link exists the resolver reads the debug file
+(checking its CRC over its whole length) instead of the binary's own sections, a one-time
+cost per object file at its first traced call. Shared libraries without debug
+information still show their function names, with `:???` for the line.
 
 ### Available CMake targets ###
 
@@ -343,7 +353,9 @@ from the wrong file.
 | `LOG_ADDR`                | `OFF`   | Include function addresses in trace output                                                                                                                                                                                                             |
 | `LOG_ELAPSED`             | `OFF`   | Record per-function duration in trace output. See [Per-function timing](#stopwatch-per-function-timing-log_elapsed).                                                                                                                                   |
 | `LOG_EXCEPTIONS`          | `OFF`   | Trace every throw, rethrow, catch and terminate in the call tree and mark the lines of the frames an exception or a `longjmp` left. Needs the shared libstdc++. See [Exceptions in the trace tree](#boom-exceptions-in-the-trace-tree-log_exceptions). |
-| `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks                                                                                                                                                                                                              |
+| `DISABLE_INSTRUMENTATION` | `OFF`   | Compile without any instrumentation hooks; `callstacklogger::instrumented` then contributes nothing to a program (see [Disabling tracing in a build](#disabling-tracing-in-a-build))                                                                   |
+| `CSLG_EXPORT_ALL_SYMBOLS` | `OFF`   | Link tracing programs with `-rdynamic` (every symbol exported) instead of exporting only the hooks and, with `LOG_EXCEPTIONS`, the interposers                                                                                                         |
+| `BUILD_BENCH`             | `OFF`   | Build the cost benchmark in `bench/` and its `bench` target (top-level builds only)                                                                                                                                                                      |
 | `BUILD_TESTS`             | `OFF`   | Build unit and integration tests (fetches Google Test). Honored only when Call Stack Logger is the top-level project, never when consumed via `add_subdirectory` / FetchContent.                                                                       |
 | `COVERAGE`                | `OFF`   | Enable code coverage via GCC `--coverage` flag                                                                                                                                                                                                         |
 | `SANITIZE`                | (empty) | Enable a sanitizer for all cslg-owned targets: `address`, `undefined`, `address+undefined`, or `thread`. See [Sanitizers](#bug-sanitizers).                                                                                                            |

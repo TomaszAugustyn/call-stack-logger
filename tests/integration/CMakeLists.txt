@@ -414,19 +414,19 @@ target_link_libraries(cslg_traced_test_program_nopie PRIVATE callstacklogger_ins
 cslg_apply_sanitizers(cslg_traced_test_program_nopie)
 
 # The traced program stripped of its symbol table and debug information after
-# the build: once with a separate debug file linked back in (the way to ship
-# a stripped diagnostic build), once without anything (see
+# the build: once with a separate debug file linked back in the way the README
+# recommends — cslg_keep_debug_info() writes the .debug file and the
+# .gnu_debuglink after the link, and a plain `strip --strip-all` follows, as a
+# user's install step would — and once without anything (see
 # StrippedExecutableTest).
 add_executable(cslg_stripped_debuglink_traced_program traced_program.cpp)
 target_compile_features(cslg_stripped_debuglink_traced_program PRIVATE cxx_std_17)
 target_link_libraries(cslg_stripped_debuglink_traced_program PRIVATE callstacklogger_instrumented)
 cslg_apply_sanitizers(cslg_stripped_debuglink_traced_program)
+cslg_keep_debug_info(cslg_stripped_debuglink_traced_program)
 add_custom_command(TARGET cslg_stripped_debuglink_traced_program POST_BUILD
-    COMMAND objcopy --only-keep-debug $<TARGET_FILE:cslg_stripped_debuglink_traced_program> $<TARGET_FILE:cslg_stripped_debuglink_traced_program>.debug
     COMMAND strip --strip-all $<TARGET_FILE:cslg_stripped_debuglink_traced_program>
-    COMMAND objcopy --add-gnu-debuglink=$<TARGET_FILE:cslg_stripped_debuglink_traced_program>.debug $<TARGET_FILE:cslg_stripped_debuglink_traced_program>
-    WORKING_DIRECTORY $<TARGET_FILE_DIR:cslg_stripped_debuglink_traced_program>
-    COMMENT "Stripping cslg_stripped_debuglink_traced_program, keeping a .gnu_debuglink file")
+    COMMENT "Stripping cslg_stripped_debuglink_traced_program after cslg_keep_debug_info()")
 
 add_executable(cslg_stripped_traced_program traced_program.cpp)
 target_compile_features(cslg_stripped_traced_program PRIVATE cxx_std_17)

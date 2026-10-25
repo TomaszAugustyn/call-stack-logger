@@ -53,7 +53,12 @@
    are CRC-checked by libbacktrace over their real size and skipped when
    truncated; a truncated build-ID debug file under /usr/lib/debug is not
    covered. */
-static int cslg_elf_layout_fits_file(int descriptor, backtrace_error_callback error_callback, void* data) {
+/* Also reports, in *has_symtab_section, whether the file carries a .symtab
+   section of its own (as opposed to only .dynsym): the resolver warns once
+   when the executable has neither that nor debug information, because no
+   function in it can be named then. */
+static int cslg_elf_layout_fits_file(int descriptor, backtrace_error_callback error_callback, void* data,
+                                     int* has_symtab_section) {
     struct stat st;
     b_elf_ehdr ehdr;
     struct backtrace_view view;
@@ -101,6 +106,9 @@ static int cslg_elf_layout_fits_file(int descriptor, backtrace_error_callback er
     }
     for (i = 0; i < shnum; ++i) {
         const b_elf_shdr* shdr = (const b_elf_shdr*)view.data + i;
+        if (shdr->sh_type == SHT_SYMTAB) {
+            *has_symtab_section = 1;
+        }
         if (shdr->sh_type == SHT_NOBITS || shdr->sh_type == SHT_NULL) {
             continue;
         }
@@ -138,7 +146,7 @@ struct backtrace_state* cslg_backtrace_create_state(backtrace_error_callback err
 
 int cslg_backtrace_add_file(struct backtrace_state* state, const char* path, uintptr_t load_bias,
                             backtrace_error_callback error_callback, void* data, int* has_symtab,
-                            int* has_dwarf) {
+                            int* has_dwarf, int* has_symtab_section) {
     int does_not_exist = 0;
     int descriptor;
     struct libbacktrace_base_address base_address;
@@ -149,11 +157,12 @@ int cslg_backtrace_add_file(struct backtrace_state* state, const char* path, uin
 
     *has_symtab = 0;
     *has_dwarf = 0;
+    *has_symtab_section = 0;
     descriptor = backtrace_open(path, error_callback, data, &does_not_exist);
     if (descriptor < 0) {
         return 0;
     }
-    if (!cslg_elf_layout_fits_file(descriptor, error_callback, data)) {
+    if (!cslg_elf_layout_fits_file(descriptor, error_callback, data, has_symtab_section)) {
         backtrace_close(descriptor, error_callback, data);
         return 0;
     }
