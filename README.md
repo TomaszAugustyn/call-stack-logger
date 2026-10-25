@@ -839,7 +839,7 @@ To generate a code coverage report (requires `lcov` 2.0+):
 cmake -B build -DBUILD_TESTS=ON -DCOVERAGE=ON
 cmake --build build
 cd build && ctest --output-on-failure && cd ..
-lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,negative
+lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,negative,inconsistent,inconsistent
 lcov --remove coverage.info '/usr/*' '*/tests/*' '*/_deps/*' --output-file coverage.info
 genhtml coverage.info --output-directory coverage-report
 # Open coverage-report/index.html in a browser
@@ -848,7 +848,12 @@ genhtml coverage.info --output-directory coverage-report
 `-DCOVERAGE=ON` compiles with `-fprofile-update=atomic` so gcov's counters stay
 thread-safe under the multi-threaded tests (otherwise racing counter updates can
 go negative and make `geninfo` fail). The `negative` entry in `--ignore-errors`
-is an extra tolerance for any residual counter artifact.
+is an extra tolerance for any residual counter artifact. The `inconsistent` entry
+is for gcov 15 and newer with Google Test: a `TEST()` macro puts a test's class and
+its functions on one source line, gcov reports different end lines for them, and
+lcov would otherwise stop with "mismatched end line"; the records concern the test
+files, which the `--remove` step drops from the report. Listed twice, the warnings
+stay out of the output as well.
 
 ### On-demand call-stack capture ###
 

@@ -37,8 +37,15 @@ jobs:
         # mismatch bypasses strict checks on gtest code that trigger false positives;
         # negative is a belt-and-suspenders tolerance for any residual gcov counter
         # artifact from multi-threaded coverage (the real fix is -fprofile-update=atomic
-        # in CMakeLists.txt, which keeps the counters from going negative in the first place).
-        lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,negative
+        # in CMakeLists.txt, which keeps the counters from going negative in the first place);
+        # inconsistent covers gcov 15's function records for the TEST() macros of
+        # Google Test: the macro puts a test's class and its functions on one source
+        # line, gcov reports different end lines for them, and lcov 2.0 stops with
+        # "mismatched end line" (seen on the ubuntu-26.04 runner, gcc 15.2). The
+        # records concern the test files, which the next step removes from the
+        # report; the class is listed twice so that the ~100 warnings stay out of
+        # the log (once would keep them visible).
+        lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,negative,inconsistent,inconsistent
         # Remove system headers, test code, and fetched dependencies.
         lcov --remove coverage.info '/usr/*' '*/tests/*' '*/_deps/*' --output-file coverage.info
         genhtml coverage.info --output-directory coverage-report

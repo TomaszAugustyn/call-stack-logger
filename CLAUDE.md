@@ -1746,7 +1746,7 @@ Requires `lcov` 2.0+ (Ubuntu 24.04, Fedora 40+). Older lcov versions use differe
 cmake -B build -DBUILD_TESTS=ON -DCOVERAGE=ON
 cmake --build build
 cd build && ctest --output-on-failure && cd ..
-lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,negative
+lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,negative,inconsistent,inconsistent
 lcov --remove coverage.info '/usr/*' '*/tests/*' '*/_deps/*' --output-file coverage.info
 genhtml coverage.info --output-directory coverage-report
 ```
@@ -1761,6 +1761,15 @@ Notes:
   Atomic updates remove the race; the `negative` entry in `--ignore-errors` is a
   belt-and-suspenders tolerance for any residual artifact.
 - `--ignore-errors mismatch` bypasses lcov 2.0 strict checks that fail on gtest code.
+- `inconsistent` (listed twice: once turns the error into a warning, twice also
+  silences the warning) covers gcov 15's function records for Google Test's
+  `TEST()` macros: a test's class and its functions share the macro's source line,
+  gcov reports different end lines for them, and lcov 2.0 stops with "mismatched
+  end line for ..._Test8TestBodyEv". Seen when GitHub's `ubuntu-latest` moved to
+  Ubuntu 26.04 (gcc 15.2, lcov 2.0) in October 2026; master's last run on
+  Ubuntu 24.04 (gcc 13.3) had no such records. The records are all in the test
+  files, which `--remove '*/tests/*'` drops from the report anyway; reproduced in
+  an `ubuntu:26.04` container on untouched unit test files.
 - `--no-external` is NOT used: in lcov 2.0 it uses `--directory` as the base for
   "external" checks, which would wrongly exclude our `src/` files (outside `build/`).
   Instead, explicitly filter system headers via `--remove '/usr/*'`.
