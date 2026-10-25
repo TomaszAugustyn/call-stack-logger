@@ -37,6 +37,16 @@ of `master`.
   the frame reconciliation of inlined frames is exact with Clang's default
   debug format.
 
+### On-demand API
+
+- `get_call_stack()` names each frame after the function that owns it, the
+  outermost function of the inline chain at the frame's return address (minus
+  one byte, into the call). Earlier versions took the innermost function
+  there, which at `-O2` is often a helper inlined right after the call, so a
+  frame could read as `__normal_iterator::__normal_iterator(...)` or
+  `std::basic_ios::basic_ios()` instead of the function that made the call.
+  The hooks' naming is unchanged.
+
 ### Linking
 
 - Programs export only the symbols that must be visible in the dynamic symbol

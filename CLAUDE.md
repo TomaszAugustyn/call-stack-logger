@@ -1058,6 +1058,11 @@ replacement) with:
   (`struct backtrace_state;`), so a consumer's compiler never needs
   libbacktrace's headers. `backtrace.h` is included by `callStack.cpp` and
   `src/backtraceExtension.h` only.
+- `NameOf { innermost_function, outermost_function }`: the hooks name a callee by
+  the innermost DWARF function at its entry address (`name_cache()`),
+  `get_call_stack()` names a physical frame by the outermost function at its
+  return address minus one (`frame_name_cache()`, `resolve_physical_frame()`);
+  the two caches never share an answer
 - Free functions: `get_call_stack()`, `resolve()`
 
 **Public-API re-entrancy guard (load-bearing):** both free functions hold the
@@ -1164,7 +1169,18 @@ The core implementation. Key functions:
   the main executable (PATH-found argv[0] is no path), else the mapping's absolute path from
   `mapped_object_path()` (`/proc/self/maps`, immune to a relative `dlopen` path + later
   `chdir`), else `dli_fname`
-- `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames)
+- `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames);
+  each frame goes through `addressResolver::resolve_physical_frame(return_address,
+  caller)`, which names the frame after the OUTERMOST function at `return_address - 1`
+  (`NameOf::outermost_function`, cached in `frame_name_cache()`). The hooks keep the
+  innermost rule and `name_cache()`: a callee's ENTRY address names the function
+  itself there (BFD's choice, byte for byte), while a RETURN address at -O2 often
+  sits in a helper inlined right after the call — the range-for's iterator
+  constructor after `get_call_stack()`, an ostringstream constructor — and the
+  innermost function would name the frame after the helper (it did, under BFD
+  too; the API drivers used to keep their printing in separate noinline
+  functions to dodge it). The one-byte step back also keeps a call that ends a
+  function from naming the frame after the function that follows it
 - `resolve_site()` / `addressResolver::resolve_location()` - Location-only lookup of an
   instruction address (a throw or catch site) through the location cache, via
   `resolve_event_site_location()`: `resolve_filename_and_line()` plus a check that the
@@ -1425,7 +1441,12 @@ Test pure/deterministic functions from the include headers:
   threads via `std::thread`, exercises per-thread trace files),
   `cslg_callstack_api_program` (compiled WITHOUT `INSTRUMENT_FLAGS`; exercises the
   public on-demand `instrumentation::get_call_stack()` API by walking a known
-  nested chain and printing each resolved frame),
+  nested chain and printing each resolved frame; its leaf prints inside the
+  range-for right after the `get_call_stack()` call and the worker leaf builds
+  its ostringstream in place ON PURPOSE — at -O2 the resume point then sits in an
+  inlined std helper, and the frames must still read `print_stack_from_leaf` /
+  `worker_stack_leaf`, which pins the outermost-function naming of physical
+  frames),
   `cslg_callstack_api_program_instrumented` (same source compiled WITH
   `INSTRUMENT_FLAGS` — proves the on-demand API and the per-call hooks coexist
   in one process; `CallStackApiTest.WorksFromInstrumentedProgram` checks both

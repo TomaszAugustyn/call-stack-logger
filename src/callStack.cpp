@@ -335,7 +335,7 @@ addressResolver::Lookup addressResolver::look_up(const ObjectFile& object, void*
     return lookup;
 }
 
-std::string addressResolver::function_name_of(const Lookup& lookup) {
+std::string addressResolver::function_name_of(const Lookup& lookup, NameOf name_of) {
     // BFD's bfd_find_nearest_line() chose the name like this: a DWARF linkage
     // name (DW_AT_linkage_name, a mangled "_Z..." name) was final; otherwise
     // it looked the address up in the symbol table and preferred that name,
@@ -346,7 +346,16 @@ std::string addressResolver::function_name_of(const Lookup& lookup) {
     // mangling (C) BFD took the DWARF name as it was; the symbol table then
     // either repeats it or adds a clone suffix ("foo.cold", "foo.constprop.0"),
     // which is the one case where the symbol table loses here.
-    const std::string& dwarf = lookup.entries.empty() ? std::string() : lookup.entries.front().function;
+    //
+    // Which DWARF function enters the rule depends on what the address is:
+    // the innermost of the inline chain for a callee's entry address (the
+    // hooks; BFD's choice), the outermost for a return address inside a
+    // physical frame (get_call_stack(); see NameOf). The symbol table's answer
+    // is the same containing symbol either way.
+    const bool outermost = name_of == NameOf::outermost_function;
+    const std::string& dwarf = lookup.entries.empty()
+            ? std::string()
+            : (outermost ? lookup.entries.back().function : lookup.entries.front().function);
     if (!dwarf.empty() && dwarf.compare(0, 2, "_Z") == 0) {
         return dwarf;
     }
@@ -360,7 +369,8 @@ std::string addressResolver::function_name_of(const Lookup& lookup) {
     return lookup.symbol;
 }
 
-std::optional<std::string> addressResolver::resolve_function_name(void* address, const AddressInfo& address_info) {
+std::optional<std::string> addressResolver::resolve_function_name(void* address, const AddressInfo& address_info,
+                                                                  NameOf name_of) {
     // An invalid address_info means dladdr() failed for this address (its
     // Dl_info contents are undefined then).
     if (!address_info.valid) {
@@ -389,7 +399,7 @@ std::optional<std::string> addressResolver::resolve_function_name(void* address,
         return "<could not open object file>";
     }
 
-    const std::string name = function_name_of(look_up(*object, address));
+    const std::string name = function_name_of(look_up(*object, address), name_of);
     if (name.empty()) {
         // Neither the debug information nor the symbol table of the file
         // names this address. With a dynamic symbol we can still name the
@@ -442,7 +452,7 @@ addressResolver::CachedLocation addressResolver::resolve_filename_and_line(void*
     // The innermost function containing the address — an inlined copy's own
     // name when the site lies inside one (DWARF inline info) — chosen as BFD
     // chose it (see function_name_of).
-    const std::string function = function_name_of(lookup);
+    const std::string function = function_name_of(lookup, NameOf::innermost_function);
     if (!function.empty()) {
         location.function_base = std::string(function_base_name(demangle_cxa(function.c_str())));
     }
@@ -476,9 +486,14 @@ addressResolver::CachedLocation addressResolver::resolve_filename_and_line(void*
     return location;
 }
 
-bool addressResolver::resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out) {
+bool addressResolver::resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out,
+                                        NameOf name_of) {
     bool have_name = false;
     bool have_location = false;
+    // The hooks' names and the physical frames' names live in separate caches
+    // (see frame_name_cache); the hooks take the first branch on every call.
+    std::unordered_map<void*, CachedName>& names
+            = name_of == NameOf::innermost_function ? name_cache() : frame_name_cache();
     {
         // Lock covers ALL libbacktrace operations: the state's creation, every
         // registration and every lookup (libbacktrace parses a compilation
@@ -497,8 +512,8 @@ bool addressResolver::resolve_no_unwind(void* callee_address, void* caller_addre
         // ResolvedFrameView in types.h). A cached nullopt name means "filtered /
         // not loggable" and is honored as such.
         std::lock_guard<std::mutex> lock(s_resolver_mutex);
-        auto name_it = name_cache().find(callee_address);
-        if (name_it != name_cache().end()) {
+        auto name_it = names.find(callee_address);
+        if (name_it != names.end()) {
             if (!name_it->second.name) {
                 return false;
             }
@@ -546,11 +561,10 @@ bool addressResolver::resolve_no_unwind(void* callee_address, void* caller_addre
         // released; find-or-emplace keeps exactly one entry per address either way,
         // and on a miss the freshly resolved value moves straight into the map.
         if (!have_name) {
-            auto name_it = name_cache().find(callee_address);
-            if (name_it == name_cache().end()) {
-                name_it = name_cache()
-                                  .emplace(callee_address,
-                                           cache_name(resolve_function_name(callee_address, callee_info)))
+            auto name_it = names.find(callee_address);
+            if (name_it == names.end()) {
+                name_it = names.emplace(callee_address,
+                                        cache_name(resolve_function_name(callee_address, callee_info, name_of)))
                                   .first;
             }
             if (!name_it->second.name) {
@@ -718,7 +732,7 @@ std::vector<std::string> addressResolver::read_inline_chain(void* address, const
     if (lookup.entries.empty() || lookup.entries.front().file.empty() || lookup.entries.front().line == 0) {
         return chain;
     }
-    const std::string innermost = function_name_of(lookup);
+    const std::string innermost = function_name_of(lookup, NameOf::innermost_function);
     if (innermost.empty()) {
         return chain;
     }
@@ -756,6 +770,22 @@ std::optional<ResolvedFrame> addressResolver::resolve_no_unwind(void* callee_add
     ResolvedFrameView view;
     if (!resolve_no_unwind(callee_address, caller_address, view)) {
         return std::nullopt;
+    }
+    return std::make_optional(own_frame(view));
+}
+
+std::optional<ResolvedFrame> addressResolver::resolve_physical_frame(void* return_address, void* caller_address) {
+    ResolvedFrameView view;
+    // One byte back into the call the frame made: a call that ends its
+    // function returns to the first byte of the next one, which would
+    // otherwise name the frame. The outermost function at that byte is the
+    // frame's own even when the resume point sits in inlined code.
+    void* inside = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(return_address) - 1);
+    if (!resolve_no_unwind(inside, caller_address, view, NameOf::outermost_function)) {
+        return std::nullopt;
+    }
+    if (view.callee_address) {
+        view.callee_address = return_address; // LOG_ADDR: report what backtrace() reported
     }
     return std::make_optional(own_frame(view));
 }
@@ -801,24 +831,25 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
     // backtrace() fills stack[i] with the return address from frame i.
     // stack[0] is inside get_call_stack itself — omit it.
     // For each ancestor i (>= 1):
-    //   - stack[i] is an address INSIDE frame i's function — use it as the callee
-    //     for function-name resolution.
+    //   - stack[i] is the return address INSIDE frame i's function: the
+    //     instruction after the call frame i made. resolve_physical_frame()
+    //     steps one byte back into that call and names the frame after the
+    //     OUTERMOST function there — the frame's own, even when the resume
+    //     point sits in a helper inlined right after the call (at -O2 the
+    //     innermost function at that address is often such a helper).
     //   - The call site INTO frame i's function lives in frame i+1's body, just
     //     before the resume point at stack[i+1]. Subtract 1 byte to point inside
     //     the call instruction (the same step-back addressResolver::resolve applies
     //     to the return address the enter hook receives).
     //   - For the outermost frame there is no parent, so caller falls back to
     //     stack[i] itself; resolve will report the function's own location.
-    //
-    // Use addressResolver::resolve_no_unwind here: the step-back is already applied
-    // above, so resolve() would move the address one byte too far.
     const size_t n = static_cast<size_t>(num);
     for (size_t i = 1; i < n; ++i) {
         void* caller = stack[i];
         if (i + 1 < n) {
             caller = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(stack[i + 1]) - 1);
         }
-        res.push_back(addressResolver::resolve_no_unwind(stack[i], caller));
+        res.push_back(addressResolver::resolve_physical_frame(stack[i], caller));
     }
     return res;
 }

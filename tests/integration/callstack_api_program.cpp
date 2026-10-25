@@ -40,16 +40,18 @@
 // noinline does not stop a call in tail position from becoming a jump, which
 // would recycle the caller's frame just the same. The instrumented build is
 // immune to that by construction (the exit hook call sits after every call).
-// Printing lives in its own noinline function, deliberately: frame names for a
-// captured stack come from resolving RETURN addresses, and at -O2 the resume
-// point after the get_call_stack() call would otherwise sit in code attributed
-// (via DWARF inline info) to an inlined std helper — e.g. the range-for's
-// __normal_iterator constructor — so the innermost frame would resolve to that
-// name instead of print_stack_from_leaf(). With a plain out-of-line call as the
-// next statement, the resume point attributes to this function itself.
-__attribute__((noinline)) void print_frames(
-        const std::vector<std::optional<instrumentation::ResolvedFrame>>& stack) {
-    for (const auto& maybe : stack) {
+// The leaf prints the frames itself, with the range-for right after the
+// get_call_stack() call ON PURPOSE. A captured frame is named from its RETURN
+// address, and at -O2 the instruction after the call belongs to an inlined std
+// helper (the range-for's __normal_iterator constructor); DWARF names that
+// helper as the innermost function at the address. get_call_stack() names a
+// frame after the OUTERMOST function at its return address, so the frame still
+// reads "print_stack_from_leaf" — which the test asserts, making this shape
+// the regression pin. (Before that rule the resolver took the innermost
+// function, and printing had to live in a separate noinline function so that
+// the resume point stayed in the leaf's own code.)
+__attribute__((noinline)) void print_stack_from_leaf() {
+    for (const auto& maybe : instrumentation::get_call_stack()) {
         if (maybe.has_value()) {
             std::cout << "FRAME: " << maybe->callee_function_name
                       << " | CALLER: " << maybe->caller_filename << ":";
@@ -65,11 +67,6 @@ __attribute__((noinline)) void print_frames(
     }
 }
 
-__attribute__((noinline)) void print_stack_from_leaf() {
-    auto stack = instrumentation::get_call_stack();
-    print_frames(stack);
-}
-
 __attribute__((noinline)) void callstack_mid() {
     print_stack_from_leaf();
 }
@@ -83,19 +80,16 @@ __attribute__((noinline)) void callstack_top() {
 // just the chain order, and keeping the format distinct from "FRAME:" lines
 // leaves the main-thread caller-location assertions untouched.
 //
-// Formatting lives in its own noinline function for the same reason printing
-// does for the main chain (see print_frames above): the leaf's captured frame
-// name resolves from the RETURN address after the get_call_stack() call, and
-// at -O2 an inlined std constructor as the next statement (the ostringstream
-// this used to build in place) makes DWARF attribute that resume point to the
-// std helper — worker_stack_leaf then resolves as std::basic_ios::basic_ios()
-// instead of itself. With a plain out-of-line call as the next statement, the
-// resume point attributes to this function.
-__attribute__((noinline)) std::string format_worker_frames(
-        const char* prefix,
-        const std::vector<std::optional<instrumentation::ResolvedFrame>>& stack) {
+// The worker leaf builds its ostringstream in place, right after the
+// get_call_stack() call, ON PURPOSE: at -O2 the inlined ostringstream
+// constructor is the innermost DWARF function at the leaf's resume point
+// (std::basic_ios::basic_ios()), and the frame used to be named after it. With
+// frames named after the outermost function at the return address the frame
+// reads "worker_stack_leaf", which the test asserts — the second regression pin
+// of that rule, on a worker thread.
+__attribute__((noinline)) std::string worker_stack_leaf(const char* prefix) {
     std::ostringstream oss;
-    for (const auto& maybe : stack) {
+    for (const auto& maybe : instrumentation::get_call_stack()) {
         if (maybe.has_value()) {
             oss << prefix << "FRAME: " << maybe->callee_function_name << "\n";
         } else {
@@ -105,22 +99,18 @@ __attribute__((noinline)) std::string format_worker_frames(
     return oss.str();
 }
 
-__attribute__((noinline)) std::string worker_stack_leaf(const char* prefix) {
-    auto stack = instrumentation::get_call_stack();
-    return format_worker_frames(prefix, stack);
-}
-
 __attribute__((noinline)) std::string worker_stack_top(const char* prefix) {
     std::string result = worker_stack_leaf(prefix);
     return result;
 }
 
-// The worker section lives in its own noinline function so that the statement
-// following callstack_top() in main() is a plain out-of-line call. Inlining
-// the std::string / std::thread construction directly into main() made main's
-// captured frame resolve as the inlined basic_string helper at -O2 (same
-// resume-point attribution issue as described on format_worker_frames), and
-// "FRAME: main" vanished from the output.
+// The worker section lives in its own noinline function. It used to be
+// required: with the std::string / std::thread construction inlined directly
+// into main() after the callstack_top() call, main's captured frame resolved
+// as the inlined basic_string helper at -O2 (the resume-point attribution
+// described on print_stack_from_leaf) and "FRAME: main" vanished from the
+// output. The outermost-function rule names main either way; the separation
+// is kept for readability.
 __attribute__((noinline)) void run_worker_captures() {
     // Concurrent captures from two worker threads — both contend on
     // s_resolver_mutex inside the resolver while neither is the thread that ran

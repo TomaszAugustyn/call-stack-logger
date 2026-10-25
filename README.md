@@ -883,6 +883,12 @@ non-instrumented code, compile the relevant translation units with
 affected by the tail-call part — the exit hook after every call keeps calls out
 of tail position.)
 
+**Naming of captured frames:** each frame is named after the function that owns it, the
+outermost function of the inline chain at the frame's return address. At `-O2` the
+instruction a call returns to often belongs to a helper inlined right after the call,
+such as a vector's iterator constructor after `get_call_stack()` itself; naming by the
+innermost function there, as earlier versions did, called the frame after that helper.
+
 ## :bug: Sanitizers ##
 
 For debugging, the build supports AddressSanitizer (ASan), UndefinedBehaviorSanitizer

@@ -88,10 +88,9 @@ public:
 
     /// Resolves callee + caller using both addresses verbatim — no return-address
     /// adjustment. Use this when `caller_address` already points inside the call
-    /// instruction (e.g. from `get_call_stack()`, which applies the same one-byte
-    /// step-back to backtrace()'s per-frame return addresses itself). Copies the
-    /// cached strings into an owning ResolvedFrame and stamps it with the current
-    /// time.
+    /// instruction. Copies the cached strings into an owning ResolvedFrame and
+    /// stamps it with the current time. Names by the innermost function (the
+    /// hooks' rule); get_call_stack() uses resolve_physical_frame() instead.
     NO_INSTRUMENT
     static std::optional<ResolvedFrame> resolve_no_unwind(
             void* callee_address, void* caller_address);
@@ -101,8 +100,31 @@ public:
     /// pointers into the caches. This is the only function that touches the
     /// caches together with resolve_location() below, so s_resolver_mutex is
     /// held exactly there and nowhere up the stack.
+    /// Which function names a frame when the address lies inside inlined code.
+    /// The hooks name a callee from its ENTRY address, where the innermost
+    /// function of DWARF's inline chain is the function itself — BFD's choice,
+    /// kept byte for byte. get_call_stack() names a PHYSICAL frame from a return
+    /// address inside it, where the innermost function is often a helper
+    /// inlined right after the call (a vector's iterator or move constructor,
+    /// an ostringstream's constructor); the frame's own function is the
+    /// OUTERMOST one of the chain, so that is what names it. `name_of` selects
+    /// the rule and with it the name cache (name_cache() for the hooks,
+    /// frame_name_cache() for physical frames); the location half is the same.
+    enum class NameOf { innermost_function, outermost_function };
+
     NO_INSTRUMENT
-    static bool resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out);
+    static bool resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out,
+                                  NameOf name_of = NameOf::innermost_function);
+
+    /// One frame of get_call_stack(): `return_address` is what backtrace()
+    /// reported for the frame — the instruction after the call the frame made —
+    /// and `caller_address` the call site that created the frame, already
+    /// stepped back into its call instruction. The frame is named after the
+    /// OUTERMOST function at `return_address - 1` (NameOf::outermost_function;
+    /// the step back keeps a call that ends a function from being attributed to
+    /// the function that follows it). Copies the result into an owning frame.
+    NO_INSTRUMENT
+    static std::optional<ResolvedFrame> resolve_physical_frame(void* return_address, void* caller_address);
 
     /// The location half of resolve_no_unwind() on its own: fills
     /// `out.caller_filename` / `out.caller_line_number` for `address` (an
@@ -168,7 +190,8 @@ private:
     NO_INSTRUMENT
     static Lookup look_up(const ObjectFile& object, void* address);
 
-    /// The name of the function containing the address, chosen as BFD's
+    /// The name of the function containing the address — the innermost or the
+    /// outermost of DWARF's inline chain, per `name_of` — chosen as BFD's
     /// bfd_find_nearest_line() chose it, so that the trace reads as before:
     /// the DWARF linkage name when there is one, otherwise the symbol table's
     /// name (which carries the mangled parameter list for a static function,
@@ -176,7 +199,7 @@ private:
     /// the DWARF name or adds a clone suffix to it. Empty when nothing names
     /// the address.
     NO_INSTRUMENT
-    static std::string function_name_of(const Lookup& lookup);
+    static std::string function_name_of(const Lookup& lookup, NameOf name_of);
 
     /// Names the callee from `address_info`, the dladdr() result for
     /// callee_address (`valid` false when dladdr() failed). Must be called
@@ -184,7 +207,8 @@ private:
     /// resolve_no_unwind() OUTSIDE the mutex — see the lock-order note there.
     NO_INSTRUMENT
     static std::optional<std::string> resolve_function_name(void* callee_address,
-                                                            const AddressInfo& address_info);
+                                                            const AddressInfo& address_info,
+                                                            NameOf name_of);
 
     /// One memoized callee name: the demangled name (nullopt = filtered / not
     /// loggable) and its base name (function_base_name in frameReconcile.h,
@@ -323,6 +347,19 @@ private:
     /// Wraps a freshly resolved callee name for the name cache.
     NO_INSTRUMENT
     static CachedName cache_name(std::optional<std::string> name);
+
+    /// The names of PHYSICAL frames for get_call_stack(), keyed by the frame's
+    /// return address minus one and named by the outermost function there
+    /// (NameOf::outermost_function). Kept apart from name_cache(), whose
+    /// entries name the innermost function at a callee's entry address: the
+    /// two rules answer differently inside inlined code, and the hooks' cache
+    /// stays exactly what it was. Bounded by the call sites a captured stack
+    /// can contain; leaked and protected by s_resolver_mutex like the others.
+    NO_INSTRUMENT
+    static std::unordered_map<void*, CachedName>& frame_name_cache() {
+        static auto* instance = new std::unordered_map<void*, CachedName>();
+        return *instance;
+    }
 
     NO_INSTRUMENT
     static std::unordered_map<void*, CachedLocation>& location_cache() {
