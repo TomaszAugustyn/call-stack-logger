@@ -76,6 +76,20 @@ services:
         cd build-disabled && ctest --output-on-failure
       "
 
+  # Link every tracing program with -rdynamic (CSLG_EXPORT_ALL_SYMBOLS=ON: the
+  # link of the releases before v1.0.0, and the fallback for linkers without
+  # --export-dynamic-symbol), every LOG_* option on, run all tests.
+  test-export-all:
+    build: .
+    volumes:
+      - .:/workspace
+    command: >
+      bash -c "
+        cmake -B build-export-all -DBUILD_TESTS=ON -DCSLG_EXPORT_ALL_SYMBOLS=ON -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
+        cmake --build build-export-all -j$$(nproc) &&
+        cd build-export-all && ctest --output-on-failure
+      "
+
   # Build with tests + coverage, run tests, generate HTML coverage report
   coverage:
     build: .

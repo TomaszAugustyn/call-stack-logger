@@ -107,6 +107,10 @@ of `master`.
 - `bench/`: a benchmark of the warm per-call cost, the cold resolution cost
   and the resident memory, buildable against any checkout
   (`bench/run_bench.sh`), with a `bench` target behind `BUILD_BENCH=ON`.
+- A CI job (`export-all-symbols`) and a compose service (`test-export-all`)
+  build with `CSLG_EXPORT_ALL_SYMBOLS=ON`: the `-rdynamic` link of the
+  releases before v1.0.0, and the fallback for linkers without
+  `--export-dynamic-symbol`.
 - CI and the Docker image install no `binutils-dev`; the LeakSanitizer
   suppression file for libbfd is gone (the sanitizer jobs run without
   suppressions); the Docker image installs `ca-certificates` for the

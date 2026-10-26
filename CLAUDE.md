@@ -1959,7 +1959,7 @@ sanitized too.
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with seven jobs:
+GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with eight jobs:
 - **gcc**: builds with `BUILD_TESTS=ON` and `COVERAGE=ON`, runs tests via `ctest`, generates and uploads the lcov HTML coverage report.
 - **gcc-optimized**: builds with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` (the build type README
   recommends to integrators), runs tests — pins caller resolution and the documented
@@ -1981,6 +1981,13 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with sev
   (the integration tests are skipped at configure time by design). Nothing else
   builds that configuration, whose `#ifdef` seams between the options and the kill
   switch would otherwise rot unnoticed. Locally the `test-disabled` compose service.
+- **export-all-symbols**: `-DCSLG_EXPORT_ALL_SYMBOLS=ON` with every `LOG_*` option on,
+  the full suite. Links every tracing program with `-rdynamic`, as every release
+  before v1.0.0 did and as the root CMakeLists falls back to with a linker without
+  `--export-dynamic-symbol` (GNU ld before binutils 2.35). No other job builds it, and
+  `StrippedExecutableTest.StrippedWithoutSymbolsDegradesGracefully` has a branch
+  (`CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS`: names from the dynamic symbol table, `:???`
+  lines) that only this job runs. Locally the `test-export-all` compose service.
 - **sanitize-asan**: builds with `SANITIZE=address+undefined`, runs tests under ASan + UBSan + LSan (no suppressions).
 - **sanitize-tsan**: builds with `SANITIZE=thread`, runs tests under TSan.
 

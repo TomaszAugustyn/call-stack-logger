@@ -3740,6 +3740,12 @@ TEST(StrippedExecutableTest, StrippedWithoutSymbolsDegradesGracefully) {
     const std::vector<std::string> entries = entry_lines_of(trace);
     for (const std::string& entry : entries) {
         EXPECT_TRUE(std::regex_match(entry, well_formed)) << entry;
+        // main's call site is in libc, and libc's own debug information (the
+        // libc6-dbg package on Ubuntu, which CI installs) gives it a file and a
+        // line; every other call site lies inside the stripped executable.
+        if (entry.find(" main  (called from: ") != std::string::npos) {
+            continue;
+        }
         EXPECT_NE(entry.find(":\?\?\?)"), std::string::npos)
                 << "a line number without debug information: " << entry;
     }

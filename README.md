@@ -987,6 +987,9 @@ docker compose run test-clang-optimized
 # Build with the instrumentation compiled out and every LOG_* option on, run the unit tests
 docker compose run test-disabled
 
+# Link every program with -rdynamic (the fallback for old linkers) and every LOG_* option on, run all tests
+docker compose run test-export-all
+
 # Generate code coverage report (output in coverage-report/index.html)
 docker compose run coverage
 
@@ -1012,6 +1015,7 @@ GitHub Actions runs on every push and pull request to `master`:
 - **Clang (build, test):** Builds and runs unit and integration tests.
 - **Clang RelWithDebInfo (optimized build, test):** The same suite with Clang at `-O2 -g`. Clang at -O2 lays the instrumented code out differently from GCC at -O2 and from Clang at -O0 (tail-called exit hooks, its own inlining and landing pads, and no exit hook on the exception-unwind path), so the frame reconciliation and the exception paths meet that combination only here.
 - **Instrumentation disabled (build, unit tests):** Configures with `-DDISABLE_INSTRUMENTATION=ON` and every `LOG_*` option on, builds, and runs the unit tests (the integration tests are skipped at configure time by design). Keeps the `#ifdef` seams between the options and the kill switch building; nothing else exercises that configuration.
+- **GCC, every symbol exported (-rdynamic):** Builds with `-DCSLG_EXPORT_ALL_SYMBOLS=ON` and every `LOG_*` option on, and runs the full suite. This is the link every release before v1.0.0 used, and the one CMake falls back to with a linker that lacks `--export-dynamic-symbol` (GNU ld before binutils 2.35); `StrippedExecutableTest` has a branch only this configuration runs.
 - **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and every `LOG_*` option on (`LOG_EXCEPTIONS`, `LOG_ELAPSED`, `LOG_ADDR`), and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer, so the exception interposers, the in-place patching and the address column run sanitized in the shipped library too, not only in the per-flag test variants. Fails on any memory error, UB, or leak.
 - **Sanitize (GCC, TSan):** Builds with `SANITIZE=thread` and the same options, and runs the full test suite under ThreadSanitizer.
 

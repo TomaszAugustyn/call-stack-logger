@@ -156,6 +156,34 @@ jobs:
     - name: Run unit tests and the inertness check
       run: cd build && ctest --output-on-failure
 
+  export-all-symbols:
+    name: GCC, every symbol exported (-rdynamic)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y libc6-dbg
+
+    # CSLG_EXPORT_ALL_SYMBOLS=ON links every tracing program with -rdynamic
+    # instead of the narrow --export-dynamic-symbol list: the link every
+    # release before v1.0.0 used, and the one the root CMakeLists falls back
+    # to with a linker that lacks the option (GNU ld before binutils 2.35).
+    # No other job builds it, and StrippedExecutableTest has a branch only
+    # this configuration runs (a stripped executable keeps its names in the
+    # dynamic symbol table). Every LOG_* option is on, so the five interposers
+    # are exported this way too.
+    - name: Configure CMake
+      run: cmake -B build -DBUILD_TESTS=ON -DCSLG_EXPORT_ALL_SYMBOLS=ON -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run unit and integration tests
+      run: cd build && ctest --output-on-failure
+
   sanitize-asan:
     name: Sanitize (GCC, ASan + UBSan + LSan)
     runs-on: ubuntu-latest
