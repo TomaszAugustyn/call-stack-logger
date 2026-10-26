@@ -27,7 +27,11 @@ Nothing else has to be installed. Addresses are resolved with
 sources CMake downloads at configure time from a pinned commit and compiles into the
 library; [THIRD_PARTY.md](./THIRD_PARTY.md) lists it with its license. For a build
 without network access, unpack that commit somewhere and pass
-`-DFETCHCONTENT_SOURCE_DIR_LIBBACKTRACE=<directory>`.
+`-DFETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE=<directory>`. The commit is
+`0b9b49cf4a2c9229fc052d6716e1528b2f23e91a`; its archive is
+`https://github.com/ianlancetaylor/libbacktrace/archive/0b9b49cf4a2c9229fc052d6716e1528b2f23e91a.tar.gz`.
+Configure checks that the files it compiles are that commit's, however they
+arrived.
 
 Optional: the debug symbols of the C library (`libc6-dbg` on Debian and Ubuntu,
 `glibc-debuginfo` on Fedora) give the frames inside libc — the caller of `main`, for
@@ -158,7 +162,7 @@ library — they are never defined in your translation units.
 Same as building Call Stack Logger standalone:
 - Linux, CMake 3.14 or newer, GCC or Clang with C++17 support
 - network access at configure time for the pinned libbacktrace download, or
-  `FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE` pointing at a local copy (see Requirements)
+  `FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE` pointing at a local copy (see Requirements)
 - `libc6-dbg` recommended (file and line for the frames inside libc)
 
 ### Method 1 — FetchContent (recommended) ###
@@ -189,7 +193,7 @@ target_link_libraries(my_app PRIVATE callstacklogger::instrumented)
 ### Method 2 — Git submodule ###
 
 For projects that prefer to vendor the source (pinned version; for offline builds add
-`FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE`, see Requirements):
+`FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE`, see Requirements):
 
 ```bash
 git submodule add https://github.com/TomaszAugustyn/call-stack-logger.git third_party/call-stack-logger

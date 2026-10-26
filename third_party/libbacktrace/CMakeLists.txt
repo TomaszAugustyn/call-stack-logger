@@ -20,8 +20,9 @@
 # upstream's configure script (which the GPL-licensed autotools helpers in
 # the repository serve; only the C sources, the headers and LICENSE are
 # used). Nothing in the downloaded tree is modified. To build without
-# network access, point FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE at an unpacked
-# copy of that commit.
+# network access, point FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE at an
+# unpacked copy of that commit; the files are checked against the pinned
+# commit either way (see below).
 #
 # Only the files the resolver needs are compiled: the ELF/DWARF reader, the
 # mmap-based allocator and file views (not alloc.c / read.c), the sorting and
@@ -36,31 +37,66 @@ include(FetchContent)
 set(CSLG_LIBBACKTRACE_COMMIT 0b9b49cf4a2c9229fc052d6716e1528b2f23e91a)
 set(CSLG_LIBBACKTRACE_SHA256 fabcb6868b3d09734d4c537637dacac0bf8c9aa28e07486de5c6ce2eb749d413)
 
+# SHA-256 over the SHA-256 digests (lowercase hex, concatenated in this order)
+# of the files compiled from the pinned commit; see the check below.
+set(CSLG_LIBBACKTRACE_FILES
+    atomic.c backtrace.h dwarf.c elf.c fileline.c internal.h mmap.c mmapio.c posix.c sort.c state.c)
+set(CSLG_LIBBACKTRACE_FILES_SHA256 058e6612c093367ddffada33f25268d9589ea92a50e2d6457a99aec3b5d80f97)
+
+# The content is named cslg_libbacktrace, not libbacktrace: FetchContent names
+# are global, and the first declaration of a name wins. A parent project that
+# declares its own "libbacktrace" would otherwise silently replace these
+# sources (and a later dependency asking for libbacktrace would get them).
+#
 # Once a build directory holds the sources, reconfiguring never touches the
 # network again (same policy as the Google Test download in tests/).
-set(FETCHCONTENT_UPDATES_DISCONNECTED_LIBBACKTRACE ON)
+set(FETCHCONTENT_UPDATES_DISCONNECTED_CSLG_LIBBACKTRACE ON)
+# DOWNLOAD_EXTRACT_TIMESTAMP (CMake 3.24) gives extracted files the extraction
+# time as their timestamp (CMP0135 NEW behavior); older CMake does not know
+# the keyword and would take it for part of URL_HASH, failing the configure.
+set(CSLG_EXTRACT_TIMESTAMP_ARGS)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    set(CSLG_EXTRACT_TIMESTAMP_ARGS DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+endif()
 FetchContent_Declare(
-    libbacktrace
+    cslg_libbacktrace
     URL      https://github.com/ianlancetaylor/libbacktrace/archive/${CSLG_LIBBACKTRACE_COMMIT}.tar.gz
     URL_HASH SHA256=${CSLG_LIBBACKTRACE_SHA256}
-    # Extracted files get the extraction time as their timestamp (CMP0135 NEW
-    # behavior); see the Google Test declaration for why.
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    ${CSLG_EXTRACT_TIMESTAMP_ARGS}
 )
 # Upstream has no CMakeLists.txt, so this only downloads and unpacks the sources.
-FetchContent_MakeAvailable(libbacktrace)
+FetchContent_MakeAvailable(cslg_libbacktrace)
 
-set(CSLG_LIBBACKTRACE_SOURCE_DIR "${libbacktrace_SOURCE_DIR}" CACHE INTERNAL "libbacktrace sources in use")
+# URL_HASH checks the download, but FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE
+# skips the download altogether. The extension depends on libbacktrace's
+# internals (elf_add(), struct backtrace_state) and config/ on the commit's
+# configuration macros, so the files actually compiled must be the pinned
+# commit's, whichever way they arrived.
+set(CSLG_LIBBACKTRACE_DIGESTS "")
+foreach(file IN LISTS CSLG_LIBBACKTRACE_FILES)
+    file(SHA256 "${cslg_libbacktrace_SOURCE_DIR}/${file}" digest)
+    string(APPEND CSLG_LIBBACKTRACE_DIGESTS "${digest}")
+endforeach()
+string(SHA256 CSLG_LIBBACKTRACE_DIGEST "${CSLG_LIBBACKTRACE_DIGESTS}")
+if(NOT CSLG_LIBBACKTRACE_DIGEST STREQUAL CSLG_LIBBACKTRACE_FILES_SHA256)
+    message(FATAL_ERROR "The libbacktrace sources in ${cslg_libbacktrace_SOURCE_DIR} are not those of "
+            "commit ${CSLG_LIBBACKTRACE_COMMIT}, which call-stack-logger is pinned to. Unpack "
+            "https://github.com/ianlancetaylor/libbacktrace/archive/${CSLG_LIBBACKTRACE_COMMIT}.tar.gz "
+            "and point FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE at it, or unset that variable.")
+endif()
+
+set(CSLG_LIBBACKTRACE_SOURCE_DIR "${cslg_libbacktrace_SOURCE_DIR}"
+    CACHE INTERNAL "libbacktrace sources in use")
 
 add_library(cslg_libbacktrace STATIC
-    ${libbacktrace_SOURCE_DIR}/atomic.c
-    ${libbacktrace_SOURCE_DIR}/dwarf.c
-    ${libbacktrace_SOURCE_DIR}/fileline.c
-    ${libbacktrace_SOURCE_DIR}/mmap.c
-    ${libbacktrace_SOURCE_DIR}/mmapio.c
-    ${libbacktrace_SOURCE_DIR}/posix.c
-    ${libbacktrace_SOURCE_DIR}/sort.c
-    ${libbacktrace_SOURCE_DIR}/state.c
+    ${cslg_libbacktrace_SOURCE_DIR}/atomic.c
+    ${cslg_libbacktrace_SOURCE_DIR}/dwarf.c
+    ${cslg_libbacktrace_SOURCE_DIR}/fileline.c
+    ${cslg_libbacktrace_SOURCE_DIR}/mmap.c
+    ${cslg_libbacktrace_SOURCE_DIR}/mmapio.c
+    ${cslg_libbacktrace_SOURCE_DIR}/posix.c
+    ${cslg_libbacktrace_SOURCE_DIR}/sort.c
+    ${cslg_libbacktrace_SOURCE_DIR}/state.c
     ${PROJECT_SOURCE_DIR}/src/backtraceExtension.c
 )
 
@@ -69,7 +105,7 @@ add_library(cslg_libbacktrace STATIC
 # directory reaches a consumer of the library.
 target_include_directories(cslg_libbacktrace PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/config
-    ${libbacktrace_SOURCE_DIR})
+    ${cslg_libbacktrace_SOURCE_DIR})
 
 # Hidden visibility keeps every backtrace_* symbol out of the dynamic symbol
 # table of the user's executable — another libbacktrace in the same process

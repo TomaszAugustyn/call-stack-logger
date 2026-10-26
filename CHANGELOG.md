@@ -17,7 +17,7 @@ of `master`.
 - `binutils-dev` / `binutils-devel` / `libzstd-devel` are no longer needed.
   libbacktrace's sources are downloaded at configure time from a pinned
   commit (SHA-256 checked) and compiled into the library; set
-  `FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE` to a local copy for offline builds.
+  `FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE` to a local copy for offline builds.
 - The public header `include/callStack.h` includes no third-party header any
   more (it included `bfd.h`). The resolver struct it declares is now called
   `addressResolver` (was `bfdResolver`); the free functions of the API are

@@ -1325,7 +1325,7 @@ sections itself.
 ### System Requirement
 
 - CMake 3.14, a C++17 compiler (GCC or Clang), glibc; network access at configure
-  time for the pinned libbacktrace download (or `FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE`
+  time for the pinned libbacktrace download (or `FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE`
   pointing at a local copy). `libc6-dbg` (Debian/Ubuntu) is optional and gives libc
   frames a file and a line. The test suite uses `objcopy` and `strip` (shipped with
   the compiler) for its fixtures.
@@ -1744,7 +1744,7 @@ Test pure/deterministic functions from the include headers:
   `CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS` tells the test which).
 - `cslg_disabled_instrumentation_is_inert` (ctest, only with `DISABLE_INSTRUMENTATION=ON`)
   — `ctest --build-and-test` configures `tests/disabled/` as a Release consumer project
-  (with `FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE` pointing at the already-downloaded
+  (with `FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE` pointing at the already-downloaded
   sources) and runs `run_checks.sh`: first `compare_binaries.sh` on the program built
   with and without `callstacklogger::instrumented` (NEEDED libraries, debug sections and
   exported symbols must match), then `api_program`, which links

@@ -12,15 +12,16 @@
 # exists) and run three times; the median of each measurement is printed. The
 # trace goes to /dev/null. Needs CMake, a C++17 compiler and the dependency
 # downloads the library makes at configure time (or
-# FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE in the environment for offline use).
+# FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE in the environment for offline use).
 set -eu
 checkout=$(cd "$1" && pwd)
 label=${2:-$(basename "$checkout")}
 iterations=${3:-50}
 bench_dir=$(cd "$(dirname "$0")" && pwd)
 extra_cmake=${CSLG_BENCH_CMAKE_ARGS:-}
-if [ -n "${FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE:-}" ]; then
-    extra_cmake="$extra_cmake -DFETCHCONTENT_SOURCE_DIR_LIBBACKTRACE=$FETCHCONTENT_SOURCE_DIR_LIBBACKTRACE"
+if [ -n "${FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE:-}" ]; then
+    libbacktrace_dir=$FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE
+    extra_cmake="$extra_cmake -DFETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE=$libbacktrace_dir"
 fi
 
 # name  build type      options

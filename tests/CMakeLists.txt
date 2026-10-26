@@ -11,13 +11,19 @@
 # Subsequent builds work fully offline.
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
+# Set extracted file timestamps to extraction time (CMP0135 NEW behavior).
+# Without this, CMake warns on versions >= 3.24 and uses archive timestamps,
+# which can cause incremental builds to miss updates when the URL changes.
+# The keyword exists since CMake 3.24; older versions would read it as part
+# of the URL and fail.
+set(CSLG_GTEST_TIMESTAMP_ARGS)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    set(CSLG_GTEST_TIMESTAMP_ARGS DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+endif()
 FetchContent_Declare(
     googletest
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
-    # Set extracted file timestamps to extraction time (CMP0135 NEW behavior).
-    # Without this, CMake warns on versions >= 3.24 and uses archive timestamps,
-    # which can cause incremental builds to miss updates when the URL changes.
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    ${CSLG_GTEST_TIMESTAMP_ARGS}
 )
 # Prevent gtest from overriding compiler/linker settings on Windows
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -52,7 +58,7 @@ if(DISABLE_INSTRUMENTATION)
                 -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
                 -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
                 -DCSLG_SOURCE_DIR=${PROJECT_SOURCE_DIR}
-                -DFETCHCONTENT_SOURCE_DIR_LIBBACKTRACE=${CSLG_LIBBACKTRACE_SOURCE_DIR}
+                -DFETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE=${CSLG_LIBBACKTRACE_SOURCE_DIR}
             --test-command ${CMAKE_CURRENT_SOURCE_DIR}/disabled/run_checks.sh
                 ${CMAKE_CURRENT_BINARY_DIR}/disabled-check/with_target
                 ${CMAKE_CURRENT_BINARY_DIR}/disabled-check/without_target
