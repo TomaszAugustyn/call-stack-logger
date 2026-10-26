@@ -13,6 +13,10 @@
 // include/ (it needs libbacktrace's backtrace.h, which consumers do not have).
 #pragma once
 
+// The vendored libbacktrace's functions are renamed (cslg_vendored_ prefix);
+// the declarations of backtrace.h must be read with the same names.
+#include "cslg_backtrace_rename.h"
+
 #include <backtrace.h>
 #include <stdint.h>
 

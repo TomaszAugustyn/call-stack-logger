@@ -1013,6 +1013,7 @@ call-stack-logger/
 |       |-- LICENSE             # libbacktrace's BSD-3-Clause license text
 |       |-- config/config.h     # Hand-written configuration (replaces the configure script's output)
 |       |-- config/backtrace-supported.h
+|       |-- config/cslg_backtrace_rename.h # cslg_vendored_ prefix for every libbacktrace function (a static link with another copy)
 |-- bench/
 |   |-- CMakeLists.txt          # Cost benchmark: two generated libraries with 2000 instrumented functions each; `bench` target
 |   |-- bench.cpp               # Measures warm per-call, cold per-address and first-call-per-library costs, RSS
@@ -1064,6 +1065,7 @@ call-stack-logger/
 |       |-- compressed_debug_lib.cpp # Instrumented shared lib built with -gz=zlib / -gz=zstd (CDL_NAME prefixes the symbols)
 |       |-- debug_objects_traced_program.cpp # Instrumented; calls into the two libraries above
 |       |-- add_minidebuginfo.sh  # Strips a binary the way Fedora does: MiniDebugInfo (.gnu_debugdata) instead of the symbol table
+|       |-- other_libbacktrace.c # Stand-ins for a second libbacktrace's public functions (abort when called)
 |       |-- damaged_objects_traced_program.cpp # Instrumented; deleted, planted, truncated and malformed plugin copies, FIFOs under debug-file names, addresses in no object
 |       |-- reload_lib_a.cpp        # Instrumented shared lib, the larger of two loaded one after the other
 |       |-- reload_lib_b.cpp        # Instrumented shared lib, loaded into reload_lib_a's old code segment
@@ -1214,9 +1216,12 @@ at its load bias through the internal `elf_add()` and installs the lookup
 functions). Every file `elf.c` opens goes through `cslg_open_checked()`
 (relative names against the last opened file's directory, regular files only,
 the layout check). Compiled into the `cslg_libbacktrace` static library in
-place of `elf.c`, with hidden visibility, `-O2` in every build type and the
-sanitizer flags of the build. See "Symbol Resolution Pipeline" for why it
-exists and what the open does.
+place of `elf.c`, with hidden visibility, every libbacktrace function renamed
+(`cslg_vendored_` prefix, `config/cslg_backtrace_rename.h`: hidden visibility
+keeps the symbols out of the dynamic symbol table but not out of a static link
+with another libbacktrace, where `backtrace_pcinfo` & co. would be defined
+twice), `-O2` in every build type and the sanitizer flags of the build. See
+"Symbol Resolution Pipeline" for why it exists and what the open does.
 
 ### `src/callStack.cpp`
 The core implementation. Key functions:
@@ -1794,6 +1799,14 @@ Test pure/deterministic functions from the include headers:
   constructor sets `ADDR_NO_RANDOMIZE`), and the test skips when b did not land inside
   a's old code (`RELOAD_OVERLAP=0`, e.g. where seccomp refuses the personality call).
   Fails with one shared libbacktrace state (b named `reload_a_pad…`).
+- `OtherLibbacktraceTest` (2 tests) — `cslg_other_libbacktrace_traced_program` is the
+  traced program plus `other_libbacktrace.c`, which defines `backtrace_create_state`,
+  `backtrace_pcinfo` and `backtrace_syminfo` the way a second, statically linked
+  libbacktrace would (each aborts when called): it must link (without the rename the
+  link fails with multiple definitions) and trace exactly like the default build; and
+  `nm -g --defined-only` on `libcslg_libbacktrace.a` must list only `cslg_`-prefixed
+  globals (compiler instrumentation's `__` names aside), so a libbacktrace update that
+  adds an external function the rename does not cover fails there first.
 - `PieTest.PieAndNonPieExecutablesResolveAlike` — `traced_program.cpp` built with
   `-fPIE -pie` and with `-fno-pie -no-pie`; both traces must equal the default build's
   line for line (timestamp, duration and address columns aside). Pins the load-bias

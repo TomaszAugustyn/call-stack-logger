@@ -47,10 +47,14 @@
 /* Every file elf.c opens — the object file, a separate debug file found by
    its build ID or .gnu_debuglink, a dwz alt file named by .gnu_debugaltlink —
    is opened by cslg_open_checked() below instead of libbacktrace's own
-   backtrace_open() (posix.c, still used by the rest of libbacktrace). */
+   backtrace_open() (posix.c, still used by the rest of libbacktrace). The
+   name is a macro already, the rename of config.h (cslg_backtrace_rename.h),
+   which is restored afterwards. */
+#undef backtrace_open
 #define backtrace_open cslg_open_checked
 #include "elf.c"
 #undef backtrace_open
+#define backtrace_open cslg_vendored_backtrace_open
 
 /* backtrace_create_state()'s flag for a state used by several threads (its
    FLAGS argument is a bit mask; libbacktrace has no name for the bit). */

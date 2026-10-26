@@ -3530,6 +3530,57 @@ TEST(DlopenReloadTest, LibraryLoadedIntoAnUnloadedOnesRangeIsNamedAfterItself) {
             << "a frame after the reload carries reload_lib_a's name. Trace:\n" << trace;
 }
 
+// The traced program also defines libbacktrace's public functions, as a program
+// does that links another libbacktrace statically. The tracer's copy is renamed
+// (cslg_vendored_ prefix), so the two never meet: the trace is the default
+// build's, and the other copy's functions are never called (each would abort).
+// Hidden visibility alone does not keep a static link apart: the linker took
+// the program's definitions for the tracer's calls.
+TEST(OtherLibbacktraceTest, TracerNeverCallsTheProgramsOwnLibbacktrace) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(OTHER_LIBBACKTRACE_PROGRAM_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_EQ(out.find("OTHER_LIBBACKTRACE"), std::string::npos) << out;
+    expect_same_trace_as_default_build(trace, "program with a libbacktrace of its own");
+}
+
+// Every global symbol the vendored libbacktrace defines carries the cslg_
+// prefix (the rename in third_party/libbacktrace/config/cslg_backtrace_rename.h,
+// and the extension's own cslg_backtrace_* functions). A libbacktrace update
+// that adds an external function the rename does not list fails here, before
+// a user's link does.
+TEST(OtherLibbacktraceTest, VendoredCopyDefinesOnlyPrefixedSymbols) {
+    const std::string command = std::string("nm -g --defined-only \"") + VENDORED_LIBBACKTRACE_PATH + "\"";
+    FILE* nm = popen(command.c_str(), "r");
+    ASSERT_NE(nm, nullptr) << command;
+    std::string listing;
+    char buffer[4096];
+    size_t got;
+    while ((got = fread(buffer, 1, sizeof buffer, nm)) > 0) {
+        listing.append(buffer, got);
+    }
+    ASSERT_EQ(pclose(nm), 0) << command << ":\n" << listing;
+    std::vector<std::string> unprefixed;
+    size_t symbols = 0;
+    for (const std::string& line : split_lines(listing)) {
+        // "<value> <type> <name>"; member headers ("state.c.o:") and blank lines have fewer fields.
+        std::istringstream fields(line);
+        std::string value, type, name;
+        if (!(fields >> value >> type >> name)) {
+            continue;
+        }
+        ++symbols;
+        // Names starting with "__" belong to the compiler's own instrumentation (sanitizers, coverage).
+        if (name.rfind("cslg_", 0) != 0 && name.rfind("__", 0) != 0) {
+            unprefixed.push_back(name);
+        }
+    }
+    EXPECT_GT(symbols, 0u) << listing;
+    EXPECT_TRUE(unprefixed.empty()) << "unprefixed global symbols in " << VENDORED_LIBBACKTRACE_PATH << ": "
+                                    << ::testing::PrintToString(unprefixed);
+}
+
 // The same program as a position-independent executable (load bias = map
 // start) and as a fixed-address one (load bias 0, map start 0x400000): both
 // resolve every name and line. A resolver that handed libbacktrace dli_fbase

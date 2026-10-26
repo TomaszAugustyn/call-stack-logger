@@ -440,6 +440,14 @@ target_link_libraries(cslg_damaged_objects_traced_program PRIVATE callstacklogge
 add_dependencies(cslg_damaged_objects_traced_program cslg_dlopen_plugin cslg_debuglink_plugin)
 cslg_apply_sanitizers(cslg_damaged_objects_traced_program)
 
+# The traced program with a second libbacktrace's public functions defined in it,
+# as when a program links its own copy statically; the tracer must not call them
+# (see OtherLibbacktraceTest).
+add_executable(cslg_other_libbacktrace_traced_program traced_program.cpp other_libbacktrace.c)
+target_compile_features(cslg_other_libbacktrace_traced_program PRIVATE cxx_std_17)
+target_link_libraries(cslg_other_libbacktrace_traced_program PRIVATE callstacklogger_instrumented)
+cslg_apply_sanitizers(cslg_other_libbacktrace_traced_program)
+
 # The traced program as a position-independent and as a fixed-address
 # executable, explicitly (the default differs between distributions): the
 # load bias the resolver hands libbacktrace is the map start for the first
@@ -542,6 +550,8 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     TRACED_PROGRAM_NOPIE_PATH="$<TARGET_FILE:cslg_traced_test_program_nopie>"
     STRIPPED_DEBUGLINK_PROGRAM_PATH="$<TARGET_FILE:cslg_stripped_debuglink_traced_program>"
     STRIPPED_PROGRAM_PATH="$<TARGET_FILE:cslg_stripped_traced_program>"
+    OTHER_LIBBACKTRACE_PROGRAM_PATH="$<TARGET_FILE:cslg_other_libbacktrace_traced_program>"
+    VENDORED_LIBBACKTRACE_PATH="$<TARGET_FILE:cslg_libbacktrace>"
 )
 if(CSLG_XZ_EXECUTABLE)
     target_compile_definitions(cslg_integration_tests PRIVATE

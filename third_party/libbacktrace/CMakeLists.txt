@@ -110,7 +110,11 @@ target_include_directories(cslg_libbacktrace PUBLIC
 # Hidden visibility keeps every backtrace_* symbol out of the dynamic symbol
 # table of the user's executable — another libbacktrace in the same process
 # (Boost.Stacktrace's, GCC's own in libgo/libphobos) must not bind to this
-# copy or the other way round. Warnings are silenced: the code is upstream's,
+# copy or the other way round. A static link needs more: every function of
+# this copy is also renamed with a cslg_vendored_ prefix
+# (config/cslg_backtrace_rename.h, included by config.h), so a program that
+# links another libbacktrace statically gets no second definition of
+# backtrace_create_state & co. Warnings are silenced: the code is upstream's,
 # compiled with a configuration upstream did not generate. -O2 in every build
 # type: the symbolizer is third-party code nobody steps through, and the
 # distribution's libbfd it replaced was an optimized build whatever the

@@ -61,6 +61,10 @@ of `master`.
 
 ### Linking
 
+- The functions of the libbacktrace copy inside the library carry a prefix of
+  their own (`cslg_vendored_backtrace_*`), so a program that links another
+  libbacktrace statically (its own copy, Boost.Stacktrace's libbacktrace
+  backend) links and traces as before.
 - Programs export only the symbols that must be visible in the dynamic symbol
   table — the two hooks, for `dlopen()`ed plugins, and with `LOG_EXCEPTIONS`
   the five interposed runtime entry points — through
@@ -98,7 +102,8 @@ of `master`.
   loading, a truncated plugin, malformed plugins, a truncated alt file, FIFOs
   under the names of debug files, addresses outside every object, PIE and
   non-PIE executables, a stripped executable with and without a debug file
-  and with MiniDebugInfo.
+  and with MiniDebugInfo, a program that defines libbacktrace's functions
+  itself.
 - `bench/`: a benchmark of the warm per-call cost, the cold resolution cost
   and the resident memory, buildable against any checkout
   (`bench/run_bench.sh`), with a `bench` target behind `BUILD_BENCH=ON`.

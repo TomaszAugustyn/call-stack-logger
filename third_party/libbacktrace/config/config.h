@@ -17,6 +17,9 @@
    refuses to create a THREADED state, and the resolver always creates one. */
 #pragma once
 
+/* The vendored copy's functions carry a prefix of their own (see there). */
+#include "cslg_backtrace_rename.h"
+
 #define HAVE_ATOMIC_FUNCTIONS 1
 #define HAVE_SYNC_FUNCTIONS 1
 #define HAVE_CLOCK_GETTIME 1
