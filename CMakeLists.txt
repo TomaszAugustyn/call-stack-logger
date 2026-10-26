@@ -143,6 +143,10 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -Wextra")
 # target_compile_options/target_link_options in the test CMake files.
 if(COVERAGE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -fprofile-update=atomic")
+    # The C sources too: src/backtraceExtension.c is the library's own code
+    # (the open wrapper, the layout check). libbacktrace's own sources get the
+    # flags with it; the coverage report drops them with the rest of _deps/.
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage -fprofile-update=atomic")
 endif()
 
 # Split compilation: the callstacklogger library is compiled WITHOUT instrumentation

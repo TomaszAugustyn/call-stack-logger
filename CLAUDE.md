@@ -1886,7 +1886,12 @@ genhtml coverage.info --output-directory coverage-report
 ```
 
 Notes:
-- `COVERAGE=ON` compiles with `--coverage -fprofile-update=atomic`. The atomic
+- `COVERAGE=ON` compiles the C++ and the C sources with `--coverage
+  -fprofile-update=atomic`; the C flags matter for `src/backtraceExtension.c` (the
+  open wrapper and the layout check), and the libbacktrace sources compiled with it
+  leave the report with the rest of `_deps/` — unless `FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE`
+  points elsewhere, in which case that directory needs a `--remove` pattern of its own
+  (README says so). The atomic
   counter updates are load-bearing: the multi-threaded `cslg_threaded_traced_test_program`
   runs the instrumented library (`trace.cpp`) on 4 worker threads that would otherwise
   race on the default non-atomic gcov counters. A lost update can drive a counter

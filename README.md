@@ -858,6 +858,10 @@ genhtml coverage.info --output-directory coverage-report
 # Open coverage-report/index.html in a browser
 ```
 
+With `FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE` pointing at sources outside the build
+tree, add that directory to the `--remove` patterns: the C sources are compiled with
+coverage too, and libbacktrace's files would otherwise stay in the report.
+
 `-DCOVERAGE=ON` compiles with `-fprofile-update=atomic` so gcov's counters stay
 thread-safe under the multi-threaded tests (otherwise racing counter updates can
 go negative and make `geninfo` fail). The `negative` entry in `--ignore-errors`
