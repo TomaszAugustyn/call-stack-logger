@@ -36,6 +36,8 @@
 
     #include "eventFormat.h"
     #include "tracerScope.h"
+    #include <climits>
+    #include <cstddef>
     #include <cstdint>
     #include <cstdio>
     #include <cstdlib>
@@ -151,8 +153,8 @@ const char* std_exception_what(const std::type_info* type, void* object) {
 NO_INSTRUMENT
 constexpr _Unwind_Exception_Class exception_class_of(const char (&text)[9]) {
     _Unwind_Exception_Class value = 0;
-    for (int i = 0; i < 8; ++i) {
-        value = (value << 8) | static_cast<unsigned char>(text[i]);
+    for (std::size_t i = 0; i < sizeof(_Unwind_Exception_Class); ++i) {
+        value = (value << CHAR_BIT) | static_cast<unsigned char>(text[i]);
     }
     return value;
 }

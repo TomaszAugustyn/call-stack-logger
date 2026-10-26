@@ -34,6 +34,10 @@ inline constexpr std::size_t FORMAT_BUF_SIZE = 2048;
 inline constexpr std::size_t TIMESTAMP_PREFIX_WIDTH = PRETTY_TIME_LENGTH + 3;
 inline constexpr std::size_t ADDR_COLUMN_WIDTH = 9 + sizeof(void*) * 2 + 2;
 
+// Width of one segment of the tree prefix: "|  " for each enclosing level, then
+// "|_ " (call lines) or "!! " (event lines, include/eventFormat.h).
+inline constexpr int TREE_SEGMENT_WIDTH = 3;
+
 // Markers the tree glyph of a frame's line is patched to once the frame is
 // known to have ended abnormally (LOG_EXCEPTIONS): the '|' of its "|_ " becomes
 // '!' when an exception left the frame, '~' when a non-local jump skipped its
@@ -49,7 +53,8 @@ inline constexpr char FRAME_END_JUMP = '~';
 // depth above 1 adds one "|  " before the glyph.
 NO_INSTRUMENT
 inline std::size_t tree_glyph_offset(int depth, std::size_t extra_prefix) {
-    return TIMESTAMP_PREFIX_WIDTH + extra_prefix + 3 * static_cast<std::size_t>(depth - 1);
+    return TIMESTAMP_PREFIX_WIDTH + extra_prefix
+           + static_cast<std::size_t>(TREE_SEGMENT_WIDTH) * static_cast<std::size_t>(depth - 1);
 }
 
 // Formats a resolved frame into a trace log line with timestamp, optional address,
@@ -117,15 +122,15 @@ inline std::size_t format_into(char* buf, std::size_t cap,
 
     // Tree indentation: "|  " for each depth level above 1, then "|_ " for the last level.
     // At depth 0 (top-level function like main), no indentation is added.
-    for (int i = 1; i < current_stack_depth && remaining > 3; ++i) {
-        std::memcpy(buf + pos, "|  ", 3);
-        pos += 3;
-        remaining -= 3;
+    for (int i = 1; i < current_stack_depth && remaining > TREE_SEGMENT_WIDTH; ++i) {
+        std::memcpy(buf + pos, "|  ", TREE_SEGMENT_WIDTH);
+        pos += TREE_SEGMENT_WIDTH;
+        remaining -= TREE_SEGMENT_WIDTH;
     }
-    if (current_stack_depth > 0 && remaining > 3) {
-        std::memcpy(buf + pos, "|_ ", 3);
-        pos += 3;
-        remaining -= 3;
+    if (current_stack_depth > 0 && remaining > TREE_SEGMENT_WIDTH) {
+        std::memcpy(buf + pos, "|_ ", TREE_SEGMENT_WIDTH);
+        pos += TREE_SEGMENT_WIDTH;
+        remaining -= TREE_SEGMENT_WIDTH;
     }
 
     // Function name and caller location

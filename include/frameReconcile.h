@@ -278,13 +278,16 @@ inline std::string_view function_base_name(std::string_view name) {
             i = close;
             continue;
         }
-        if (name.compare(i, 8, "operator") == 0 && (i == 0 || name[i - 1] == ':' || name[i - 1] == ' ')) {
+        constexpr std::string_view OPERATOR_KEYWORD = "operator";
+        if (name.compare(i, OPERATOR_KEYWORD.size(), OPERATOR_KEYWORD) == 0
+            && (i == 0 || name[i - 1] == ':' || name[i - 1] == ' ')) {
             // An operator's own symbol ("operator<", "operator()", "operator new[]",
             // "operator int") runs up to the '(' of the parameter list; its '<' and
             // '>' characters are not template brackets.
-            i += 8;
-            if (name.compare(i, 2, "()") == 0) {
-                i += 2;
+            i += OPERATOR_KEYWORD.size();
+            constexpr std::string_view CALL_OPERATOR = "()";
+            if (name.compare(i, CALL_OPERATOR.size(), CALL_OPERATOR) == 0) {
+                i += CALL_OPERATOR.size();
             }
             while (i < name.size() && name[i] != '(') {
                 ++i;

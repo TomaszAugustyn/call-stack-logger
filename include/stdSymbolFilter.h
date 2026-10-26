@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstring>
 
 #ifndef NO_INSTRUMENT
@@ -49,11 +50,18 @@ namespace instrumentation {
  * compilers, USED only under Clang in callStack.cpp) so unit tests can exercise
  * every pattern directly regardless of the compiler running the test suite.
  */
+// True when `text` starts with the string literal `prefix` (its length is
+// taken from the literal, so it cannot be miscounted).
+template <std::size_t N>
+NO_INSTRUMENT inline bool starts_with(const char* text, const char (&prefix)[N]) {
+    return std::strncmp(text, prefix, N - 1) == 0;
+}
+
 NO_INSTRUMENT
 inline bool is_std_library_symbol(const char* mangled_name) {
     // __cxa_* functions (C++ ABI runtime, e.g., __cxa_atexit, __cxa_guard_acquire).
     // These don't use the _Z mangling prefix so must be checked separately.
-    if (std::strncmp(mangled_name, "__cxa_", 6) == 0) {
+    if (starts_with(mangled_name, "__cxa_")) {
         return true;
     }
     // All other C++ mangled names start with _Z (Itanium ABI).
@@ -91,13 +99,13 @@ inline bool is_std_library_symbol(const char* mangled_name) {
     }
     // Check for __gnu_cxx:: (mangled as 9__gnu_cxx), __cxxabiv1:: (10__cxxabiv1),
     // and __gnu_debug:: (11__gnu_debug).
-    if (std::strncmp(p, "9__gnu_cxx", 10) == 0) {
+    if (starts_with(p, "9__gnu_cxx")) {
         return true;
     }
-    if (std::strncmp(p, "10__cxxabiv1", 12) == 0) {
+    if (starts_with(p, "10__cxxabiv1")) {
         return true;
     }
-    if (std::strncmp(p, "11__gnu_debug", 13) == 0) {
+    if (starts_with(p, "11__gnu_debug")) {
         return true;
     }
     return false;

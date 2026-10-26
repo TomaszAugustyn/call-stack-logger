@@ -16,6 +16,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #ifndef NO_INSTRUMENT
     #define NO_INSTRUMENT __attribute__((no_instrument_function))
@@ -56,16 +57,17 @@ inline std::size_t sanitize_what_into(const char* what, char* out, std::size_t c
     const std::size_t length = std::strlen(what);
     const std::size_t limit = cap - 1;
     const bool cut = length > limit;
-    // Leave room for the "..." when cutting (and cap is large enough for it).
-    const std::size_t copied = cut ? (limit > 3 ? limit - 3 : limit) : length;
+    // Leave room for the ellipsis when cutting (and cap is large enough for it).
+    constexpr std::string_view ELLIPSIS = "...";
+    const std::size_t copied = cut ? (limit > ELLIPSIS.size() ? limit - ELLIPSIS.size() : limit) : length;
     for (std::size_t i = 0; i < copied; ++i) {
         const unsigned char c = static_cast<unsigned char>(what[i]);
         out[i] = (c < 0x20 || c == 0x7f) ? ' ' : what[i];
     }
     std::size_t size = copied;
-    if (cut && limit > 3) {
-        std::memcpy(out + size, "...", 3);
-        size += 3;
+    if (cut && limit > ELLIPSIS.size()) {
+        std::memcpy(out + size, ELLIPSIS.data(), ELLIPSIS.size());
+        size += ELLIPSIS.size();
     }
     out[size] = '\0';
     return size;
@@ -128,15 +130,15 @@ inline std::size_t format_event_into(char* buf, std::size_t cap, const EventLine
             remaining -= n;
         }
     }
-    for (int i = 1; i < event.depth && remaining > 3; ++i) {
-        std::memcpy(buf + pos, "|  ", 3);
-        pos += 3;
-        remaining -= 3;
+    for (int i = 1; i < event.depth && remaining > TREE_SEGMENT_WIDTH; ++i) {
+        std::memcpy(buf + pos, "|  ", TREE_SEGMENT_WIDTH);
+        pos += TREE_SEGMENT_WIDTH;
+        remaining -= TREE_SEGMENT_WIDTH;
     }
-    if (remaining > 3) {
-        std::memcpy(buf + pos, "!! ", 3);
-        pos += 3;
-        remaining -= 3;
+    if (remaining > TREE_SEGMENT_WIDTH) {
+        std::memcpy(buf + pos, "!! ", TREE_SEGMENT_WIDTH);
+        pos += TREE_SEGMENT_WIDTH;
+        remaining -= TREE_SEGMENT_WIDTH;
     }
     if (remaining > 0 && event.site_file == nullptr) {
         n = event.what != nullptr

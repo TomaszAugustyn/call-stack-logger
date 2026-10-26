@@ -236,6 +236,13 @@ struct HookSiteHash {
 // arrays), where the distance to the hook's frame changes with every call;
 // such frames always keep a frame pointer. Measured once per site by
 // measure_level_rule().
+// Smallest possible distance from a hook's frame address to the CFA of the
+// frame that called the hook: the call into the frame leaves its return address
+// 8 bytes below the CFA, and the hook's prologue puts a return address and a
+// saved frame pointer (16 bytes) below the frame's stack pointer — 24 bytes for
+// a frame with no locals of its own.
+constexpr std::int32_t MIN_LEVEL_DISTANCE = 24;
+
 struct LevelRule {
     // 32 bits hold any frame a thread's stack can contain; a frame beyond 2 GB
     // (no realistic stack is that large) keeps the minimum distance, the safe
@@ -519,11 +526,7 @@ inline const void* apply_level_rule(const LevelRule& rule, const void* frame) {
 // held (the walk consults the loader's tables) and never throws.
 NO_INSTRUMENT
 LevelRule measure_level_rule(const void* site, const void* frame) {
-    // Smallest possible distance: the call into the frame leaves its return
-    // address 8 bytes below the CFA, and the hook's prologue puts a return
-    // address and a saved frame pointer (16 bytes) below the frame's stack
-    // pointer — 24 bytes for a frame with no locals of its own.
-    LevelRule rule{ 24, false };
+    LevelRule rule{ MIN_LEVEL_DISTANCE, false };
     LevelSearch search{ site, 0, false, false };
     _Unwind_Backtrace(level_search_step, &search);
     const std::uintptr_t frame_address = reinterpret_cast<std::uintptr_t>(frame);
