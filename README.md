@@ -918,8 +918,7 @@ flags, so your production integrations are unaffected.
 ```bash
 # ASan + UBSan (combined; catches memory errors + UB)
 cmake -B build-asan -DBUILD_TESTS=ON -DSANITIZE=address+undefined
-cmake --build build-asan && cd build-asan && \
-  LSAN_OPTIONS=suppressions=../tests/lsan-suppressions.txt ctest --output-on-failure
+cmake --build build-asan && cd build-asan && ctest --output-on-failure
 
 # TSan (mutually exclusive with ASan)
 cmake -B build-tsan -DBUILD_TESTS=ON -DSANITIZE=thread
