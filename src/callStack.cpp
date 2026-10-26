@@ -10,6 +10,7 @@
 #include "callStack.h"
 #include "backtraceExtension.h"
 #include "frameReconcile.h"
+#include "frontCache.h"
 #include "prettyTime.h"
 #include "stdSymbolFilter.h"
 #include "tracerScope.h"
@@ -550,51 +551,67 @@ addressResolver::CachedLocation addressResolver::resolve_filename_and_line(void*
     return location;
 }
 
+thread_local FrontCache<addressResolver::CachedName, addressResolver::FRONT_CACHE_SLOTS>
+        addressResolver::t_name_front;
+thread_local FrontCache<addressResolver::CachedLocation, addressResolver::FRONT_CACHE_SLOTS>
+        addressResolver::t_location_front;
+
 bool addressResolver::resolve_no_unwind(void* callee_address, void* caller_address, ResolvedFrameView& out,
                                         NameOf name_of) {
-    bool have_name = false;
-    bool have_location = false;
     // The hooks' names and the physical frames' names live in separate caches
     // (see frame_name_cache); the hooks take the first branch on every call.
-    std::unordered_map<void*, CachedName>& names
-            = name_of == NameOf::innermost_function ? name_cache() : frame_name_cache();
-    {
-        // Lock covers ALL libbacktrace operations: the state's creation, every
-        // registration and every lookup (libbacktrace parses a compilation
-        // unit's line table lazily on first use and, in threaded mode, lets
-        // two threads both parse it, keeping one copy and leaking the other).
-        // The lock also protects the name_cache() / location_cache()
+    const bool hooks = name_of == NameOf::innermost_function;
+    std::unordered_map<void*, CachedName>& names = hooks ? name_cache() : frame_name_cache();
+
+    // Warm path, no mutex: the hooks' front caches (see frontCache.h) hold the
+    // nodes of the shared maps for the addresses this thread has seen. A
+    // cached nullopt name means "filtered / not loggable" and is honored as
+    // such, before the call site is even looked at.
+    const CachedName* name = hooks ? t_name_front.find(callee_address) : nullptr;
+    const CachedLocation* location = hooks ? t_location_front.find(caller_address) : nullptr;
+    if (name != nullptr && !name->name) {
+        return false;
+    }
+    if (name == nullptr || location == nullptr) {
+        // The shared maps, under the lock. The lock covers ALL libbacktrace
+        // operations: the states' creation, every registration and every
+        // lookup (libbacktrace parses a compilation unit's line table lazily
+        // on first use and, in threaded mode, lets two threads both parse it,
+        // keeping one copy and leaking the other). It also protects the
         // memoization maps. Timestamping and formatting happen in the callers,
         // after the lock is released, so the global serialization window every
         // traced call shares stays as small as the lookups themselves.
         //
-        // Warm path: both memoized lookups hit (see the cache comments in
-        // callStack.h) and no symbolizer work happens at all. The cached values
-        // are handed out as pointers into the cache nodes: valid for the process
-        // lifetime and safe to read after the lock is dropped (node-based maps,
-        // entries never erased or modified, containers leaked — see
-        // ResolvedFrameView in types.h). A cached nullopt name means "filtered /
-        // not loggable" and is honored as such.
+        // The maps hand their values out as pointers into their nodes: valid
+        // for the process lifetime and safe to read after the lock is dropped
+        // (node-based maps, entries never erased or modified, containers
+        // leaked — see ResolvedFrameView in types.h). That is also what lets
+        // the front caches remember them.
         std::lock_guard<std::mutex> lock(s_resolver_mutex);
-        auto name_it = names.find(callee_address);
-        if (name_it != names.end()) {
-            if (!name_it->second.name) {
-                return false;
+        if (name == nullptr) {
+            auto name_it = names.find(callee_address);
+            if (name_it != names.end()) {
+                name = &name_it->second;
+                if (hooks) {
+                    t_name_front.store(callee_address, name);
+                }
+                if (!name->name) {
+                    return false;
+                }
             }
-            out.callee_function_name = &name_it->second.name.value();
-            out.callee_base_name = &name_it->second.base;
-            have_name = true;
         }
-        auto loc_it = location_cache().find(caller_address);
-        if (loc_it != location_cache().end()) {
-            out.caller_filename = &loc_it->second.file;
-            out.caller_line_number = loc_it->second.line;
-            out.caller_function_base = &loc_it->second.function_base;
-            have_location = true;
+        if (location == nullptr) {
+            auto loc_it = location_cache().find(caller_address);
+            if (loc_it != location_cache().end()) {
+                location = &loc_it->second;
+                if (hooks) {
+                    t_location_front.store(caller_address, location);
+                }
+            }
         }
     }
 
-    if (!have_name || !have_location) {
+    if (name == nullptr || location == nullptr) {
         // Cold path: first sight of the callee and/or the call site.
         //
         // dladdr() runs OUTSIDE s_resolver_mutex, deliberately. glibc's _dl_addr
@@ -613,10 +630,10 @@ bool addressResolver::resolve_no_unwind(void* callee_address, void* caller_addre
         // an invalid AddressInfo.
         AddressInfo callee_info;
         AddressInfo caller_info;
-        if (!have_name) {
+        if (name == nullptr) {
             callee_info = query_address(callee_address);
         }
-        if (!have_location) {
+        if (location == nullptr) {
             caller_info = query_address(caller_address);
         }
 
@@ -624,20 +641,22 @@ bool addressResolver::resolve_no_unwind(void* callee_address, void* caller_addre
         // Another thread may have resolved the same address while the mutex was
         // released; find-or-emplace keeps exactly one entry per address either way,
         // and on a miss the freshly resolved value moves straight into the map.
-        if (!have_name) {
+        if (name == nullptr) {
             auto name_it = names.find(callee_address);
             if (name_it == names.end()) {
                 name_it = names.emplace(callee_address,
                                         cache_name(resolve_function_name(callee_address, callee_info, name_of)))
                                   .first;
             }
-            if (!name_it->second.name) {
+            name = &name_it->second;
+            if (hooks) {
+                t_name_front.store(callee_address, name);
+            }
+            if (!name->name) {
                 return false;
             }
-            out.callee_function_name = &name_it->second.name.value();
-            out.callee_base_name = &name_it->second.base;
         }
-        if (!have_location) {
+        if (location == nullptr) {
             auto loc_it = location_cache().find(caller_address);
             if (loc_it == location_cache().end()) {
                 loc_it = location_cache()
@@ -645,12 +664,18 @@ bool addressResolver::resolve_no_unwind(void* callee_address, void* caller_addre
                                           resolve_filename_and_line(caller_address, caller_info))
                                  .first;
             }
-            out.caller_filename = &loc_it->second.file;
-            out.caller_line_number = loc_it->second.line;
-            out.caller_function_base = &loc_it->second.function_base;
+            location = &loc_it->second;
+            if (hooks) {
+                t_location_front.store(caller_address, location);
+            }
         }
     }
 
+    out.callee_function_name = &name->name.value();
+    out.callee_base_name = &name->base;
+    out.caller_filename = &location->file;
+    out.caller_line_number = location->line;
+    out.caller_function_base = &location->function_base;
 #ifdef LOG_ADDR
     out.callee_address = std::make_optional(callee_address);
 #endif

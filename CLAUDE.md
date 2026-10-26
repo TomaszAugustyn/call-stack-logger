@@ -192,8 +192,28 @@ Address resolution happens in stages (implemented in `src/callStack.cpp`):
 Results are **memoized per address**: `resolve_no_unwind()` consults two hash maps
 (callee address → demangled name, call-site address → file:line, both in
 `callStack.h`) before running the stages above, so the full dladdr + lookup +
-demangle pipeline executes only on first sight of each address — every repeat
-call is a hash lookup under the same mutex. On a miss, `dladdr1()` runs with
+demangle pipeline executes only on first sight of each address. In front of the
+two maps the hooks use, each thread keeps a direct-mapped cache (`FrontCache` in
+`frontCache.h`; `addressResolver::t_name_front` / `t_location_front`, 1024 slots
+per map, 32 KB per thread in TLS) of pointers to the maps' nodes: a repeat call
+whose callee and call site this thread has seen hits both without taking the
+mutex at all; a miss, or a slot another address took, goes to the shared maps
+under the mutex and refills the slot. The front caches need no synchronization
+because the shared maps are leaked, node-based and never erased from or
+modified — a node pointer lives as long as the process, which is what
+`ResolvedFrameView` relies on already — and the arrays are plain data:
+zero-initialized, never destroyed, so no constructor runs too late and no
+destructor too early. They exist because the mutex, held for two hash lookups
+on the warm path, became a lock convoy from four threads up (`std::mutex`
+sleeps as soon as it finds the lock taken): measured on the reference host, the
+cost per traced call rose from 3.3 µs with one thread to 5.3 µs with eight
+(450,000 voluntary context switches per 2.4 million calls), and a first lookup
+in a large library (about 20 ms) stalled every other thread's warm calls for as
+long; with the front caches the cost is 3.0 µs at one, four and eight threads,
+and 10 % below the locked lookup on one thread. A sweep over more distinct
+addresses than slots (the benchmark's 4,000) misses them and pays the locked
+lookup as before, plus one compare. `frame_name_cache()` (the API) has no front
+cache: a captured stack is resolved once per frame. On a miss, `dladdr1()` runs with
 `s_resolver_mutex` RELEASED and only the libbacktrace work plus the cache
 insertion re-take it. This is a lock-order rule, not a micro-optimization:
 glibc's `_dl_addr` takes the loader lock (`dl_load_lock`), and `dlopen()` holds
@@ -204,8 +224,8 @@ mutex held deadlocked exactly that way (thread A: mutex → loader lock; thread
 B: loader lock → mutex), pinned by `DlopenConstructorTest`. Nothing that takes
 the loader lock may run under `s_resolver_mutex`. Every call INTO libbacktrace
 runs under the mutex, on purpose: its lazy per-unit parsing in threaded mode
-lets two threads both parse a unit and leaks the loser's work, and cache hits
-never reach it, so the warm path would gain nothing from a narrower lock.
+lets two threads both parse a unit and leaks the loser's work; the warm path
+never reaches it at all, so a narrower lock would gain nothing.
 Callbacks libbacktrace invokes are C functions: they copy every string before
 returning (the buffers may not outlive the callback) and catch everything (an
 allocation failure becomes "no information"; an exception must not unwind
@@ -994,6 +1014,7 @@ call-stack-logger/
 |   |-- exceptionEvents.h       # LOG_EXCEPTIONS: internal bridge, interposers (exceptions.cpp) -> trace state (trace.cpp); not public API
 |   |-- format.h                # utils::format() - formats ResolvedFrame into string
 |   |-- frameReconcile.h        # LOG_EXCEPTIONS: pure frame-stack reconciliation rules (levels)
+|   |-- frontCache.h            # Per-thread direct-mapped cache in front of the resolver's shared maps (no lock on a warm hit)
 |   |-- prettyTime.h            # utils::pretty_time() + PRETTY_TIME_LENGTH constant
 |   |-- stdSymbolFilter.h       # is_std_library_symbol() — Clang runtime std filter
 |   |-- traceFilePath.h         # utils::resolve_base_trace_path + make_absolute_trace_path + build_trace_filename
@@ -1032,6 +1053,7 @@ call-stack-logger/
 |   |   |-- test_event_format.cpp # Tests for the exception event line formatter and what() sanitizer
 |   |   |-- test_format.cpp     # Tests for utils::format()
 |   |   |-- test_frame_reconcile.cpp # Tests for the LOG_EXCEPTIONS reconciliation rules
+|   |   |-- test_front_cache.cpp # Tests for instrumentation::FrontCache
 |   |   |-- test_pretty_time.cpp # Tests for utils::pretty_time() and to_ms()
 |   |   |-- test_std_symbol_filter.cpp # Tests for is_std_library_symbol() mangled-name parsing
 |   |   |-- test_trace_file_path.cpp # Tests for resolve_base_trace_path + make_absolute_trace_path + build_trace_filename
@@ -1136,6 +1158,11 @@ replacement) with:
   `get_call_stack()` names a physical frame by the outermost function at its
   return address minus one (`frame_name_cache()`, `resolve_physical_frame()`);
   the two caches never share an answer
+- Per-thread front caches of `name_cache()` and `location_cache()`:
+  `t_name_front` / `t_location_front`, `thread_local` static members of type
+  `FrontCache` (`frontCache.h`, forward-declared here so the public header stays
+  free of it), defined in `callStack.cpp`; the hooks' warm path reads them without
+  `s_resolver_mutex`
 - Free functions: `get_call_stack()`, `resolve()`
 
 **Public-API re-entrancy guard (load-bearing):** both free functions hold the
@@ -1181,6 +1208,19 @@ any record type with `callee`, `caller` and `level` fields: `FrameKey`, `StackBo
 `exiting_record_index()`. No globals, no I/O — see "Frame Reconciliation After
 Non-Local Exits" for the rules and `test_frame_reconcile.cpp` for the shapes covered.
 `trace.cpp` supplies the levels (`frame_level()`) and applies the results.
+
+### `include/frontCache.h`
+`instrumentation::FrontCache<Value, SLOTS>`: a direct-mapped cache of `(key, const
+Value*)` entries, `SLOTS` a power of two, indexed by Fibonacci hashing of the key
+(the top bits of the key times the 64-bit golden-ratio constant, so that addresses
+that differ in their low bits only spread over the slots). `find()` returns the
+pointer stored for a key or nullptr, `store()` overwrites the slot. Plain data, no
+constructor, no destructor: a `thread_local` instance is zero-initialized in TLS
+and never destroyed. The resolver keeps one per thread in front of `name_cache()`
+and `location_cache()` (see "Symbol Resolution Pipeline"); the values are pointers
+to those leaked maps' nodes, valid for the process lifetime, which is why no
+synchronization and no invalidation is needed. Unit-tested in
+`test_front_cache.cpp`.
 
 ### `include/traceFilePath.h`
 Three pure `NO_INSTRUMENT inline` helpers used by `trace.cpp` to compute per-thread trace
@@ -1508,6 +1548,13 @@ Test pure/deterministic functions from the include headers:
   `operator()` and `operator<`) and `dead_records_above_match` (pops only above the
   first match within the equal-level group, nothing without a match or when the
   match is on top)
+
+- `test_front_cache.cpp` — `instrumentation::FrontCache` with integers as values and
+  made-up addresses as keys: an empty cache misses every key, a null key included;
+  a stored value is found again and a different key misses; keys in different slots
+  coexist; two keys of one slot (found by searching for a collision) evict each
+  other; slots stay in range; 256 addresses 8 bytes apart occupy at least 200 of
+  the 1024 slots (a plain modulus would pile them up).
 
 ### Integration Tests (`tests/integration/`)
 
@@ -2045,10 +2092,11 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    thread exit. **Zero mutex on the hot write path** — each thread writes to its own
    FILE*. `open_files_mutex` is taken only during open (once per thread) and during
    shutdown (to fflush the registry). `s_resolver_mutex` serializes every call into
-   libbacktrace and the memoization caches (libbacktrace's lazy per-unit parsing
-   must not run twice); `dladdr1()` runs outside it (lock-order rule, see the
-   memoization paragraph in the resolution pipeline) and file I/O is
-   fully parallel.
+   libbacktrace and the shared memoization caches (libbacktrace's lazy per-unit
+   parsing must not run twice); a warm traced call never takes it — the per-thread
+   front caches of `frontCache.h` answer it (see the memoization paragraph in the
+   resolution pipeline); `dladdr1()` runs outside it (lock-order rule, see there)
+   and file I/O is fully parallel.
    **Shutdown does NOT close other threads' descriptors** — it only fflushes — to
    avoid UAF on the stdio FILE struct and fd-number-reuse for patch_fd (see the
    Trace File Lifecycle section above). Per-thread destructors close on thread exit.
@@ -2083,8 +2131,12 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
    calls — all of them from the cold path — down from about 4.4 µs and three `malloc`s
    per call before the unwinder removal and the view-based hook. On a `tsc`
    clocksource the `clock_gettime`-bound parts shrink by another microsecond or so.
+   Since the per-thread front caches a warm call takes no lock: in a hot loop it
+   costs about 10 % less than through the shared maps (2.96 µs against 3.26 µs in
+   the lock probe, library at -O0) and the same with 4 and 8 threads tracing at
+   once, where the shared mutex alone made it 4.0 and 5.3 µs.
 7. **Header-only utilities:** `format.h`, `prettyTime.h`, `durationFormat.h`,
-   `traceFilePath.h`, `stdSymbolFilter.h` contain inline implementations in headers
+   `traceFilePath.h`, `stdSymbolFilter.h`, `frontCache.h` contain inline implementations in headers
    (definitions in headers, not just declarations).
 8. **Per-function timing (`LOG_ELAPSED`)**: opt-in. Each thread opens a SECOND
    non-O_APPEND fd to its trace file (reopened via `/proc/self/fd/<fd>` so it is

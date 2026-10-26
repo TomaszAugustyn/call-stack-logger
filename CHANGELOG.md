@@ -22,6 +22,12 @@ of `master`.
   more (it included `bfd.h`). The resolver struct it declares is now called
   `addressResolver` (was `bfdResolver`); the free functions of the API are
   unchanged.
+- Each thread keeps a small cache (32 KB) in front of the shared lookup tables,
+  so a traced call whose callee and call site the thread has seen takes no
+  lock. With eight threads tracing at full speed the cost per call stays at
+  the single-thread cost (it rose by two thirds before, and a thread's first
+  lookup in a large library stalled the other threads' calls meanwhile); a
+  hot loop on one thread is about 10 % cheaper.
 - Trace output is unchanged wherever a name or a line could be resolved. The
   degraded texts changed: `<bfd_error>` is now `<unknown function>`, a name
   that only the dynamic symbol table knows is printed without the

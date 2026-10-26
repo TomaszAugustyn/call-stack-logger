@@ -764,6 +764,20 @@ The `LOG_ELAPSED` rows carry that option's own cost (two clock reads and a
 on the amount of debug information the object files carry; the warm numbers
 do not, because a warm call never reaches the resolver.
 
+Several threads tracing at once pay the same per call as one thread: a warm call
+takes no lock, because each thread keeps a cache in front of the shared lookup
+tables (see Thread Safety). Measured with a probe of N threads, each making
+300,000 traced calls to a tiny function, on the same host with the library at -O0
+and per-thread trace files on tmpfs: 3.0 µs per call with 1, 4 and 8 threads.
+Before the per-thread cache, the shared mutex — held for two hash lookups per
+call — made the threads sleep on it from four threads up: 4.0 µs at 4 and 5.3 µs
+at 8 threads, and a thread's first lookup in a large library (about 20 ms)
+stalled the other threads' calls for as long. The benchmark table above does not
+show this: it sweeps 4,000 distinct functions, more than the cache holds (1,024
+entries per table), so it measures the locked lookup. Re-measured on 26 October
+2026 with the cache in place, every column of the table is within the run-to-run
+spread of the numbers shown.
+
 What this does not cover, and what happens instead:
 
 - A frame that `longjmp`s out and is then called again **from the very same call
@@ -801,7 +815,9 @@ Each file starts with a header that includes the owning thread's ID:
 
 Per-thread state (`thread_local` call stack, re-entrancy guard) and per-thread `FILE*`
 mean the hot write path has **zero cross-thread synchronization** — each thread writes
-to its own file descriptor. Symbol resolution — the first sight of each address — is still
+to its own file descriptor, and a warm traced call — one whose callee and call site the
+thread has seen before — takes no lock at all: each thread keeps a small cache (32 KB) in
+front of the shared lookup tables. Symbol resolution — the first sight of each address — is still
 serialized by a mutex (libbacktrace parses a compilation unit lazily, and two threads doing
 so at once would both parse it), but file I/O is fully parallel, and dynamic-linker lookups (`dladdr`)
 run outside that mutex — so a plugin whose constructors are instrumented can be

@@ -47,6 +47,9 @@ namespace instrumentation {
  * /proc/self/maps. For the use of dladdr see also:
  * https://sourceware.org/git/?p=glibc.git;a=blob;f=debug/backtracesyms.c
  */
+template <typename Value, std::size_t SLOTS>
+struct FrontCache; // frontCache.h, included by callStack.cpp only
+
 struct addressResolver {
 public:
     /// What the resolver knows about one registered object file (an entry of
@@ -247,6 +250,16 @@ private:
         std::optional<unsigned int> line;
         std::string function_base;
     };
+
+    /// Per-thread front caches of name_cache() and location_cache() for the
+    /// hooks' warm path (see frontCache.h): the nodes of the shared maps for
+    /// the addresses this thread has seen, found without s_resolver_mutex.
+    /// 1024 slots each, 32 KB per thread in TLS, never destroyed.
+    /// frame_name_cache() has none: a captured stack is resolved once per
+    /// frame, never on a hot path. Defined in callStack.cpp.
+    static constexpr std::size_t FRONT_CACHE_SLOTS = 1024;
+    static thread_local FrontCache<CachedName, FRONT_CACHE_SLOTS> t_name_front;
+    static thread_local FrontCache<CachedLocation, FRONT_CACHE_SLOTS> t_location_front;
 
     /// Same contract as resolve_function_name(): `address_info` is the caller's
     /// dladdr() result, obtained outside s_resolver_mutex.
