@@ -3339,7 +3339,7 @@ TEST(DamagedObjectTest, DeletedPluginFileIsReportedNotRead) {
     EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
     EXPECT_NE(trace.find("|_ <could not open object file>  (called from: "), std::string::npos)
             << "plugin callee not reported as unreadable. Trace:\n" << trace;
-    EXPECT_NE(trace.find("(called from: <could not open caller object file>:???)"), std::string::npos)
+    EXPECT_NE(trace.find("(called from: <could not open caller object file>:\?\?\?)"), std::string::npos)
             << "call site inside the plugin not reported as unreadable. Trace:\n" << trace;
     EXPECT_EQ(trace.find("dlopen_plugin_helper"), std::string::npos)
             << "a name came from a file that no longer exists. Trace:\n" << trace;
@@ -3360,7 +3360,7 @@ TEST(DamagedObjectTest, TruncatedPluginFileIsRejectedNotMapped) {
     EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
     EXPECT_NE(trace.find("|_ <could not open object file>  (called from: "), std::string::npos)
             << "truncated plugin not reported as unreadable. Trace:\n" << trace;
-    EXPECT_NE(trace.find("(called from: <could not open caller object file>:???)"), std::string::npos)
+    EXPECT_NE(trace.find("(called from: <could not open caller object file>:\?\?\?)"), std::string::npos)
             << trace;
 }
 
@@ -3494,7 +3494,8 @@ TEST(StrippedExecutableTest, StrippedWithoutSymbolsDegradesGracefully) {
     const std::vector<std::string> entries = entry_lines_of(trace);
     for (const std::string& entry : entries) {
         EXPECT_TRUE(std::regex_match(entry, well_formed)) << entry;
-        EXPECT_NE(entry.find(":???)"), std::string::npos) << "a line number without debug information: " << entry;
+        EXPECT_NE(entry.find(":\?\?\?)"), std::string::npos)
+                << "a line number without debug information: " << entry;
     }
 #ifdef CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS
     EXPECT_NE(trace.find("|_ func_a()  (called from: "), std::string::npos)
