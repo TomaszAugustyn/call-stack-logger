@@ -3364,6 +3364,26 @@ TEST(DamagedObjectTest, TruncatedPluginFileIsRejectedNotMapped) {
             << trace;
 }
 
+// A plugin whose DWARF data no reader can use (its first unit claims DWARF
+// version 99) but whose symbol table is intact: the symbol table still names
+// every function, the lines read "???". Rejecting the whole file would turn
+// every name into "<could not open object file>", which is not what libbfd
+// did with such a file either.
+TEST(DamagedObjectTest, UnreadableDwarfKeepsTheSymbolNames) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "dwarf", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
+    EXPECT_EQ(trace.find("<could not open"), std::string::npos)
+            << "the symbol table was discarded with the DWARF data. Trace:\n" << trace;
+    EXPECT_NE(trace.find("|_ dlopen_plugin_entry  (called from: "), std::string::npos) << trace;
+    EXPECT_NE(trace.find("|_ dlopen_plugin_helper(int)  (called from: dlopen_plugin_entry:\?\?\?)"),
+              std::string::npos)
+            << "the call site inside the plugin is named from the symbol table, without a line. Trace:\n"
+            << trace;
+}
+
 // Addresses no loaded object contains (dladdr fails): the public API reports
 // them with the documented texts instead of failing or crashing.
 TEST(DamagedObjectTest, AddressOutsideEveryObjectIsReported) {

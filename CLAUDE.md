@@ -80,7 +80,13 @@ Address resolution happens in stages (implemented in `src/callStack.cpp`):
    file size, so the section headers of a half-copied plugin would be mapped
    beyond EOF and fault with SIGBUS on first read (the loader itself only needs
    the PT_LOAD segments, so such a file still `dlopen()`s). Pinned by
-   `DamagedObjectTest.TruncatedPluginFileIsRejectedNotMapped`.
+   `DamagedObjectTest.TruncatedPluginFileIsRejectedNotMapped`. When `elf_add()`
+   fails AFTER it registered the file's symbol table — the DWARF data is in an
+   unknown version, damaged, or in an unreadable separate debug file — the
+   extension keeps the file as a symbols-only object (`has_dwarf` false: names
+   from the symbol table, `:???` for lines) instead of rejecting it; libbfd
+   offered the same. Pinned by `DamagedObjectTest.UnreadableDwarfKeepsTheSymbolNames`
+   (a copy of the plugin whose first `.debug_info` unit claims version 99).
    The file to register comes from `object_file_path()`: `/proc/self/exe` for
    the main executable (`dli_fname` is argv[0] there, which is no valid path
    for a PATH-found binary; libbacktrace resolves the symlink itself when it

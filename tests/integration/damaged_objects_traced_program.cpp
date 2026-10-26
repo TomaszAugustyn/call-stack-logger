@@ -24,6 +24,10 @@
  *              the file instead (same text as above, and the program lives).
  *   nomodule   the public resolve() API is handed addresses that belong to
  *              no loaded object (0x1, a heap block); the result is printed.
+ *   dwarf      the version of the copy's first .debug_info unit is set to 99,
+ *              a DWARF version no reader knows: the DWARF data cannot be
+ *              used, but the symbol table can, so the plugin's functions must
+ *              still be named (with "???" for the lines).
  */
 
 #include "callStack.h"
@@ -102,6 +106,41 @@ off_t last_load_end(const char* path) {
     return end;
 }
 
+// Sets the version of the first unit in .debug_info to 99. Returns false when
+// the file has no .debug_info section.
+bool break_dwarf_version(const char* path) {
+    FILE* f = std::fopen(path, "r+b");
+    if (f == nullptr) {
+        return false;
+    }
+    ElfW(Ehdr) ehdr {};
+    bool done = false;
+    if (std::fread(&ehdr, sizeof ehdr, 1, f) == 1 && ehdr.e_shoff != 0 && ehdr.e_shstrndx < ehdr.e_shnum) {
+        ElfW(Shdr) strings {};
+        std::fseek(f, static_cast<long>(ehdr.e_shoff + ehdr.e_shstrndx * sizeof(ElfW(Shdr))), SEEK_SET);
+        if (std::fread(&strings, sizeof strings, 1, f) == 1) {
+            for (unsigned i = 0; i < ehdr.e_shnum && !done; ++i) {
+                ElfW(Shdr) shdr {};
+                std::fseek(f, static_cast<long>(ehdr.e_shoff + i * sizeof shdr), SEEK_SET);
+                if (std::fread(&shdr, sizeof shdr, 1, f) != 1) {
+                    break;
+                }
+                char name[16] = {};
+                std::fseek(f, static_cast<long>(strings.sh_offset + shdr.sh_name), SEEK_SET);
+                if (std::fread(name, 1, sizeof name - 1, f) == 0 || std::strcmp(name, ".debug_info") != 0) {
+                    continue;
+                }
+                // 32-bit DWARF unit header: unit_length (4 bytes), then version (2).
+                const unsigned char version[2] = { 99, 0 };
+                std::fseek(f, static_cast<long>(shdr.sh_offset + 4), SEEK_SET);
+                done = std::fwrite(version, 1, sizeof version, f) == sizeof version;
+            }
+        }
+    }
+    std::fclose(f);
+    return done;
+}
+
 int call_plugin(void* handle) {
     auto entry = reinterpret_cast<int (*)(int)>(dlsym(handle, "dlopen_plugin_entry"));
     if (entry == nullptr) {
@@ -135,8 +174,9 @@ int main(int argc, char** argv) {
         return 0;
     }
     const bool truncated = std::strcmp(mode, "truncated") == 0;
-    if (!truncated && std::strcmp(mode, "deleted") != 0) {
-        std::fprintf(stderr, "usage: %s deleted|truncated|nomodule\n", argv[0]);
+    const bool bad_dwarf = std::strcmp(mode, "dwarf") == 0;
+    if (!truncated && !bad_dwarf && std::strcmp(mode, "deleted") != 0) {
+        std::fprintf(stderr, "usage: %s deleted|truncated|dwarf|nomodule\n", argv[0]);
         return 2;
     }
     char dir[64];
@@ -152,12 +192,16 @@ int main(int argc, char** argv) {
         }
         std::printf("truncated to %ld bytes\n", static_cast<long>(keep));
     }
+    if (bad_dwarf && !break_dwarf_version(copy)) {
+        std::fprintf(stderr, "no .debug_info in %s\n", copy);
+        return 2;
+    }
     void* handle = dlopen(copy, RTLD_NOW);
     if (handle == nullptr) {
         std::fprintf(stderr, "dlopen: %s\n", dlerror());
         return 2;
     }
-    if (!truncated) {
+    if (!truncated && !bad_dwarf) {
         unlink(copy);
     }
     const int rc = call_plugin(handle);

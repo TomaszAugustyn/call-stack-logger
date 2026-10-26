@@ -181,7 +181,17 @@ int cslg_backtrace_add_file(struct backtrace_state* state, const char* path, uin
     ret = elf_add(state, path, descriptor, NULL, 0, base_address, NULL, error_callback, data, &fileline_fn,
                   &found_sym, &found_dwarf, NULL, 0, 0, NULL, 0);
     if (ret <= 0) {
-        return 0;
+        /* elf_add() reads the symbol table first and chains it into the state
+           before it turns to the DWARF data. When the DWARF part fails — an
+           unknown DWARF version, a damaged .debug_info, an unreadable separate
+           debug file — the symbol table stays registered and answers name
+           lookups on its own, which is what libbfd offered in that case. Keep
+           the file as a symbols-only module instead of rejecting it. */
+        if (!found_sym) {
+            return 0;
+        }
+        found_dwarf = 0;
+        fileline_fn = NULL;
     }
     /* What backtrace_initialize() does after its own dl_iterate_phdr pass:
        the symbol tables and DWARF units of every registered file are chained
