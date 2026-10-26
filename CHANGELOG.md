@@ -79,6 +79,8 @@ of `master`.
 - The library prints one warning on `stderr` when the executable has neither
   a symbol table nor debug information, because none of its functions can be
   named then and the trace would otherwise stay empty without explanation.
+  MiniDebugInfo (`.gnu_debugdata`, what Fedora's stripped binaries keep)
+  counts as a symbol table.
 - `DISABLE_INSTRUMENTATION=ON` now makes `callstacklogger::instrumented`
   contribute nothing to a program: no `-finstrument-functions`, no `-g`, no
   exported symbols, no library. A program that calls `get_call_stack()` in
@@ -95,7 +97,8 @@ of `master`.
   build, zlib- and zstd-compressed debug sections, a plugin deleted after
   loading, a truncated plugin, malformed plugins, a truncated alt file, FIFOs
   under the names of debug files, addresses outside every object, PIE and
-  non-PIE executables, a stripped executable with and without a debug file.
+  non-PIE executables, a stripped executable with and without a debug file
+  and with MiniDebugInfo.
 - `bench/`: a benchmark of the warm per-call cost, the cold resolution cost
   and the resident memory, buildable against any checkout
   (`bench/run_bench.sh`), with a `bench` target behind `BUILD_BENCH=ON`.

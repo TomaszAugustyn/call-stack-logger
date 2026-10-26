@@ -1063,6 +1063,7 @@ call-stack-logger/
 |       |-- separate_debug_lib.cpp  # Instrumented shared lib whose DWARF moves to a .gnu_debuglink file post-build
 |       |-- compressed_debug_lib.cpp # Instrumented shared lib built with -gz=zlib / -gz=zstd (CDL_NAME prefixes the symbols)
 |       |-- debug_objects_traced_program.cpp # Instrumented; calls into the two libraries above
+|       |-- add_minidebuginfo.sh  # Strips a binary the way Fedora does: MiniDebugInfo (.gnu_debugdata) instead of the symbol table
 |       |-- damaged_objects_traced_program.cpp # Instrumented; deleted, planted, truncated and malformed plugin copies, FIFOs under debug-file names, addresses in no object
 |       |-- reload_lib_a.cpp        # Instrumented shared lib, the larger of two loaded one after the other
 |       |-- reload_lib_b.cpp        # Instrumented shared lib, loaded into reload_lib_a's old code segment
@@ -1424,14 +1425,18 @@ binary's own sections, even while the binary still has them — identical data,
 one more open and one CRC pass per object at its first traced call. Pinned by
 `StrippedExecutableTest.StrippedWithDebuglinkResolvesFully`, whose fixture
 calls the helper and then strips. The complementary runtime side: when the
-EXECUTABLE is registered with neither a `.symtab` section (reported by the
-extension's section walk; libbacktrace's own `found_sym` is also true for a
+EXECUTABLE is registered with neither a symbol table of its own (`has_own_symtab`:
+a `.symtab` section or a MiniDebugInfo `.gnu_debugdata` section, both reported by
+the extension's section walk; libbacktrace's own `found_sym` is also true for a
 bare `.dynsym`) nor any DWARF, `ensure_object_loaded()` prints one
 `[call-stack-logger] WARNING` on stderr — the trace would otherwise stay
 empty without explanation. Shared libraries are not reported (system
 libraries come stripped). Pinned by
 `StrippedExecutableTest.StrippedWithoutSymbolsDegradesGracefully`; the
-default build and the debuglink fixture must stay silent.
+default build, the debuglink fixture and the MiniDebugInfo fixture (Fedora's
+way of stripping, made by `tests/integration/add_minidebuginfo.sh`; the
+warning looked for `.symtab` only and said nothing could be named while the
+trace was full of names) must stay silent.
 
 ## Testing
 
@@ -1793,9 +1798,11 @@ Test pure/deterministic functions from the include headers:
   `-fPIE -pie` and with `-fno-pie -no-pie`; both traces must equal the default build's
   line for line (timestamp, duration and address columns aside). Pins the load-bias
   rule (`l_addr`, not `dli_fbase`).
-- `StrippedExecutableTest` (2 tests) — the traced program after `strip --strip-all`
+- `StrippedExecutableTest` (3 tests) — the traced program after `strip --strip-all`
   with a `.gnu_debuglink` debug file next to it, produced by `cslg_keep_debug_info()`
-  before the strip (trace equal to the default build's, no warning) and without one
+  before the strip (trace equal to the default build's, no warning); stripped the way
+  Fedora strips, with MiniDebugInfo (`add_minidebuginfo.sh`, built only where `xz` is
+  installed, else the test skips: names with `:???`, no warning); and without anything
   (exit 0, the bare-executable warning on stderr, a well-formed trace; empty with the
   narrow symbol export, names with `:???` under `-rdynamic` —
   `CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS` tells the test which).

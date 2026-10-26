@@ -3566,6 +3566,35 @@ TEST(StrippedExecutableTest, StrippedWithDebuglinkResolvesFully) {
             << "a warning although the debug file was found:\n" << out;
 }
 
+// A stripped executable with MiniDebugInfo, as Fedora ships its binaries: the
+// symbol table and the debug information are gone, but .gnu_debugdata holds an
+// xz-compressed symbol table of the functions the dynamic symbol table lacks,
+// and libbacktrace reads it. The functions are named (without lines: there is
+// no DWARF), and the bare-executable warning stays silent — it looked for a
+// .symtab section only and told the user nothing could be named. The test
+// requires a static function's name, which no dynamic symbol table holds
+// (not even with -rdynamic), and not a particular line: where a call is
+// attributed depends on the optimizer (Clang 18 inlines func_a into main at
+// -O2, and without DWARF there is no inline chain to place it).
+TEST(StrippedExecutableTest, StrippedWithMiniDebugInfoIsNamedWithoutAWarning) {
+#ifndef MINIDEBUGINFO_PROGRAM_PATH
+    GTEST_SKIP() << "xz is not installed: the MiniDebugInfo fixture was not built";
+#else
+    ASSERT_FALSE(elf_has_section(MINIDEBUGINFO_PROGRAM_PATH, ".symtab"))
+            << "fixture was not stripped: the post-build step did not run";
+    ASSERT_FALSE(elf_has_section(MINIDEBUGINFO_PROGRAM_PATH, ".debug_info"));
+    ASSERT_TRUE(elf_has_section(MINIDEBUGINFO_PROGRAM_PATH, ".gnu_debugdata"));
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(MINIDEBUGINFO_PROGRAM_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_EQ(out.find("[call-stack-logger] WARNING"), std::string::npos)
+            << "a warning although MiniDebugInfo names the functions:\n" << out;
+    EXPECT_NE(trace.find(" file_static_func(int)  (called from: "), std::string::npos)
+            << "MiniDebugInfo did not name the functions. Trace:\n" << trace;
+#endif
+}
+
 // A stripped executable with nothing to fall back on: the program runs to
 // completion, the trace file is well-formed, and the resolver says once on
 // stderr that the executable has no symbol table and no debug information.

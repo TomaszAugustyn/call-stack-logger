@@ -207,16 +207,16 @@ addressResolver::ObjectFile* addressResolver::ensure_object_loaded(const Dl_info
         object.state = bt;
         int has_symtab = 0;
         int has_dwarf = 0;
-        int has_symtab_section = 0;
+        int has_own_symtab = 0;
         if (cslg_backtrace_add_file(bt, path.c_str(), load_bias, &on_backtrace_error, nullptr, &has_symtab,
-                                    &has_dwarf, &has_symtab_section)
+                                    &has_dwarf, &has_own_symtab)
             == 0) {
             object_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
         object.has_symtab = has_symtab != 0;
         object.has_dwarf = has_dwarf != 0;
-        object.has_symtab_section = has_symtab_section != 0;
+        object.has_own_symtab = has_own_symtab != 0;
         // The executable itself with neither a symbol table nor debug
         // information (stripped with `strip --strip-all`, and no separate
         // debug file found through its .gnu_debuglink or build ID): no
@@ -225,7 +225,7 @@ addressResolver::ObjectFile* addressResolver::ensure_object_loaded(const Dl_info
         // warnings, instead of leaving an empty file to puzzle over. Shared
         // libraries without symbols are not reported: system libraries come
         // that way, and their functions are not the ones being traced.
-        if (path == EXECUTABLE_FILE && !object.has_dwarf && !object.has_symtab_section) {
+        if (path == EXECUTABLE_FILE && !object.has_dwarf && !object.has_own_symtab) {
             std::fprintf(stderr,
                          "[call-stack-logger] WARNING: the executable has no symbol table and no debug "
                          "information (stripped, and no .debug file found next to it or under "

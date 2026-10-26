@@ -10,6 +10,8 @@ FROM ubuntu:24.04
 #   configure time (libbacktrace for the library, Google Test for the tests)
 # - git: for user projects that integrate call-stack-logger via
 #   FetchContent_Declare(GIT_REPOSITORY ...)
+# - xz-utils: compresses the MiniDebugInfo of one test fixture (the test
+#   skips without it)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     clang \
@@ -20,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     lcov \
     ca-certificates \
     git \
+    xz-utils \
     locales \
     && rm -rf /var/lib/apt/lists/*
 

@@ -481,6 +481,22 @@ add_custom_command(TARGET cslg_stripped_traced_program POST_BUILD
     COMMAND strip --strip-all $<TARGET_FILE:cslg_stripped_traced_program>
     COMMENT "Stripping cslg_stripped_traced_program entirely")
 
+# And stripped the way Fedora ships binaries: no symbol table and no debug
+# information, but MiniDebugInfo (.gnu_debugdata), which libbacktrace reads.
+# Needs xz; without it the fixture is not built and the test skips.
+find_program(CSLG_XZ_EXECUTABLE xz)
+if(CSLG_XZ_EXECUTABLE)
+    add_executable(cslg_minidebuginfo_traced_program traced_program.cpp)
+    target_compile_features(cslg_minidebuginfo_traced_program PRIVATE cxx_std_17)
+    target_link_libraries(cslg_minidebuginfo_traced_program PRIVATE callstacklogger_instrumented)
+    cslg_apply_sanitizers(cslg_minidebuginfo_traced_program)
+    add_custom_command(TARGET cslg_minidebuginfo_traced_program POST_BUILD
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/add_minidebuginfo.sh
+                $<TARGET_FILE:cslg_minidebuginfo_traced_program> ${CSLG_XZ_EXECUTABLE}
+        COMMENT "Replacing the symbol table of cslg_minidebuginfo_traced_program with MiniDebugInfo"
+        VERBATIM)
+endif()
+
 # The integration test runner executes cslg_traced_test_program and parses output.
 # Compiled WITHOUT instrumentation — just gtest code.
 add_executable(cslg_integration_tests test_integration.cpp)
@@ -527,6 +543,10 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     STRIPPED_DEBUGLINK_PROGRAM_PATH="$<TARGET_FILE:cslg_stripped_debuglink_traced_program>"
     STRIPPED_PROGRAM_PATH="$<TARGET_FILE:cslg_stripped_traced_program>"
 )
+if(CSLG_XZ_EXECUTABLE)
+    target_compile_definitions(cslg_integration_tests PRIVATE
+        MINIDEBUGINFO_PROGRAM_PATH="$<TARGET_FILE:cslg_minidebuginfo_traced_program>")
+endif()
 if(CSLG_HAVE_ZSTD_DEBUG_SECTIONS)
     target_compile_definitions(cslg_integration_tests PRIVATE CSLG_HAVE_ZSTD_DEBUG
         ZSTD_DEBUG_LIB_PATH="$<TARGET_FILE:cslg_zstd_debug_lib>")

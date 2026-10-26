@@ -64,13 +64,18 @@
 /* The size of an ELF note header: namesz, descsz and type, 4 bytes each. */
 #define CSLG_NOTE_HEADER_SIZE 12
 
+/* The section in which MiniDebugInfo — an xz-compressed ELF file holding the
+   symbol table of the functions .dynsym lacks, what Fedora leaves in its
+   stripped binaries — travels. libbacktrace reads it. */
+#define CSLG_MINIDEBUGINFO_SECTION ".gnu_debugdata"
+
 /* What cslg_open_checked() learned from the file it opened last: its
    directory (after symbolic links, as the kernel names the open file) and
-   whether it has a .symtab section. One instance is enough: every
-   registration runs under the resolver's mutex (see the header). */
+   whether it carries a symbol table of its own. One instance is enough:
+   every registration runs under the resolver's mutex (see the header). */
 static struct {
     char directory[PATH_MAX];
-    int has_symtab_section;
+    int has_own_symtab;
 } cslg_last_open;
 
 /* Whether every note in the SHT_NOTE section `shdr` fits the section: its
@@ -120,6 +125,34 @@ static int cslg_notes_fit_section(int descriptor, const b_elf_shdr* shdr,
     return ok;
 }
 
+/* Whether one of the `shnum` section headers in `shdrs` names `name`, read
+   from the section-name table at index `shstrndx` (both already checked by
+   the caller). */
+static int cslg_has_section_named(int descriptor, const b_elf_shdr* shdrs, uint64_t shnum,
+                                  uint64_t shstrndx, const char* name,
+                                  backtrace_error_callback error_callback, void* data) {
+    const b_elf_shdr* names_shdr = &shdrs[shstrndx];
+    const uint64_t name_size = strlen(name) + 1;
+    struct backtrace_view names;
+    uint64_t i;
+    int found = 0;
+
+    if (names_shdr->sh_type == SHT_NOBITS || names_shdr->sh_size == 0) {
+        return 0;
+    }
+    if (!backtrace_get_view(NULL, descriptor, (off_t)names_shdr->sh_offset, names_shdr->sh_size,
+                            error_callback, data, &names)) {
+        return 0;
+    }
+    for (i = 1; i < shnum && !found; ++i) {
+        const uint64_t offset = shdrs[i].sh_name;
+        found = offset < names_shdr->sh_size && names_shdr->sh_size - offset >= name_size
+                && memcmp((const char*)names.data + offset, name, name_size) == 0;
+    }
+    backtrace_release_view(NULL, &names, error_callback, data);
+    return found;
+}
+
 /* libbacktrace maps file ranges with mmap and never compares them with the
    file's size: the section header table or a debug section of a TRUNCATED
    file lies beyond the end of the file, is mapped without complaint and
@@ -135,13 +168,14 @@ static int cslg_notes_fit_section(int descriptor, const b_elf_shdr* shdr,
    object file (see cslg_open_checked). A file that is truncated or rewritten
    AFTER the check, while its views are mapped, can still fault: the check
    cannot cover that. */
-/* Also reports, in *has_symtab_section, whether the file carries a .symtab
-   section of its own (as opposed to only .dynsym): the resolver warns once
-   when the executable has neither that nor debug information, because no
-   function in it can be named then. */
+/* Also reports, in *has_own_symtab, whether the file carries a symbol table
+   of its own, as opposed to only .dynsym: a .symtab section, or MiniDebugInfo
+   (CSLG_MINIDEBUGINFO_SECTION). The resolver warns once when the executable
+   has neither that nor debug information, because no function in it can be
+   named then. */
 static int cslg_elf_layout_fits_file(int descriptor, uint64_t file_size,
                                      backtrace_error_callback error_callback, void* data,
-                                     int* has_symtab_section) {
+                                     int* has_own_symtab) {
     b_elf_ehdr ehdr;
     struct backtrace_view view;
     uint64_t shoff;
@@ -151,7 +185,7 @@ static int cslg_elf_layout_fits_file(int descriptor, uint64_t file_size,
     uint64_t i;
     const char* problem = NULL;
 
-    *has_symtab_section = 0;
+    *has_own_symtab = 0;
     if (pread(descriptor, &ehdr, sizeof ehdr, 0) != (ssize_t)sizeof ehdr) {
         error_callback(data, "ELF header beyond end of file", 0);
         return 0;
@@ -200,7 +234,7 @@ static int cslg_elf_layout_fits_file(int descriptor, uint64_t file_size,
     for (i = 0; i < shnum && problem == NULL; ++i) {
         const b_elf_shdr* shdr = (const b_elf_shdr*)view.data + i;
         if (shdr->sh_type == SHT_SYMTAB) {
-            *has_symtab_section = 1;
+            *has_own_symtab = 1;
         }
         if ((shdr->sh_type == SHT_SYMTAB || shdr->sh_type == SHT_DYNSYM)
             && (shdr->sh_link == 0 || shdr->sh_link >= shnum)) {
@@ -213,6 +247,10 @@ static int cslg_elf_layout_fits_file(int descriptor, uint64_t file_size,
                    && !cslg_notes_fit_section(descriptor, shdr, error_callback, data)) {
             problem = "ELF note larger than its section";
         }
+    }
+    if (problem == NULL && !*has_own_symtab) {
+        *has_own_symtab = cslg_has_section_named(descriptor, (const b_elf_shdr*)view.data, shnum, shstrndx,
+                                                 CSLG_MINIDEBUGINFO_SECTION, error_callback, data);
     }
     backtrace_release_view(NULL, &view, error_callback, data);
     if (problem != NULL) {
@@ -269,7 +307,7 @@ int cslg_open_checked(const char* filename, backtrace_error_callback error_callb
     const char* path = filename;
     struct stat st;
     int descriptor;
-    int has_symtab_section = 0;
+    int has_own_symtab = 0;
 
     if (does_not_exist != NULL) {
         *does_not_exist = 0;
@@ -297,7 +335,7 @@ int cslg_open_checked(const char* filename, backtrace_error_callback error_callb
     }
     if (fstat(descriptor, &st) < 0 || !S_ISREG(st.st_mode)
         || !cslg_elf_layout_fits_file(descriptor, (uint64_t)st.st_size, error_callback, data,
-                                      &has_symtab_section)) {
+                                      &has_own_symtab)) {
         close(descriptor);
         if (does_not_exist != NULL) {
             *does_not_exist = 1;
@@ -305,7 +343,7 @@ int cslg_open_checked(const char* filename, backtrace_error_callback error_callb
         return -1;
     }
     cslg_remember_directory(descriptor, path);
-    cslg_last_open.has_symtab_section = has_symtab_section;
+    cslg_last_open.has_own_symtab = has_own_symtab;
     return descriptor;
 }
 
@@ -332,7 +370,7 @@ struct backtrace_state* cslg_backtrace_create_state(backtrace_error_callback err
 
 int cslg_backtrace_add_file(struct backtrace_state* state, const char* path, uintptr_t load_bias,
                             backtrace_error_callback error_callback, void* data, int* has_symtab,
-                            int* has_dwarf, int* has_symtab_section) {
+                            int* has_dwarf, int* has_own_symtab) {
     int does_not_exist = 0;
     int descriptor;
     struct libbacktrace_base_address base_address;
@@ -343,7 +381,7 @@ int cslg_backtrace_add_file(struct backtrace_state* state, const char* path, uin
 
     *has_symtab = 0;
     *has_dwarf = 0;
-    *has_symtab_section = 0;
+    *has_own_symtab = 0;
     /* The object file's own path is absolute (the resolver passes no other):
        it starts the chain of directories relative alt links are read from. */
     cslg_last_open.directory[0] = '\0';
@@ -351,7 +389,7 @@ int cslg_backtrace_add_file(struct backtrace_state* state, const char* path, uin
     if (descriptor < 0) {
         return 0;
     }
-    *has_symtab_section = cslg_last_open.has_symtab_section;
+    *has_own_symtab = cslg_last_open.has_own_symtab;
     /* The base libbacktrace adds to every address it reads from the file is
        the loader's load bias (link_map::l_addr, what dl_iterate_phdr reports
        as dlpi_addr): 0 for a non-PIE executable, the map start for a PIE or a

@@ -271,9 +271,11 @@ The resolver reads names from the symbol table and lines from the DWARF data of 
 loaded object file. A binary stripped with `strip --strip-all` (which is what a plain
 `strip` and `cmake --install --strip` do) has neither left, so none of its functions can
 be named and its trace stays empty; the library then prints one warning on `stderr` at
-the first traced call. The remedy is the one distributions use: keep the debug
-information in a separate file and leave a link to it in the binary. Call the helper on
-your executable target:
+the first traced call. (A binary stripped the way Fedora's packages are keeps its
+function names in a compressed MiniDebugInfo section, `.gnu_debugdata`, which the
+resolver reads: no warning then, names without lines.) The remedy is the one
+distributions use: keep the debug information in a separate file and leave a link to
+it in the binary. Call the helper on your executable target:
 
 ```cmake
 add_executable(my_app main.cpp)
