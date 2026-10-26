@@ -26,7 +26,8 @@ namespace {
 // constructor), and DWARF names that helper as the innermost function there.
 // A frame of get_call_stack() is named after the OUTERMOST function at its
 // return address, so the frame still reads "api_leaf"; run_checks.sh requires
-// it. Before that rule the frame read as the __normal_iterator constructor.
+// it. (Releases before v1.0.0 named it after the innermost function, and the
+// frame read as the __normal_iterator constructor.)
 __attribute__((noinline)) void api_leaf() {
     for (const auto& frame : instrumentation::get_call_stack()) {
         if (frame) {

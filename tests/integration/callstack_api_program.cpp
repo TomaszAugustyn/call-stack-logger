@@ -47,9 +47,9 @@
 // helper as the innermost function at the address. get_call_stack() names a
 // frame after the OUTERMOST function at its return address, so the frame still
 // reads "print_stack_from_leaf" — which the test asserts, making this shape
-// the regression pin. (Before that rule the resolver took the innermost
-// function, and printing had to live in a separate noinline function so that
-// the resume point stayed in the leaf's own code.)
+// the regression pin. (Releases before v1.0.0 took the innermost function,
+// and printing had to live in a separate noinline function so that the
+// resume point stayed in the leaf's own code.)
 __attribute__((noinline)) void print_stack_from_leaf() {
     for (const auto& maybe : instrumentation::get_call_stack()) {
         if (maybe.has_value()) {
@@ -83,7 +83,8 @@ __attribute__((noinline)) void callstack_top() {
 // The worker leaf builds its ostringstream in place, right after the
 // get_call_stack() call, ON PURPOSE: at -O2 the inlined ostringstream
 // constructor is the innermost DWARF function at the leaf's resume point
-// (std::basic_ios::basic_ios()), and the frame used to be named after it. With
+// (std::basic_ios::basic_ios()), and releases before v1.0.0 named the frame
+// after it. With
 // frames named after the outermost function at the return address the frame
 // reads "worker_stack_leaf", which the test asserts — the second regression pin
 // of that rule, on a worker thread.

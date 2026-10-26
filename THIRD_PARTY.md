@@ -8,37 +8,22 @@ The classification follows the licenses' own texts and the usual industry
 reading of them; it is not legal advice, and a lawyer should confirm it before
 the first commercial sale.
 
-## What changed for shipped builds
+## Components
 
-Up to the commit before this file was added, the library resolved addresses
-with libbfd, the "Binary File Descriptor" library of GNU binutils. libbfd is
-licensed under the GNU GPL, version 3 or later. On Ubuntu it is a shared
-library (`libbfd-2.42-system.so` on 24.04) that every instrumented program
-listed as `NEEDED`; on Fedora it is a static archive, and 57 of its object
-files, 25 of libiberty's and one of libsframe's were copied into every
-instrumented program. Either way a shipped program contained GPL code, so the
-whole program had to be offered under the GPL, and a commercial license for
-Call Stack Logger — which can only cover Call Stack Logger's own code — could
-not change that. Using the library in-house, in debug builds that are never
-distributed, never created an obligation; distribution did.
-
-From this change on, addresses are resolved with libbacktrace, which is
-licensed under a 3-clause BSD license. It is compiled from source into the
-library, and the only other components a program needs are the C and C++
-runtime libraries of the system, which carry permissive terms, weak-copyleft
-terms that dynamic linking satisfies, or the GCC Runtime Library Exception. A
-closed-source product can therefore ship an instrumented diagnostic build
-under the commercial license, with the notices listed below and nothing else.
-`binutils-dev` / `binutils-devel` / `libzstd-devel` are no longer needed to
-build.
-
-## Components after this change
+Since v1.0.0, addresses are resolved with libbacktrace, which is licensed under
+a 3-clause BSD license. It is compiled from source into the library, and the
+only other components a program needs are the C and C++ runtime libraries of
+the system, which carry permissive terms, weak-copyleft terms that dynamic
+linking satisfies, or the GCC Runtime Library Exception. A closed-source
+product can therefore ship an instrumented diagnostic build under the
+commercial license, with the notices listed below and nothing else. Building
+the library needs no binutils, zlib or zstd development package.
 
 | Component | Used for | License | How it is linked | Notice obligation |
 | --- | --- | --- | --- | --- |
 | Call Stack Logger | the tracer itself | AGPL-3.0 or a commercial license | static library `libcallstacklogger.a` | AGPL: source of the whole program; commercial: per the agreement |
-| libbacktrace (Ian Lance Taylor; commit `0b9b49cf4a2c9229fc052d6716e1528b2f23e91a` of 3 September 2026) | reading the symbol tables and the DWARF debug information of the loaded object files: function names, file and line, inline chains, separate debug files, zlib/zstd-compressed debug sections | BSD-3-Clause (**permissive**) | compiled from source into `libcallstacklogger.a`, symbols hidden; only the C sources, the headers and `LICENSE` of the repository are used — its GPL-licensed autotools helper files (`configure`, `config.guess`, `ltmain.sh`, ...) are not | keep the copyright notice, the license conditions and the disclaimer in the documentation or other materials that come with a binary distribution (the text is at the end of this file and in `third_party/libbacktrace/LICENSE`); do not use the author's name to endorse a product |
-| glibc: `libc.so.6`, `libm.so.6`, the dynamic loader (`libdl` and `libpthread` are part of `libc` since glibc 2.34) | C library, `dladdr`, `dl_iterate_phdr`, threads | LGPL-2.1-or-later with smaller parts under BSD and other permissive terms (**weak copyleft**, and a system library) | dynamic (`NEEDED`) | none in practice: the LGPL's requirement that the user can relink against a modified library is met by dynamic linking; nothing of glibc is copied into the program |
+| libbacktrace (written by Ian Lance Taylor, copyright Free Software Foundation, Inc.; commit `0b9b49cf4a2c9229fc052d6716e1528b2f23e91a` of 3 September 2026) | reading the symbol tables and the DWARF debug information of the loaded object files: function names, file and line, inline chains, separate debug files, zlib/zstd-compressed debug sections | BSD-3-Clause (**permissive**) | compiled from source into `libcallstacklogger.a`, symbols hidden; only the C sources, the headers and `LICENSE` of the repository are used — its GPL-licensed autotools helper files (`configure`, `config.guess`, `ltmain.sh`, ...) are not | keep the copyright notice, the license conditions and the disclaimer in the documentation or other materials that come with a binary distribution (the text is at the end of this file and in `third_party/libbacktrace/LICENSE`); do not use the author's name to endorse a product |
+| glibc: `libc.so.6`, `libm.so.6`, the dynamic loader (`libdl` and `libpthread` are part of `libc` since glibc 2.34) | C library, `dladdr1`, threads | LGPL-2.1-or-later with smaller parts under BSD and other permissive terms (**weak copyleft**, and a system library) | dynamic (`NEEDED`) | none in practice: the LGPL's requirement that the user can relink against a modified library is met by dynamic linking; nothing of glibc is copied into the program |
 | libstdc++ (`libstdc++.so.6`) | C++ standard library, `__cxa_demangle`, the exception runtime | GPL-3.0-or-later **with the GCC Runtime Library Exception, version 3.1** | dynamic (`NEEDED`) | none: the exception grants permission to distribute programs compiled with GCC or Clang that use the runtime library without GPL obligations on the program. A reader who sees "GPL" next to libstdc++ need not worry — this is the same situation as for every C++ program on Linux |
 | libgcc (`libgcc_s.so.1`) | the compiler's runtime support, stack unwinding | GPL-3.0-or-later **with the GCC Runtime Library Exception, version 3.1** | dynamic (`NEEDED`) | none, as for libstdc++ |
 | Google Test 1.14.0 | the test suite (`BUILD_TESTS=ON`, top-level builds only) | BSD-3-Clause (**permissive**) | downloaded at configure time, linked into the test executables only; not part of the library or of any user program | none for shipped programs; the notice applies only to a distribution of the test executables |
@@ -47,12 +32,24 @@ Headers included by the library's own translation units from outside the C++
 standard library and glibc: `backtrace.h` of libbacktrace (private; the public
 header `include/callStack.h` includes no third-party header).
 
-## Components before this change (for comparison)
+## Licensing history: releases before v1.0.0 used libbfd
 
-The same program linked with the previous release, measured with a sample
-program built with `callstacklogger::instrumented`, `LOG_ELAPSED=ON` and
-`LOG_EXCEPTIONS=ON`, in Release and Debug (the link sets were the same in
-both), on 24 October 2026:
+Releases before v1.0.0 resolved addresses with libbfd, the "Binary File
+Descriptor" library of GNU binutils, which is licensed under the GNU GPL,
+version 3 or later. On Ubuntu it is a shared library (`libbfd-2.42-system.so`
+on 24.04) that every instrumented program listed as `NEEDED`; on Fedora it is a
+static archive, and 57 of its object files, 25 of libiberty's and one of
+libsframe's were copied into every instrumented program. Either way a shipped
+program contained GPL code, so the whole program had to be offered under the
+GPL, and a commercial license for Call Stack Logger — which can only cover Call
+Stack Logger's own code — could not change that. Using those releases in-house,
+in debug builds that are never distributed, never created an obligation;
+distribution did.
+
+What a program built with the last of those releases contained, measured with a
+sample program built with `callstacklogger::instrumented`, `LOG_ELAPSED=ON` and
+`LOG_EXCEPTIONS=ON`, in Release and Debug (the link sets were the same in both),
+on 24 October 2026:
 
 - Fedora 44 (GCC 16.2.1, binutils-devel 2.46.1, glibc 2.43):
   `readelf -d` listed `libz.so.1`, `libzstd.so.1`, `libstdc++.so.6`,
@@ -74,11 +71,8 @@ both), on 24 October 2026:
 | binutils headers `bfd.h`, `ansidecl.h`, `symcat.h`, `diagnostics.h` | included by the library's translation units and, through the public header `callStack.h`, by every consumer translation unit that included it | GPL-3.0-or-later | compile time | the public header required `binutils-dev` on every consumer's machine |
 | glibc, libstdc++, libgcc, Google Test | as above | as above | as above | as above |
 
-Expectation stated for this audit, checked against the installed packages:
-libbfd was indeed the only strong-copyleft dependency; it brought libiberty
-(the GPL/LGPL mix above), libsframe (GPL) and the two compression libraries
-with it. One correction to the expectation: zlib is under the Zlib license,
-not dual-licensed; the dual BSD-3-Clause / GPL-2.0 license is zstd's.
+libbfd was the only strong-copyleft dependency of those releases; libiberty,
+libsframe and the two compression libraries came with it.
 
 ## Sources of the license statements
 

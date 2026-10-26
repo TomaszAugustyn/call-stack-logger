@@ -30,7 +30,8 @@
    changes then, this file fails to compile instead of misbehaving.
 
    The cleaner long-term route is a public backtrace_add_module() in
-   libbacktrace itself; the hand-over of this change carries a proposal. */
+   libbacktrace itself, which would leave only the layout check below in
+   this file. */
 
 #include "config.h"
 

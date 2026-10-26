@@ -300,7 +300,7 @@ The exported symbols are the two hooks, `__cyg_profile_func_enter` and
 plus the five interposed runtime entry points with `LOG_EXCEPTIONS`. They are exported
 one by one with `--export-dynamic-symbol`; with a linker that lacks the option (GNU ld
 before binutils 2.35) or with `-DCSLG_EXPORT_ALL_SYMBOLS=ON`, `-rdynamic` exports every
-symbol instead, as earlier versions did.
+symbol instead, as releases before v1.0.0 did.
 
 Trace files are opened lazily on each thread's first traced call, so a program
 that links the plain library only for `get_call_stack()` never creates a trace
@@ -894,7 +894,7 @@ of tail position.)
 outermost function of the inline chain at the frame's return address. At `-O2` the
 instruction a call returns to often belongs to a helper inlined right after the call,
 such as a vector's iterator constructor after `get_call_stack()` itself; naming by the
-innermost function there, as earlier versions did, called the frame after that helper.
+innermost function there, as releases before v1.0.0 did, called the frame after that helper.
 
 ## :bug: Sanitizers ##
 

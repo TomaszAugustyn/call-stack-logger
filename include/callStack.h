@@ -192,7 +192,8 @@ private:
 
     /// The name of the function containing the address — the innermost or the
     /// outermost of DWARF's inline chain, per `name_of` — chosen as BFD's
-    /// bfd_find_nearest_line() chose it, so that the trace reads as before:
+    /// bfd_find_nearest_line() chose it (the resolver of releases before
+    /// v1.0.0), so that the printed names stay what they were with libbfd:
     /// the DWARF linkage name when there is one, otherwise the symbol table's
     /// name (which carries the mangled parameter list for a static function,
     /// an anonymous-namespace function or a lambda), unless that only repeats

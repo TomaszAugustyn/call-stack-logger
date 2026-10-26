@@ -117,7 +117,8 @@ Address resolution happens in stages (implemented in `src/callStack.cpp`):
    never `dli_fbase`. The two coincide for PIEs and shared objects and differ
    for a non-PIE executable (bias 0, map start 0x400000), where every lookup
    with `dli_fbase` would miss. Pinned by `PieTest`.
-   **What libbacktrace reports, and the mapping onto the old BFD answers**
+   **What libbacktrace reports, and the mapping onto libbfd's answers (the
+   resolver of releases before v1.0.0)**
    (`look_up()` + `function_name_of()`): `backtrace_pcinfo` calls back once per
    function containing the address, innermost first (an inlined copy, then
    each function it was inlined into; each entry's file:line is the position
@@ -140,13 +141,14 @@ Address resolution happens in stages (implemented in `src/callStack.cpp`):
    non-zero line; otherwise the frame degrades to the function name with
    `:???`, then to the dynamic symbol's name, then to `<unknown function>`.
    Nothing in the file names the address and no dynamic symbol → the callee is
-   not loggable (dropped), as before. Retired texts: `<bfd_error>`,
+   not loggable (dropped), as with libbfd. Texts libbfd-era releases printed and
+   v1.0.0 no longer does: `<bfd_error>`,
    `name <bfd_error>`, `<no sections in object file>`, `<not sectioned
    address>`. Where libbacktrace's symbol search differs from BFD's raw walk:
    it only knows FUNC/OBJECT symbols with a size (a zero-size assembler label
    is not found; BFD treated it as one byte), it ignores STT_FILE symbols (BFD
    used them as the "file" of a static function without DWARF, so such a
-   frame used to read `file.cpp:???` and now reads `func:???`, which is what
+   frame read `file.cpp:???` with libbfd and reads `func:???` with libbacktrace, which is what
    the README always said), and it reads `.dynsym` when `.symtab` is absent
    (BFD did not, hence the vanished ` <bfd_error>` suffix on names taken from
    the dynamic symbol table) and MiniDebugInfo (`.gnu_debugdata`; libstdc++'s
