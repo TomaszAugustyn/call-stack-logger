@@ -35,6 +35,15 @@ set(CSLG_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "The call-sta
 set(DISABLE_INSTRUMENTATION ON CACHE BOOL "" FORCE)
 add_subdirectory(${CSLG_SOURCE_DIR} call-stack-logger)
 
+# The checks find the programs at the top of the build tree, whatever the
+# generator: a multi-config one (Ninja Multi-Config, Visual Studio, Xcode)
+# would put them under <config>/.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
+    string(TOUPPER "${config}" config)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${config} "${CMAKE_BINARY_DIR}")
+endforeach()
+
 add_executable(with_target program.cpp)
 target_link_libraries(with_target PRIVATE callstacklogger::instrumented)
 

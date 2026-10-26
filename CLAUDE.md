@@ -1023,7 +1023,7 @@ call-stack-logger/
 |   |-- disabled/
 |   |   |-- CMakeLists.txt      # Consumer project: one program with callstacklogger::instrumented, one without
 |   |   |-- program.cpp
-|   |   |-- compare_binaries.sh # NEEDED libraries, debug sections and exported symbols must match
+|   |   |-- compare_binaries.sh # The two programs must be identical byte for byte (lists NEEDED, debug sections, exports on a difference)
 |   |   |-- api_program.cpp     # Links the plain target; get_call_stack() must still name its ancestors
 |   |   |-- run_checks.sh       # Runs compare_binaries.sh, then api_program (what ctest executes)
 |   |-- unit/
@@ -1830,15 +1830,19 @@ Test pure/deterministic functions from the include headers:
 - `cslg_disabled_instrumentation_is_inert` (ctest, only with `DISABLE_INSTRUMENTATION=ON`)
   — `ctest --build-and-test` configures `tests/disabled/` as a Release consumer project
   (with `FETCHCONTENT_SOURCE_DIR_CSLG_LIBBACKTRACE` pointing at the already-downloaded
-  sources) and runs `run_checks.sh`: first `compare_binaries.sh` on the program built
-  with and without `callstacklogger::instrumented` (NEEDED libraries, debug sections and
-  exported symbols must match), then `api_program`, which links
-  `callstacklogger::callstacklogger` and must name `api_leaf`, `api_middle` and `main`
-  in its `get_call_stack()` output — the API keeps working with the hooks compiled
-  out, it only has to be linked explicitly. The program prints from a separate
-  `noinline` function like the integration API driver: at -O2 the instruction after
-  the `get_call_stack()` call can sit in an inlined std helper, which DWARF then names
-  as the innermost function at the leaf's return address.
+  sources; `--build-config Release`, and the programs at the top of the build tree
+  whatever the generator, multi-config ones included) and runs `run_checks.sh`: first
+  `compare_binaries.sh` on the program built with and without
+  `callstacklogger::instrumented`, which must be identical byte for byte (both files
+  must exist and be ELF files; on a difference the script lists the NEEDED libraries,
+  debug sections and exported symbols of both), then `api_program`, which links
+  `callstacklogger::callstacklogger` and must print a line starting with
+  `(anonymous namespace)::api_leaf()  (called from: `, one for `api_middle` and one for
+  `main  (called from: ` — a bare "main" would also match `__libc_start_call_main`'s
+  frame. The API keeps working with the hooks compiled out, it only has to be linked
+  explicitly. The leaf prints its frames right after the `get_call_stack()` call on
+  purpose: at -O2 that return address lies in an inlined std helper, and the frame must
+  still be named after `api_leaf`, the outermost function there.
 - `LogElapsedCombinedFlagsTest` fixture (4 tests) runs the both-flags
   variant `cslg_traced_test_program_log_elapsed_addr`. Asserts the
   ordering "timestamp → duration → addr" via regex, the tree column stays

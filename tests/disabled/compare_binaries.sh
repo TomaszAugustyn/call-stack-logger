@@ -1,18 +1,33 @@
 #!/bin/sh
 # Compares two executables built from the same source — one with
 # callstacklogger::instrumented in its link line, one without — under
-# DISABLE_INSTRUMENTATION=ON. They must agree on:
+# DISABLE_INSTRUMENTATION=ON. The target must contribute nothing, so the two
+# files must be identical byte for byte. When they are not, the script says
+# where they differ in the ways the target could make them differ:
 #   - the shared libraries they need (readelf -d, NEEDED entries),
 #   - the debug sections they contain (readelf -S, .debug_* names),
-#   - the symbols they export (nm -D, defined dynamic symbols).
-# Any difference means the target still contributes something (a library,
-# -g, exported hooks) and the script exits 1 with the differing lists.
+#   - the symbols they export (nm -D, defined dynamic symbols),
+# and exits 1. Both files must exist and be ELF files: a missing program
+# would otherwise yield two empty lists, which agree.
 #
 # usage: compare_binaries.sh <with_target> <without_target>
 set -u
 with=$1
 without=$2
 status=0
+
+for program in "$with" "$without"; do
+    if [ ! -f "$program" ] || ! readelf -h "$program" > /dev/null 2>&1; then
+        echo "not an ELF file: $program"
+        exit 1
+    fi
+done
+if cmp -s "$with" "$without"; then
+    echo "the two programs are identical byte for byte"
+    echo "callstacklogger::instrumented is inert with DISABLE_INSTRUMENTATION=ON"
+    exit 0
+fi
+echo "the two programs differ:"
 
 needed() { readelf -d "$1" | grep NEEDED | sed 's/.*Shared library: //' | sort; }
 debug_sections() { readelf -S -W "$1" | grep -o '\.debug_[a-z_]*' | sort -u; }
@@ -35,8 +50,4 @@ compare() {
 compare "NEEDED libraries" needed
 compare "debug sections" debug_sections
 compare "exported dynamic symbols" exported
-
-if [ $status -eq 0 ]; then
-    echo "callstacklogger::instrumented is inert with DISABLE_INSTRUMENTATION=ON"
-fi
-exit $status
+exit 1

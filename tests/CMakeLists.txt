@@ -48,7 +48,7 @@ if(DISABLE_INSTRUMENTATION)
     # built as its own Release project, as a user's project would be, so that
     # this tree's own compiler flags do not level the two builds.
     add_test(NAME cslg_disabled_instrumentation_is_inert
-        COMMAND ${CMAKE_CTEST_COMMAND} --build-and-test
+        COMMAND ${CMAKE_CTEST_COMMAND} --build-config Release --build-and-test
             ${CMAKE_CURRENT_SOURCE_DIR}/disabled
             ${CMAKE_CURRENT_BINARY_DIR}/disabled-check
             --build-generator ${CMAKE_GENERATOR}
