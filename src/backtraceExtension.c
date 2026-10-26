@@ -27,7 +27,8 @@
    CMakeLists.txt). The dependency is on elf_add()'s signature, which may
    change in a later libbacktrace; the copy is pinned to one commit, so
    nothing changes until it is updated deliberately, and if the signature
-   changes then, this file fails to compile instead of misbehaving.
+   changes then, this file fails to compile instead of misbehaving (the
+   static assertions after the include pin every type it relies on).
 
    The cleaner long-term route is a public backtrace_add_module() in
    libbacktrace itself, which would leave only the layout check below in
@@ -55,6 +56,27 @@
 #include "elf.c"
 #undef backtrace_open
 #define backtrace_open cslg_vendored_backtrace_open
+
+/* The internals of elf.c this file uses, with the exact types it uses them
+   with. libbacktrace is compiled with its warnings off (-w): a later version
+   that changed the number of elf_add()'s parameters would still fail to
+   compile, but one that changed a parameter's type, or the type of a handler
+   stored into the state, could otherwise compile with nothing but a silenced
+   warning and misbehave. These fail the build instead. */
+#define CSLG_HAS_TYPE(expression, type) __builtin_types_compatible_p(__typeof__(expression), type)
+_Static_assert(CSLG_HAS_TYPE(&elf_add,
+                             int (*)(struct backtrace_state*, const char*, int, const unsigned char*, size_t,
+                                     struct libbacktrace_base_address, struct elf_ppc64_opd_data*,
+                                     backtrace_error_callback, void*, fileline*, int*, int*,
+                                     struct dwarf_data**, int, int, const char*, uint32_t)),
+               "elf_add() changed: review cslg_backtrace_add_file() against the new libbacktrace");
+_Static_assert(CSLG_HAS_TYPE(&elf_nodebug, fileline), "elf_nodebug() is no longer a fileline handler");
+_Static_assert(CSLG_HAS_TYPE(&elf_nosyms, syminfo), "elf_nosyms() is no longer a syminfo handler");
+_Static_assert(CSLG_HAS_TYPE(&elf_syminfo, syminfo), "elf_syminfo() is no longer a syminfo handler");
+_Static_assert(CSLG_HAS_TYPE(((struct backtrace_state*)0)->fileline_fn, fileline),
+               "backtrace_state::fileline_fn changed");
+_Static_assert(CSLG_HAS_TYPE(((struct backtrace_state*)0)->syminfo_fn, syminfo),
+               "backtrace_state::syminfo_fn changed");
 
 /* backtrace_create_state()'s flag for a state used by several threads (its
    FLAGS argument is a bit mask; libbacktrace has no name for the bit). */
