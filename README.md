@@ -328,7 +328,10 @@ release build with the target in its link line is the same binary as one that ne
 the library (the test suite compares the two). The `__cyg_profile_func_enter/exit` hooks
 compile out entirely. A program that calls the on-demand
 [`get_call_stack()`](#on-demand-call-stack-capture) API in such a build links
-`callstacklogger::callstacklogger` for it explicitly.
+`callstacklogger::callstacklogger` for it explicitly. `cslg_keep_debug_info()` is not
+tied to the option: called on a target, it still writes the `.debug` file and adds the
+`.gnu_debuglink`, which such a program needs once its binary is stripped. Leave the call
+out of a build that must stay byte-identical to one without the library.
 
 ### Selective instrumentation ###
 
