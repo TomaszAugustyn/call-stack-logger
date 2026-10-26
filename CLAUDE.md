@@ -50,14 +50,22 @@ Address resolution happens in stages (implemented in `src/callStack.cpp`):
    pinned to one commit, see `THIRD_PARTY.md`) - Reads the ELF symbol table and
    the DWARF debug information (versions 2 to 5, zlib- and zstd-compressed
    sections, separate debug files through `.gnu_debuglink` and build IDs,
-   MiniDebugInfo). ONE threaded state for the process; every object file is
-   registered with it ONCE, at first sight of an address inside it, through
-   `cslg_backtrace_add_file(state, path, load_bias)` in
-   `src/backtraceExtension.c`. After that, `backtrace_pcinfo()` and
-   `backtrace_syminfo()` take RUNTIME addresses as they are and answer for every
-   registered object. The per-object cache `objects()` (keyed by `dli_fbase`)
-   remembers which objects are registered and whether they brought a symbol
-   table and DWARF; `object_load_failed()` is the negative cache.
+   MiniDebugInfo). Every object file gets a threaded STATE OF ITS OWN, created
+   and registered ONCE, at first sight of an address inside it, through
+   `cslg_backtrace_create_state()` and `cslg_backtrace_add_file(state, path,
+   load_bias)` in `src/backtraceExtension.c`. After that, `backtrace_pcinfo()`
+   and `backtrace_syminfo()` on that state take RUNTIME addresses as they are.
+   The per-object cache `objects()` (keyed by `dli_fbase`) holds each object's
+   state and whether it brought a symbol table and DWARF;
+   `object_load_failed()` is the negative cache. One state for the whole
+   process was the first design and broke after `dlclose()` + `dlopen()`:
+   libbacktrace keeps every registered module in one chain and answers with
+   the first match, so a library loaded into part of an unloaded one's
+   address range (a smaller library lands at the top of the freed hole, at a
+   different base) got the unloaded library's names and lines, where libbfd,
+   with one handle per object, named it right. Per-object states also spare
+   each cold lookup the walk over every module. Pinned by
+   `DlopenReloadTest.LibraryLoadedIntoAnUnloadedOnesRangeIsNamedAfterItself`.
    Why the public API alone was not enough: `backtrace_create_state(filename, …)`
    treats `filename` as THE EXECUTABLE and discovers every other module once,
    on the first lookup, through `dl_iterate_phdr`, re-opening each by the name
@@ -1032,6 +1040,9 @@ call-stack-logger/
 |       |-- compressed_debug_lib.cpp # Instrumented shared lib built with -gz=zlib / -gz=zstd (CDL_NAME prefixes the symbols)
 |       |-- debug_objects_traced_program.cpp # Instrumented; calls into the two libraries above
 |       |-- damaged_objects_traced_program.cpp # Instrumented; a deleted plugin, a truncated plugin, addresses in no object
+|       |-- reload_lib_a.cpp        # Instrumented shared lib, the larger of two loaded one after the other
+|       |-- reload_lib_b.cpp        # Instrumented shared lib, loaded into reload_lib_a's old code segment
+|       |-- dlopen_reload_traced_program.cpp # Instrumented; loads, calls, unloads lib a, then loads lib b (re-execs without ASLR)
 |       |-- test_integration.cpp # All integration tests (single/multi-threaded + API)
 |-- misc/
 |   |-- call-stack-logger-capture.gif      # Original demo capture (kept for reference)
@@ -1071,7 +1082,7 @@ replacement) with:
   (a `dladdr1` result plus the load bias, taken outside the mutex)
 - Static methods: `ensure_object_loaded()`, `query_address()`, `resolve()`, `innermost_base_name()`,
   `resolve_function_name()`, `resolve_filename_and_line()`, `look_up()`,
-  `function_name_of()`, `state()`, `get_argv0()`, `object_file_path()`,
+  `function_name_of()`, `get_argv0()`, `object_file_path()`,
   `mapped_object_path()`
 - Static state behind lazily-initialized function-local-static accessors —
   `objects()` (registered object files), `object_load_failed()` (negative cache),
@@ -1184,8 +1195,7 @@ The core implementation. Key functions:
 - `demangle_cxa()` - Wraps `abi::__cxa_demangle` with RAII
 - `collect_pcinfo()` / `collect_syminfo()` - The C callbacks libbacktrace invokes
   (copy the strings, catch everything)
-- `addressResolver::state()` - The libbacktrace state, created on first use under the mutex
-- `addressResolver::ensure_object_loaded()` - Registers the object file at its load bias once, caches by `dli_fbase`
+- `addressResolver::ensure_object_loaded()` - Creates the object's own libbacktrace state and registers the object file at its load bias once, caches by `dli_fbase`
 - `addressResolver::query_address()` - `dladdr1(RTLD_DL_LINKMAP)`: the `Dl_info` plus `link_map::l_addr`, outside the mutex
 - `addressResolver::look_up()` - `backtrace_pcinfo` (innermost first) + `backtrace_syminfo` for one address
 - `addressResolver::function_name_of()` - BFD's name rule: DWARF linkage name, else the symbol table's name unless it only repeats the DWARF name or adds a clone suffix
@@ -1732,6 +1742,15 @@ Test pure/deterministic functions from the include headers:
   headers are gone) → the same texts and exit 0 — the file-size guard in
   `backtraceExtension.c` is what keeps this from a SIGBUS; addresses in no object
   (`0x1`, a heap block) through the public `resolve()` → `<address to object not found>`.
+- `DlopenReloadTest.LibraryLoadedIntoAnUnloadedOnesRangeIsNamedAfterItself` —
+  `cslg_dlopen_reload_traced_program` loads `cslg_reload_lib_a`, calls into it (so it is
+  registered), unloads it, reserves the old library's non-code tail with a temporary
+  `MAP_FIXED_NOREPLACE` mapping and loads the smaller `cslg_reload_lib_b`, which then
+  lands inside a's old code segment at another base; b's frames must carry b's names.
+  The driver re-executes itself once without address randomization (an uninstrumented
+  constructor sets `ADDR_NO_RANDOMIZE`), and the test skips when b did not land inside
+  a's old code (`RELOAD_OVERLAP=0`, e.g. where seccomp refuses the personality call).
+  Fails with one shared libbacktrace state (b named `reload_a_pad…`).
 - `PieTest.PieAndNonPieExecutablesResolveAlike` — `traced_program.cpp` built with
   `-fPIE -pie` and with `-fno-pie -no-pie`; both traces must equal the default build's
   line for line (timestamp, duration and address columns aside). Pins the load-bias

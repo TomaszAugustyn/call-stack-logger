@@ -386,6 +386,25 @@ if(CSLG_HAVE_ZSTD_DEBUG_SECTIONS)
 endif()
 cslg_apply_sanitizers(cslg_debug_objects_traced_program)
 
+# Two instrumented plugins for the reload case: the larger reload_lib_a is
+# loaded, called and unloaded, then the smaller reload_lib_b lands in part of
+# its old address range at a different base; b's frames must be named after b
+# (see DlopenReloadTest). Loaded at runtime only, like the other plugins.
+add_library(cslg_reload_lib_a SHARED reload_lib_a.cpp)
+target_compile_features(cslg_reload_lib_a PRIVATE cxx_std_17)
+target_compile_options(cslg_reload_lib_a PRIVATE ${INSTRUMENT_FLAGS} -g)
+add_library(cslg_reload_lib_b SHARED reload_lib_b.cpp)
+target_compile_features(cslg_reload_lib_b PRIVATE cxx_std_17)
+target_compile_options(cslg_reload_lib_b PRIVATE ${INSTRUMENT_FLAGS} -g)
+add_executable(cslg_dlopen_reload_traced_program dlopen_reload_traced_program.cpp)
+target_compile_features(cslg_dlopen_reload_traced_program PRIVATE cxx_std_17)
+target_compile_definitions(cslg_dlopen_reload_traced_program PRIVATE
+    RELOAD_LIB_A_PATH="$<TARGET_FILE:cslg_reload_lib_a>"
+    RELOAD_LIB_B_PATH="$<TARGET_FILE:cslg_reload_lib_b>")
+target_link_libraries(cslg_dlopen_reload_traced_program PRIVATE callstacklogger_instrumented)
+add_dependencies(cslg_dlopen_reload_traced_program cslg_reload_lib_a cslg_reload_lib_b)
+cslg_apply_sanitizers(cslg_dlopen_reload_traced_program)
+
 # Object files the resolver cannot read (deleted after loading, truncated) and
 # addresses outside every object; reuses the dlopen plugin as the victim (see
 # DamagedObjectTest).
@@ -478,6 +497,7 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     SEPARATE_DEBUG_LIB_PATH="$<TARGET_FILE:cslg_separate_debug_lib>"
     ZLIB_DEBUG_LIB_PATH="$<TARGET_FILE:cslg_zlib_debug_lib>"
     DAMAGED_OBJECTS_PROGRAM_PATH="$<TARGET_FILE:cslg_damaged_objects_traced_program>"
+    DLOPEN_RELOAD_PROGRAM_PATH="$<TARGET_FILE:cslg_dlopen_reload_traced_program>"
     TRACED_PROGRAM_PIE_PATH="$<TARGET_FILE:cslg_traced_test_program_pie>"
     TRACED_PROGRAM_NOPIE_PATH="$<TARGET_FILE:cslg_traced_test_program_nopie>"
     STRIPPED_DEBUGLINK_PROGRAM_PATH="$<TARGET_FILE:cslg_stripped_debuglink_traced_program>"

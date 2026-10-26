@@ -41,9 +41,9 @@ namespace instrumentation {
  *
  * Every object file the program has loaded (the executable, its shared
  * libraries, dlopen()ed plugins) is registered once, at first sight of an
- * address inside it, with one libbacktrace state at the object's runtime load
- * bias; the state then answers symbol-table and DWARF lookups for runtime
- * addresses directly. The object behind an address comes from dladdr and
+ * address inside it, with a libbacktrace state of its own at the object's
+ * runtime load bias; that state then answers symbol-table and DWARF lookups
+ * for runtime addresses inside the object directly. The object behind an address comes from dladdr and
  * /proc/self/maps. For the use of dladdr see also:
  * https://sourceware.org/git/?p=glibc.git;a=blob;f=debug/backtracesyms.c
  */
@@ -52,9 +52,14 @@ public:
     /// What the resolver knows about one registered object file (an entry of
     /// objects(), keyed by the object's dli_fbase).
     struct ObjectFile {
-        /// link_map::l_addr — the base libbacktrace adds to the file's
-        /// addresses. 0 for a non-PIE executable, the map start otherwise.
-        uintptr_t load_bias = 0;
+        /// The libbacktrace state holding this object's symbol table and DWARF
+        /// data, and nothing else's: a library loaded later into the address
+        /// range of one unloaded before can never be answered with the
+        /// unloaded one's names (one shared state would keep the unloaded
+        /// module in its chain and return its answer first). Never freed —
+        /// libbacktrace has no counterpart to backtrace_create_state(), and
+        /// the caches point into it for the process lifetime anyway.
+        backtrace_state* state = nullptr;
         /// The file (or its separate debug file) has a symbol table / DWARF
         /// debug information; lookups that cannot succeed are skipped.
         bool has_symtab = false;
@@ -260,15 +265,6 @@ private:
     /// result obtained outside the mutex.
     NO_INSTRUMENT
     static std::vector<std::string> read_inline_chain(void* address, const AddressInfo& address_info);
-
-    /// The one libbacktrace state, created on first use under s_resolver_mutex
-    /// (threaded, with the lazy executable discovery disabled — see
-    /// src/backtraceExtension.c) and never freed: libbacktrace has no
-    /// counterpart to backtrace_create_state(), and the caches below point into
-    /// it for the process lifetime anyway. nullptr when creation failed; every
-    /// lookup then degrades to "no information".
-    NO_INSTRUMENT
-    static backtrace_state* state();
 
     NO_INSTRUMENT
     static std::string get_argv0();

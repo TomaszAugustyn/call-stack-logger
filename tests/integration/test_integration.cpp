@@ -3431,6 +3431,28 @@ TEST(DamagedObjectTest, AddressOutsideEveryObjectIsReported) {
             << out;
 }
 
+// reload_lib_a is loaded, called (so the resolver registers it) and unloaded;
+// the smaller reload_lib_b then lands at another base, inside a's old code
+// segment (the driver steers it there, see dlopen_reload_traced_program.cpp).
+// b's frames must be named after b. With one libbacktrace state for every
+// object, a's module stayed in the chain and answered first, so b's functions
+// were reported under a's names and lines.
+TEST(DlopenReloadTest, LibraryLoadedIntoAnUnloadedOnesRangeIsNamedAfterItself) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DLOPEN_RELOAD_PROGRAM_PATH, "", status, out);
+    ASSERT_EQ(status, 0) << out;
+    if (out.find("RELOAD_OVERLAP=1") == std::string::npos) {
+        GTEST_SKIP() << "reload_lib_b did not land inside reload_lib_a's old code segment:\n" << out;
+    }
+    const size_t b_start = trace.find("|_ reload_b_entry  (called from: ");
+    ASSERT_NE(b_start, std::string::npos) << "reload_b_entry is not named after itself. Trace:\n" << trace;
+    EXPECT_TRUE(std::regex_search(trace, callee_at("reload_b_helper\\(int\\)", "reload_lib_b\\.cpp")))
+            << "the call site inside reload_lib_b is not resolved from b. Trace:\n" << trace;
+    EXPECT_EQ(trace.find("reload_a_", b_start), std::string::npos)
+            << "a frame after the reload carries reload_lib_a's name. Trace:\n" << trace;
+}
+
 // The same program as a position-independent executable (load bias = map
 // start) and as a fixed-address one (load bias 0, map start 0x400000): both
 // resolve every name and line. A resolver that handed libbacktrace dli_fbase

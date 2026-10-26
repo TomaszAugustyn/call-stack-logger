@@ -163,17 +163,6 @@ void collect_syminfo(void* data, uintptr_t /*pc*/, const char* name, uintptr_t v
 
 namespace instrumentation {
 
-backtrace_state* addressResolver::state() {
-    // Created on first use, under s_resolver_mutex (every caller holds it), and
-    // never freed. A plain function-local pointer, not a magic static: a
-    // failed creation stays nullptr and is retried on the next lookup.
-    static backtrace_state* instance = nullptr;
-    if (instance == nullptr) {
-        instance = cslg_backtrace_create_state(&on_backtrace_error, nullptr);
-    }
-    return instance;
-}
-
 // Must be called with s_resolver_mutex already held (locked in resolve()).
 addressResolver::ObjectFile* addressResolver::ensure_object_loaded(const Dl_info& _info, uintptr_t load_bias) {
     // Single map lookup on the hot path: find() locates the cached entry, and
@@ -197,20 +186,25 @@ addressResolver::ObjectFile* addressResolver::ensure_object_loaded(const Dl_info
             object_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
-        backtrace_state* bt = state();
+        // A state of the object's own (threaded, with libbacktrace's lazy
+        // executable discovery disabled — see src/backtraceExtension.c). A
+        // state whose file then cannot be registered is lost (libbacktrace
+        // cannot free one); the object is negative-cached, so that happens
+        // once per object at most.
+        backtrace_state* bt = cslg_backtrace_create_state(&on_backtrace_error, nullptr);
         if (bt == nullptr) {
             object_load_failed().insert(_info.dli_fbase);
             return nullptr;
         }
         // Registers the file's symbol table and DWARF data (or those of its
-        // separate debug file) with the shared state at the object's load
-        // bias: lookups then take runtime addresses as they are. A file that
+        // separate debug file) with that state at the object's load bias:
+        // lookups then take runtime addresses as they are. A file that
         // cannot be read, is not ELF, or is truncated adds nothing and is
         // negative-cached — the open happens lazily at first sight of an
         // address inside the object, possibly long after the load, when the
         // file may have been deleted or replaced (see object_file_path).
         ObjectFile object;
-        object.load_bias = load_bias;
+        object.state = bt;
         int has_symtab = 0;
         int has_dwarf = 0;
         int has_symtab_section = 0;
@@ -355,10 +349,7 @@ addressResolver::AddressInfo addressResolver::query_address(void* address) {
 
 addressResolver::Lookup addressResolver::look_up(const ObjectFile& object, void* address) {
     Lookup lookup;
-    backtrace_state* bt = state();
-    if (bt == nullptr) {
-        return lookup;
-    }
+    backtrace_state* bt = object.state;
     const uintptr_t pc = reinterpret_cast<uintptr_t>(address);
     if (object.has_dwarf) {
         // One callback per function containing the address (several when it

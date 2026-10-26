@@ -20,10 +20,11 @@
 extern "C" {
 #endif
 
-// Creates the one state the resolver uses: threaded, with libbacktrace's own
-// lazy, executable-based module discovery switched off, so that only the files
-// registered with cslg_backtrace_add_file() are ever consulted. Returns NULL
-// when the state cannot be allocated (error_callback was called).
+// Creates a state for one object file: threaded, with libbacktrace's own lazy,
+// executable-based module discovery switched off, so that only the file
+// registered with cslg_backtrace_add_file() is ever consulted. Returns NULL
+// when the state cannot be allocated (error_callback was called). A state
+// cannot be freed (libbacktrace has no call for it).
 struct backtrace_state* cslg_backtrace_create_state(backtrace_error_callback error_callback, void* data);
 
 // Registers the ELF file at `path`, mapped by the dynamic loader with the load
