@@ -1384,7 +1384,12 @@ The build produces three CMake targets:
   (`cslg_set_consumer_link_options()` in the root CMakeLists: `--export-dynamic-symbol`
   for the two hooks and, with LOG_EXCEPTIONS, the five interposers; `-rdynamic` as the
   fallback for linkers without the option and behind `CSLG_EXPORT_ALL_SYMBOLS`), the
-  include path and `-ldl` to consumers. The narrow export is the one visible
+  include path and `-ldl` to consumers. A consumer link that hides archive symbols
+  (`-Wl,--exclude-libs,ALL`) exports nothing of the library, not even with the
+  `--export-dynamic-symbol` entries: instrumented plugins then bind their hook calls to
+  glibc's own no-op `__cyg_profile_func_enter/exit` (libc.so.6 exports both) and go
+  untraced silently, and `verify_interposers()` warns for all five interposers
+  (README's plugin section says so). The narrow export is the one visible
   difference to `-rdynamic`: an executable stripped of its symbol table without a
   separate debug file keeps no names for the resolver (`StrippedExecutableTest`); the
   hooks and interposers are everything the library needs exported — names come from

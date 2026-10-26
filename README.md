@@ -346,9 +346,18 @@ the consumers you choose.
 Shared libraries loaded at runtime can be traced too: compile them with
 `-finstrument-functions` (the `callstacklogger::instrumented` compile flags) and do
 NOT link the library into them — their hooks bind at load time to the host
-executable's exported `__cyg_profile_func_*` symbols. The object file behind each
-address is located through `/proc/self/maps`, so a plugin loaded by a relative
-path (`dlopen("./plugin.so")`) resolves correctly even if the program `chdir()`s
+executable's exported `__cyg_profile_func_*` symbols.
+
+The host must keep those symbols exported. A link that hides the symbols of static
+libraries (`-Wl,--exclude-libs,ALL`, or a version script that exports only some names)
+leaves the plugins' hook calls bound to glibc's own `__cyg_profile_func_enter/exit`,
+which do nothing: the plugins' functions are then missing from the trace without any
+error. With `LOG_EXCEPTIONS` the library warns at startup when the interposers are
+hidden that way.
+
+The object file behind each address is located through `/proc/self/maps`, so a plugin
+loaded by a relative path (`dlopen("./plugin.so")`) resolves correctly even if the
+program `chdir()`s
 before the first traced call into it. A plugin whose file was deleted or replaced
 on disk after loading reports `<could not open object file>` instead of symbols
 from the wrong file, and so does an object without a file of its own (the vdso):
