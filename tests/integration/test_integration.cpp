@@ -3416,6 +3416,83 @@ TEST(DamagedObjectTest, UnreadableDwarfKeepsTheSymbolNames) {
             << trace;
 }
 
+// The plugin's index of its section-name table (e_shstrndx) points far past
+// its section header table. libbacktrace takes the index as it is and reads a
+// section header from beyond the mapped table; the layout check rejects the
+// file first, and the plugin's frames get the documented text.
+TEST(DamagedObjectTest, SectionNameIndexPastTheHeaderTableIsRejected) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "shstrndx", status, out);
+    ASSERT_EQ(status, 0) << "the program did not finish cleanly (a signal means the index was used): " << out;
+    EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
+    EXPECT_NE(trace.find("|_ <could not open object file>  (called from: "), std::string::npos) << trace;
+}
+
+// The plugin's build-ID note claims a 16 MiB descriptor in a section of a few
+// dozen bytes. libbacktrace's size check is the wrong way round, so it would
+// read the "build ID" from far beyond the note; the layout check, which wants
+// every note to fit its section, rejects the file first.
+TEST(DamagedObjectTest, BuildIdNoteLargerThanItsSectionIsRejected) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "buildid", status, out);
+    ASSERT_EQ(status, 0) << "the program did not finish cleanly (a signal means the note was read): " << out;
+    if (out.find("BUILDID_SKIP") != std::string::npos) {
+        GTEST_SKIP() << out;
+    }
+    EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
+    EXPECT_NE(trace.find("|_ <could not open object file>  (called from: "), std::string::npos) << trace;
+}
+
+// The plugin's separate debug file names a dwz alt file by a relative name,
+// and a truncated ELF file sits under that name next to the debug file, which
+// is also the current directory. libbacktrace maps an alt file without a size
+// check and would fault reading this one; every file it opens goes through
+// the layout check, so the alt file is rejected and the debug file is read
+// without it: names and lines still resolve.
+TEST(DamagedObjectTest, TruncatedAltFileIsRejectedAndTheDebugFileStillReads) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "truncated-alt", status, out);
+    ASSERT_EQ(status, 0) << "the program did not finish cleanly (a signal means the alt file was read): "
+                         << out;
+    EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
+    EXPECT_TRUE(std::regex_search(trace, callee_at("dlopen_plugin_helper\\(int\\)", "dlopen_plugin\\.cpp")))
+            << "the debug file was not read. Trace:\n" << trace;
+}
+
+// A FIFO sits under the debug file's name next to the plugin. Opening a FIFO
+// for reading waits for a writer, and the lookup holds the resolver's lock:
+// the whole program would hang. Only regular files are opened, so the debug
+// file counts as missing and the plugin's own symbol table names its
+// functions.
+TEST(DamagedObjectTest, FifoUnderTheDebugFilesNameIsNotOpened) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "fifo-debuglink", status, out);
+    ASSERT_EQ(status, 0) << "the program did not finish (an exit status of 124 means it hung on the FIFO): "
+                         << out;
+    EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
+    EXPECT_NE(trace.find("|_ dlopen_plugin_helper(int)  (called from: dlopen_plugin_entry:\?\?\?)"),
+              std::string::npos)
+            << "the plugin's symbol table did not name its functions. Trace:\n" << trace;
+}
+
+// A relative alt link is relative to the directory of the file that carries
+// it, as gdb reads it: libbacktrace looked it up from the current directory,
+// where a FIFO of that name waits here. The debug file is found and read.
+TEST(DamagedObjectTest, RelativeAltLinkIsNotLookedUpInTheCurrentDirectory) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "fifo-alt", status, out);
+    ASSERT_EQ(status, 0) << "the program did not finish (an exit status of 124 means it hung on the FIFO): "
+                         << out;
+    EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
+    EXPECT_TRUE(std::regex_search(trace, callee_at("dlopen_plugin_helper\\(int\\)", "dlopen_plugin\\.cpp")))
+            << "the debug file was not read. Trace:\n" << trace;
+}
+
 // Addresses no loaded object contains (dladdr fails): the public API reports
 // them with the documented texts instead of failing or crashing.
 TEST(DamagedObjectTest, AddressOutsideEveryObjectIsReported) {

@@ -405,15 +405,39 @@ target_link_libraries(cslg_dlopen_reload_traced_program PRIVATE callstacklogger_
 add_dependencies(cslg_dlopen_reload_traced_program cslg_reload_lib_a cslg_reload_lib_b)
 cslg_apply_sanitizers(cslg_dlopen_reload_traced_program)
 
-# Object files the resolver cannot read (deleted after loading, truncated) and
-# addresses outside every object; reuses the dlopen plugin as the victim (see
-# DamagedObjectTest).
+# A copy of the dlopen plugin whose DWARF data is moved to a separate debug
+# file, cslg_debuglink_plugin.debug, and that debug file names a dwz alt file
+# by a RELATIVE name, the way Fedora's debug files do ("../../.dwz/<package>",
+# relative to the debug file's own directory). The alt file itself is never
+# built: DamagedObjectTest puts a damaged file or a FIFO where it, or the
+# debug file, would be looked up.
+add_library(cslg_debuglink_plugin SHARED dlopen_plugin.cpp)
+target_compile_features(cslg_debuglink_plugin PRIVATE cxx_std_17)
+target_compile_options(cslg_debuglink_plugin PRIVATE ${INSTRUMENT_FLAGS} -g)
+add_custom_command(TARGET cslg_debuglink_plugin POST_BUILD
+    COMMAND objcopy --only-keep-debug $<TARGET_FILE_NAME:cslg_debuglink_plugin> cslg_debuglink_plugin.debug
+    COMMAND sh -c "printf 'cslg_debuglink_plugin.alt\\000' > cslg_debuglink_plugin.altlink"
+    COMMAND objcopy --add-section .gnu_debugaltlink=cslg_debuglink_plugin.altlink cslg_debuglink_plugin.debug
+    COMMAND objcopy --strip-debug $<TARGET_FILE_NAME:cslg_debuglink_plugin>
+    COMMAND objcopy --add-gnu-debuglink=cslg_debuglink_plugin.debug $<TARGET_FILE_NAME:cslg_debuglink_plugin>
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:cslg_debuglink_plugin>
+    COMMENT "Moving the debug info of cslg_debuglink_plugin to a debug file with a relative alt link"
+    VERBATIM)
+
+# Object files the resolver cannot read (deleted after loading, truncated,
+# malformed, FIFOs under the names of debug files) and addresses outside every
+# object; reuses the dlopen plugins as the victims (see DamagedObjectTest).
 add_executable(cslg_damaged_objects_traced_program damaged_objects_traced_program.cpp)
 target_compile_features(cslg_damaged_objects_traced_program PRIVATE cxx_std_17)
 target_compile_definitions(cslg_damaged_objects_traced_program PRIVATE
-    DAMAGED_PLUGIN_PATH="$<TARGET_FILE:cslg_dlopen_plugin>")
+    DAMAGED_PLUGIN_PATH="$<TARGET_FILE:cslg_dlopen_plugin>"
+    DEBUGLINK_PLUGIN_PATH="$<TARGET_FILE:cslg_debuglink_plugin>"
+    DEBUGLINK_PLUGIN_NAME="$<TARGET_FILE_NAME:cslg_debuglink_plugin>"
+    DEBUGLINK_DEBUG_PATH="$<TARGET_FILE_DIR:cslg_debuglink_plugin>/cslg_debuglink_plugin.debug"
+    DEBUGLINK_DEBUG_NAME="cslg_debuglink_plugin.debug"
+    DEBUGLINK_ALT_NAME="cslg_debuglink_plugin.alt")
 target_link_libraries(cslg_damaged_objects_traced_program PRIVATE callstacklogger_instrumented)
-add_dependencies(cslg_damaged_objects_traced_program cslg_dlopen_plugin)
+add_dependencies(cslg_damaged_objects_traced_program cslg_dlopen_plugin cslg_debuglink_plugin)
 cslg_apply_sanitizers(cslg_damaged_objects_traced_program)
 
 # The traced program as a position-independent and as a fixed-address

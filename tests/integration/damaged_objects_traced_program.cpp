@@ -35,10 +35,29 @@
  *              a DWARF version no reader knows: the DWARF data cannot be
  *              used, but the symbol table can, so the plugin's functions must
  *              still be named (with "???" for the lines).
+ *   shstrndx   the copy's index of its section-name table (e_shstrndx) points
+ *              far past the section header table.
+ *   buildid    the copy's build-ID note claims a 16 MiB descriptor in a
+ *              section of a few dozen bytes.
+ *
+ * The next three load cslg_debuglink_plugin, whose DWARF data sits in a
+ * separate debug file that names a dwz alt file by a relative name:
+ *
+ *   truncated-alt  a copy of the plugin and of its debug file, and a
+ *              truncated ELF file under the alt file's name next to them,
+ *              which is also the current directory.
+ *   fifo-debuglink a copy of the plugin and a FIFO under the debug file's name
+ *              next to it.
+ *   fifo-alt   a copy of the plugin and of its debug file, and a FIFO under
+ *              the alt file's name in another directory, the current one.
+ *
+ * Opening a FIFO for reading waits for a writer, which never comes: in the
+ * two FIFO cases a resolver that opened it would hang the program.
  */
 
 #include "callStack.h"
 
+#include <cstddef> // for offsetof
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -58,6 +77,25 @@
 
 namespace {
 
+// Copies a file; returns false on failure.
+bool copy_file(const char* from, const char* to) {
+    FILE* in = std::fopen(from, "rb");
+    FILE* out = in != nullptr ? std::fopen(to, "wb") : nullptr;
+    bool ok = out != nullptr;
+    char buffer[65536];
+    size_t got;
+    while (ok && (got = std::fread(buffer, 1, sizeof buffer, in)) > 0) {
+        ok = std::fwrite(buffer, 1, got, out) == got;
+    }
+    if (in != nullptr) {
+        std::fclose(in);
+    }
+    if (out != nullptr) {
+        std::fclose(out);
+    }
+    return ok;
+}
+
 // Copies the plugin into a fresh temporary directory; fills `dir` and `copy`.
 bool copy_plugin(char* dir, size_t dir_size, char* copy, size_t copy_size) {
     std::snprintf(dir, dir_size, "/tmp/cslg_damaged_XXXXXX");
@@ -66,22 +104,10 @@ bool copy_plugin(char* dir, size_t dir_size, char* copy, size_t copy_size) {
         return false;
     }
     std::snprintf(copy, copy_size, "%s/plugin.so", dir);
-    FILE* in = std::fopen(DAMAGED_PLUGIN_PATH, "rb");
-    FILE* out = std::fopen(copy, "wb");
-    if (in == nullptr || out == nullptr) {
-        std::perror("fopen");
+    if (!copy_file(DAMAGED_PLUGIN_PATH, copy)) {
+        std::perror("copy");
         return false;
     }
-    char buffer[65536];
-    size_t got;
-    while ((got = std::fread(buffer, 1, sizeof buffer, in)) > 0) {
-        if (std::fwrite(buffer, 1, got, out) != got) {
-            std::perror("fwrite");
-            return false;
-        }
-    }
-    std::fclose(in);
-    std::fclose(out);
     chmod(copy, 0755);
     return true;
 }
@@ -114,39 +140,80 @@ off_t last_load_end(const char* path) {
     return end;
 }
 
-// Sets the version of the first unit in .debug_info to 99. Returns false when
-// the file has no .debug_info section.
-bool break_dwarf_version(const char* path) {
+// Finds the section called `name` in the open ELF file; fills `found`.
+bool find_section(FILE* f, const char* name, ElfW(Shdr)* found) {
+    ElfW(Ehdr) ehdr {};
+    std::fseek(f, 0, SEEK_SET);
+    if (std::fread(&ehdr, sizeof ehdr, 1, f) != 1 || ehdr.e_shoff == 0 || ehdr.e_shstrndx >= ehdr.e_shnum) {
+        return false;
+    }
+    ElfW(Shdr) strings {};
+    std::fseek(f, static_cast<long>(ehdr.e_shoff + ehdr.e_shstrndx * sizeof(ElfW(Shdr))), SEEK_SET);
+    if (std::fread(&strings, sizeof strings, 1, f) != 1) {
+        return false;
+    }
+    for (unsigned i = 0; i < ehdr.e_shnum; ++i) {
+        ElfW(Shdr) shdr {};
+        std::fseek(f, static_cast<long>(ehdr.e_shoff + i * sizeof shdr), SEEK_SET);
+        if (std::fread(&shdr, sizeof shdr, 1, f) != 1) {
+            return false;
+        }
+        char section_name[32] = {};
+        std::fseek(f, static_cast<long>(strings.sh_offset + shdr.sh_name), SEEK_SET);
+        if (std::fread(section_name, 1, sizeof section_name - 1, f) > 0
+            && std::strcmp(section_name, name) == 0) {
+            *found = shdr;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Overwrites `size` bytes at `offset` of the file at `path`.
+bool patch_file(const char* path, long offset, const void* bytes, size_t size) {
     FILE* f = std::fopen(path, "r+b");
     if (f == nullptr) {
         return false;
     }
-    ElfW(Ehdr) ehdr {};
-    bool done = false;
-    if (std::fread(&ehdr, sizeof ehdr, 1, f) == 1 && ehdr.e_shoff != 0 && ehdr.e_shstrndx < ehdr.e_shnum) {
-        ElfW(Shdr) strings {};
-        std::fseek(f, static_cast<long>(ehdr.e_shoff + ehdr.e_shstrndx * sizeof(ElfW(Shdr))), SEEK_SET);
-        if (std::fread(&strings, sizeof strings, 1, f) == 1) {
-            for (unsigned i = 0; i < ehdr.e_shnum && !done; ++i) {
-                ElfW(Shdr) shdr {};
-                std::fseek(f, static_cast<long>(ehdr.e_shoff + i * sizeof shdr), SEEK_SET);
-                if (std::fread(&shdr, sizeof shdr, 1, f) != 1) {
-                    break;
-                }
-                char name[16] = {};
-                std::fseek(f, static_cast<long>(strings.sh_offset + shdr.sh_name), SEEK_SET);
-                if (std::fread(name, 1, sizeof name - 1, f) == 0 || std::strcmp(name, ".debug_info") != 0) {
-                    continue;
-                }
-                // 32-bit DWARF unit header: unit_length (4 bytes), then version (2).
-                const unsigned char version[2] = { 99, 0 };
-                std::fseek(f, static_cast<long>(shdr.sh_offset + 4), SEEK_SET);
-                done = std::fwrite(version, 1, sizeof version, f) == sizeof version;
-            }
-        }
-    }
+    const bool done = std::fseek(f, offset, SEEK_SET) == 0 && std::fwrite(bytes, 1, size, f) == size;
     std::fclose(f);
     return done;
+}
+
+// Sets the version of the first unit in .debug_info to 99. Returns false when
+// the file has no .debug_info section.
+bool break_dwarf_version(const char* path) {
+    FILE* f = std::fopen(path, "rb");
+    ElfW(Shdr) shdr {};
+    const bool found = f != nullptr && find_section(f, ".debug_info", &shdr);
+    if (f != nullptr) {
+        std::fclose(f);
+    }
+    // 32-bit DWARF unit header: unit_length (4 bytes), then version (2).
+    const unsigned char version[2] = { 99, 0 };
+    return found && patch_file(path, static_cast<long>(shdr.sh_offset + 4), version, sizeof version);
+}
+
+// Points e_shstrndx, the index of the section-name table, far past the
+// section header table (the largest ordinary index, SHN_LORESERVE - 1).
+bool break_section_name_index(const char* path) {
+    const ElfW(Half) index = SHN_LORESERVE - 1;
+    return patch_file(path, static_cast<long>(offsetof(ElfW(Ehdr), e_shstrndx)), &index, sizeof index);
+}
+
+// Makes the build-ID note claim a descriptor of 16 MiB. Returns false when
+// the file has no .note.gnu.build-id section.
+bool inflate_build_id_note(const char* path) {
+    FILE* f = std::fopen(path, "rb");
+    ElfW(Shdr) shdr {};
+    const bool found = f != nullptr && find_section(f, ".note.gnu.build-id", &shdr);
+    if (f != nullptr) {
+        std::fclose(f);
+    }
+    // Note header: namesz (4 bytes), descsz (4), type (4).
+    const ElfW(Word) descsz = 16 * 1024 * 1024;
+    const long descsz_offset = static_cast<long>(shdr.sh_offset + sizeof(ElfW(Word)));
+    return found && patch_file(path, descsz_offset, &descsz, sizeof descsz);
 }
 
 int call_plugin(void* handle) {
@@ -169,26 +236,61 @@ void print_resolution(const char* label, void* callee, void* caller) {
                 frame->caller_filename.c_str(), frame->caller_line_number ? "set" : "none");
 }
 
-} // namespace
-
-// Copies a file; returns false on failure.
-bool copy_file(const char* from, const char* to) {
-    FILE* in = std::fopen(from, "rb");
-    FILE* out = in != nullptr ? std::fopen(to, "wb") : nullptr;
-    bool ok = out != nullptr;
-    char buffer[65536];
-    size_t got;
-    while (ok && (got = std::fread(buffer, 1, sizeof buffer, in)) > 0) {
-        ok = std::fwrite(buffer, 1, got, out) == got;
+// The three cases of cslg_debuglink_plugin (see the comment at the top).
+int load_debuglink_plugin(const char* mode) {
+    const bool fifo_debuglink = std::strcmp(mode, "fifo-debuglink") == 0;
+    const bool fifo_alt = std::strcmp(mode, "fifo-alt") == 0;
+    char dir[] = "/tmp/cslg_debuglink_XXXXXX";
+    char other_dir[] = "/tmp/cslg_debuglink_cwd_XXXXXX";
+    if (mkdtemp(dir) == nullptr || (fifo_alt && mkdtemp(other_dir) == nullptr)) {
+        std::perror("mkdtemp");
+        return 2;
     }
-    if (in != nullptr) {
-        std::fclose(in);
+    char copy[128];
+    char debug_copy[128];
+    char planted[128];
+    std::snprintf(copy, sizeof copy, "%s/%s", dir, DEBUGLINK_PLUGIN_NAME);
+    std::snprintf(debug_copy, sizeof debug_copy, "%s/%s", dir, DEBUGLINK_DEBUG_NAME);
+    if (fifo_debuglink) {
+        std::snprintf(planted, sizeof planted, "%s", debug_copy);
+    } else if (fifo_alt) {
+        std::snprintf(planted, sizeof planted, "%s/%s", other_dir, DEBUGLINK_ALT_NAME);
+    } else {
+        std::snprintf(planted, sizeof planted, "%s/%s", dir, DEBUGLINK_ALT_NAME);
     }
-    if (out != nullptr) {
-        std::fclose(out);
+    bool ready = copy_file(DEBUGLINK_PLUGIN_PATH, copy) && chmod(copy, 0755) == 0;
+    if (!fifo_debuglink) {
+        ready = ready && copy_file(DEBUGLINK_DEBUG_PATH, debug_copy);
     }
-    return ok;
+    if (fifo_debuglink || fifo_alt) {
+        ready = ready && mkfifo(planted, 0600) == 0;
+    } else {
+        ready = ready && copy_file(DAMAGED_PLUGIN_PATH, planted)
+                && truncate(planted, last_load_end(planted) + 64) == 0;
+    }
+    ready = ready && chdir(fifo_alt ? other_dir : dir) == 0;
+    if (!ready) {
+        std::perror("setup");
+        return 2;
+    }
+    void* handle = dlopen(copy, RTLD_NOW);
+    if (handle == nullptr) {
+        std::fprintf(stderr, "dlopen: %s\n", dlerror());
+        return 2;
+    }
+    const int rc = call_plugin(handle);
+    unlink(planted);
+    unlink(debug_copy);
+    unlink(copy);
+    rmdir(dir);
+    if (fifo_alt) {
+        rmdir(other_dir);
+    }
+    std::puts("DAMAGED_DONE");
+    return rc;
 }
+
+} // namespace
 
 // Resolves an address of the vdso while a copy of the plugin sits in the
 // current directory under the vdso's name. The address is the vdso's base plus
@@ -226,6 +328,10 @@ int main(int argc, char** argv) {
     if (std::strcmp(mode, "vdso") == 0) {
         return resolve_vdso_with_planted_file();
     }
+    if (std::strcmp(mode, "truncated-alt") == 0 || std::strcmp(mode, "fifo-debuglink") == 0
+        || std::strcmp(mode, "fifo-alt") == 0) {
+        return load_debuglink_plugin(mode);
+    }
     if (std::strcmp(mode, "nomodule") == 0) {
         print_resolution("tiny", reinterpret_cast<void*>(0x1), reinterpret_cast<void*>(0x2));
         void* heap = std::malloc(64);
@@ -237,8 +343,14 @@ int main(int argc, char** argv) {
     const bool truncated = std::strcmp(mode, "truncated") == 0;
     const bool bad_dwarf = std::strcmp(mode, "dwarf") == 0;
     const bool planted = std::strcmp(mode, "planted") == 0;
-    if (!truncated && !bad_dwarf && !planted && std::strcmp(mode, "deleted") != 0) {
-        std::fprintf(stderr, "usage: %s deleted|planted|truncated|dwarf|vdso|nomodule\n", argv[0]);
+    const bool bad_index = std::strcmp(mode, "shstrndx") == 0;
+    const bool bad_note = std::strcmp(mode, "buildid") == 0;
+    const bool deleted = std::strcmp(mode, "deleted") == 0;
+    if (!truncated && !bad_dwarf && !planted && !bad_index && !bad_note && !deleted) {
+        std::fprintf(stderr,
+                     "usage: %s deleted|planted|truncated|dwarf|shstrndx|buildid|vdso|nomodule"
+                     "|truncated-alt|fifo-debuglink|fifo-alt\n",
+                     argv[0]);
         return 2;
     }
     char dir[64];
@@ -258,12 +370,22 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "no .debug_info in %s\n", copy);
         return 2;
     }
+    if (bad_index && !break_section_name_index(copy)) {
+        std::perror("shstrndx");
+        return 2;
+    }
+    if (bad_note && !inflate_build_id_note(copy)) {
+        std::puts("BUILDID_SKIP the plugin has no .note.gnu.build-id section");
+        unlink(copy);
+        rmdir(dir);
+        return 0;
+    }
     void* handle = dlopen(copy, RTLD_NOW);
     if (handle == nullptr) {
         std::fprintf(stderr, "dlopen: %s\n", dlerror());
         return 2;
     }
-    if (!truncated && !bad_dwarf) {
+    if (!truncated && !bad_dwarf && !bad_index && !bad_note) {
         unlink(copy);
     }
     char planted_copy[128];

@@ -83,12 +83,36 @@ Address resolution happens in stages (implemented in `src/callStack.cpp`):
    signature; the pinned copy never changes under us, and a later update that
    changes it fails to compile instead of misbehaving. The cleaner route is a
    public `backtrace_add_module()` upstream (a proposal is in the hand-over of
-   the change). The extension also rejects TRUNCATED files before `elf_add()`
-   sees them: libbacktrace maps file ranges with `mmap` and never checks the
-   file size, so the section headers of a half-copied plugin would be mapped
-   beyond EOF and fault with SIGBUS on first read (the loader itself only needs
-   the PT_LOAD segments, so such a file still `dlopen()`s). Pinned by
-   `DamagedObjectTest.TruncatedPluginFileIsRejectedNotMapped`. When `elf_add()`
+   the change). Every file `elf.c` opens — the object file, a separate debug
+   file, a dwz alt file — goes through the extension's `cslg_open_checked()`
+   (a macro renames `backtrace_open` while `elf.c` is included), which differs
+   from libbacktrace's open in three ways. (1) A RELATIVE name is taken
+   relative to the directory of the file opened last, never to the current
+   directory. Relative names come only from the `.gnu_debugaltlink` of a
+   separate debug file, which libbacktrace registers under the name "", and
+   such a link is relative to the debug file's own directory, as gdb reads it
+   (Fedora's read `../../.dwz/<package>`). libbacktrace looked it up from the
+   current directory and found nothing — the inline chains then lacked every
+   inlined function whose DWARF dwz had moved to the alt file — or a file
+   someone had put there. (2) Only regular files are opened, with
+   `O_NONBLOCK`: opening a FIFO for reading waits for a writer, so a FIFO
+   under the name of a debug file hung the program with the resolver's mutex
+   held (libbfd hung the same way). (3) Every file passes the LAYOUT CHECK:
+   libbacktrace maps file ranges with `mmap` and never compares them with the
+   file size, so the section headers of a half-copied plugin or alt file would
+   be mapped beyond EOF and fault with SIGBUS on first read (the loader itself
+   only needs the PT_LOAD segments, so such a plugin still `dlopen()`s); the
+   check also refuses the indexes `elf_add()` follows without a bounds check
+   (`e_shstrndx`, a symbol table's `sh_link`) and notes larger than their
+   section (`elf_add()`'s size test for the build-ID note is the wrong way
+   round, so it read the "build ID" far beyond the note). A refused file counts
+   as missing: an object file becomes `<could not open object file>`, a debug
+   or alt file is skipped. A file truncated or rewritten in place AFTER the
+   check, while its views are mapped, can still fault, as it could with libbfd
+   (and as the loader's own mappings of a plugin do). Pinned by the
+   `DamagedObjectTest` cases for a truncated plugin, an out-of-range
+   `e_shstrndx`, an oversized build-ID note, a truncated alt file, and FIFOs
+   under the debug file's and the alt file's names. When `elf_add()`
    fails AFTER it registered the file's symbol table — the DWARF data is in an
    unknown version, damaged, or in an unreadable separate debug file — the
    extension keeps the file as a symbols-only object (`has_dwarf` false: names
@@ -1039,7 +1063,7 @@ call-stack-logger/
 |       |-- separate_debug_lib.cpp  # Instrumented shared lib whose DWARF moves to a .gnu_debuglink file post-build
 |       |-- compressed_debug_lib.cpp # Instrumented shared lib built with -gz=zlib / -gz=zstd (CDL_NAME prefixes the symbols)
 |       |-- debug_objects_traced_program.cpp # Instrumented; calls into the two libraries above
-|       |-- damaged_objects_traced_program.cpp # Instrumented; a deleted plugin, a truncated plugin, addresses in no object
+|       |-- damaged_objects_traced_program.cpp # Instrumented; deleted, planted, truncated and malformed plugin copies, FIFOs under debug-file names, addresses in no object
 |       |-- reload_lib_a.cpp        # Instrumented shared lib, the larger of two loaded one after the other
 |       |-- reload_lib_b.cpp        # Instrumented shared lib, loaded into reload_lib_a's old code segment
 |       |-- dlopen_reload_traced_program.cpp # Instrumented; loads, calls, unloads lib a, then loads lib b (re-execs without ASLR)
@@ -1181,14 +1205,17 @@ symbolizer's name in `resolve_function_name()` — the latter catches
 symbols with no (or a different, nearest-exported) dynamic symbol.
 
 ### `src/backtraceExtension.c`
-The forty-line extension of libbacktrace (plus the file-size guard): includes
-the pinned `elf.c` and exports `cslg_backtrace_create_state()` (one THREADED
-state with the lazy executable discovery disabled) and
+The extension of libbacktrace: includes the pinned `elf.c` and exports
+`cslg_backtrace_create_state()` (a THREADED state with the lazy executable
+discovery disabled, one per object file) and
 `cslg_backtrace_add_file(state, path, load_bias, …)` (registers one ELF file
 at its load bias through the internal `elf_add()` and installs the lookup
-functions). Compiled into the `cslg_libbacktrace` static library in place of
-`elf.c`, with hidden visibility, `-O2` in every build type and the sanitizer
-flags of the build. See "Symbol Resolution Pipeline" for why it exists.
+functions). Every file `elf.c` opens goes through `cslg_open_checked()`
+(relative names against the last opened file's directory, regular files only,
+the layout check). Compiled into the `cslg_libbacktrace` static library in
+place of `elf.c`, with hidden visibility, `-O2` in every build type and the
+sanitizer flags of the build. See "Symbol Resolution Pipeline" for why it
+exists and what the open does.
 
 ### `src/callStack.cpp`
 The core implementation. Key functions:
@@ -1730,7 +1757,7 @@ Test pure/deterministic functions from the include headers:
 - `CompressedDebugSectionsTest` (2 tests) — call sites inside libraries built with
   `-gz=zlib` and `-gz=zstd` resolve to file and line; the zstd test skips when the
   toolchain lacks `-gz=zstd` (`CSLG_HAVE_ZSTD_DEBUG`).
-- `DamagedObjectTest` (6 tests) — `cslg_damaged_objects_traced_program` copies the
+- `DamagedObjectTest` (11 tests) — `cslg_damaged_objects_traced_program` copies the
   dlopen plugin: deleted after loading → `<could not open object file>` /
   `<could not open caller object file>:???` and no name from the vanished file;
   the same with a copy planted under `<path> (deleted)`, which must not be read;
@@ -1740,8 +1767,19 @@ Test pure/deterministic functions from the include headers:
   `:???` for lines;
   truncated right after the last PT_LOAD (the loader still maps it, the section
   headers are gone) → the same texts and exit 0 — the file-size guard in
-  `backtraceExtension.c` is what keeps this from a SIGBUS; addresses in no object
+  `backtraceExtension.c` is what keeps this from a SIGBUS; with `e_shstrndx` set far
+  past the section header table, and with a build-ID note claiming 16 MiB → the same
+  texts (SIGBUS and SIGSEGV without the layout check); addresses in no object
   (`0x1`, a heap block) through the public `resolve()` → `<address to object not found>`.
+  Three more cases load `cslg_debuglink_plugin`, a copy of the plugin whose DWARF data
+  sits in `cslg_debuglink_plugin.debug`, which names a dwz alt file by the RELATIVE
+  name `cslg_debuglink_plugin.alt` (made with `objcopy` after the build): a truncated
+  ELF file under the alt name next to the debug file, which is also the current
+  directory → names and lines from the debug file (SIGBUS without the check); a FIFO
+  under the debug file's name next to the plugin → names from the symbol table, no
+  hang; a FIFO under the alt name in the current directory → names and lines, no hang
+  (libbacktrace looked relative alt links up there). A hang shows as exit 124 from
+  the 60-second `timeout`.
 - `DlopenReloadTest.LibraryLoadedIntoAnUnloadedOnesRangeIsNamedAfterItself` —
   `cslg_dlopen_reload_traced_program` loads `cslg_reload_lib_a`, calls into it (so it is
   registered), unloads it, reserves the old library's non-code tail with a temporary

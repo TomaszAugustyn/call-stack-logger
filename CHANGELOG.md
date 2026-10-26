@@ -37,7 +37,13 @@ of `master`.
   releases opened both names and read whatever file they found.
 - A truncated object file (a half-copied plugin, for example) is rejected and
   reported as `<could not open object file>`; libbacktrace alone would map
-  the missing bytes and fault when reading them.
+  the missing bytes and fault when reading them. The same goes for object
+  files whose headers point outside the file (a section index out of range,
+  a note larger than its section); a truncated separate debug file or dwz alt
+  file is skipped.
+- Only regular files are opened when looking for separate debug files and dwz
+  alt files. A FIFO under the name of a debug file hung earlier releases at
+  the first traced call into the object: opening a FIFO waits for a writer.
 - Under Clang, `callstacklogger::instrumented` no longer adds `-gdwarf-4`
   with `LOG_EXCEPTIONS`: libbacktrace walks Clang's DWARF 5 inline chains, so
   the frame reconciliation of inlined frames is exact with Clang's default
@@ -87,7 +93,8 @@ of `master`.
 
 - New integration tests: a separate debug file made with `objcopy` in the
   build, zlib- and zstd-compressed debug sections, a plugin deleted after
-  loading, a truncated plugin, addresses outside every object, PIE and
+  loading, a truncated plugin, malformed plugins, a truncated alt file, FIFOs
+  under the names of debug files, addresses outside every object, PIE and
   non-PIE executables, a stripped executable with and without a debug file.
 - `bench/`: a benchmark of the warm per-call cost, the cold resolution cost
   and the resident memory, buildable against any checkout

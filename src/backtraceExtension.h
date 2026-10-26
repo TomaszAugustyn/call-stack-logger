@@ -32,16 +32,19 @@ struct backtrace_state* cslg_backtrace_create_state(backtrace_error_callback err
 // table and DWARF debug information — including a separate debug file found
 // through .gnu_debuglink or the build ID — then answer backtrace_pcinfo() and
 // backtrace_syminfo() for the RUNTIME addresses inside it. Returns 1 on success
-// and 0 on failure, after calling error_callback (file not readable, not ELF,
-// truncated — see the layout check in the implementation); a failed file adds
-// nothing to the state. A file whose DWARF data cannot be read but whose
-// symbol table can is a success with `has_dwarf` 0 (names without lines).
+// and 0 on failure, after calling error_callback (file not readable, not a
+// regular file, not ELF, truncated or malformed — see the layout check in the
+// implementation); a failed file adds nothing to the state. A file whose
+// DWARF data cannot be read but whose symbol table can is a success with
+// `has_dwarf` 0 (names without lines).
 // `has_symtab` / `has_dwarf` report what libbacktrace found (a symbol table
 // of any kind — .symtab, or .dynsym when there is no .symtab — and DWARF
 // data, in the file or in its separate debug file);
 // `has_symtab_section` reports whether the file ITSELF carries a .symtab
-// section, which a `strip --strip-all` removes. Must be serialized with every
-// other call on the state by the caller (the resolver's mutex).
+// section, which a `strip --strip-all` removes. Must be serialized by the
+// caller with every other call of either function and every lookup, on any
+// state (the resolver's mutex): opening the files keeps a little state of its
+// own, the directory relative alt links are read from.
 int cslg_backtrace_add_file(struct backtrace_state* state, const char* path, uintptr_t load_bias,
                             backtrace_error_callback error_callback, void* data, int* has_symtab,
                             int* has_dwarf, int* has_symtab_section);

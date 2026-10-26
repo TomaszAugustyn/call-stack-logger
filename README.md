@@ -348,7 +348,12 @@ before the first traced call into it. A plugin whose file was deleted or replace
 on disk after loading reports `<could not open object file>` instead of symbols
 from the wrong file, and so does an object without a file of its own (the vdso):
 the resolver only opens absolute paths it got from the kernel, never a bare name
-that would be looked up in the current directory.
+that would be looked up in the current directory. Separate debug files are opened
+only if they are regular files, so a FIFO under a debug file's name cannot block
+the program. Replace a plugin on disk with a new file (`install`, `mv`) rather than
+overwriting it in place (`cp` onto it): a loaded object file that is truncated or
+rewritten in place can crash the program, through the loader's mappings of its
+code and through the resolver's mappings of its debug information alike.
 
 ## :gear: Configuration ##
 
