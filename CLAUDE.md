@@ -1807,6 +1807,14 @@ Test pure/deterministic functions from the include headers:
   `nm -g --defined-only` on `libcslg_libbacktrace.a` must list only `cslg_`-prefixed
   globals (compiler instrumentation's `__` names aside), so a libbacktrace update that
   adds an external function the rename does not cover fails there first.
+- `ExportListTest.EveryExportedNameIsDefinedByTheLibrary` — every name the narrow
+  export passes to `--export-dynamic-symbol` (`CSLG_HOOK_SYMBOLS` and
+  `CSLG_INTERPOSED_SYMBOLS` in the root CMakeLists, handed to the test as
+  `CSLG_EXPORTED_SYMBOLS`) must be a `T` or `W` symbol of the
+  `callstacklogger_log_exceptions` archive (`nm --defined-only`). A misspelled name
+  exports nothing and no linker reports it: `std::rethrow_exception`'s entry read
+  `_ZSt17rethrow_exceptionSt13exception_ptr` for a while, harmless only because GNU ld,
+  lld and gold all export a program's override of a libstdc++ symbol on their own.
 - `PieTest.PieAndNonPieExecutablesResolveAlike` — `traced_program.cpp` built with
   `-fPIE -pie` and with `-fno-pie -no-pie`; both traces must equal the default build's
   line for line (timestamp, duration and address columns aside). Pins the load-bias

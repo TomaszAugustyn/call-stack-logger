@@ -3581,6 +3581,42 @@ TEST(OtherLibbacktraceTest, VendoredCopyDefinesOnlyPrefixedSymbols) {
                                     << ::testing::PrintToString(unprefixed);
 }
 
+// Every name the build exports with --export-dynamic-symbol (the two hooks and
+// the five interposers, CSLG_HOOK_SYMBOLS and CSLG_INTERPOSED_SYMBOLS in the
+// root CMakeLists.txt) is a symbol the LOG_EXCEPTIONS library defines. A
+// misspelled name exports nothing, and no linker says so: the list named
+// std::rethrow_exception "_ZSt17rethrow_exceptionSt13exception_ptr", which
+// only went unnoticed because the linkers export an override of a libstdc++
+// symbol on their own.
+TEST(ExportListTest, EveryExportedNameIsDefinedByTheLibrary) {
+    const std::string command = std::string("nm --defined-only \"") + LOG_EXCEPTIONS_LIBRARY_PATH + "\"";
+    FILE* nm = popen(command.c_str(), "r");
+    ASSERT_NE(nm, nullptr) << command;
+    std::string listing;
+    char buffer[4096];
+    size_t got;
+    while ((got = fread(buffer, 1, sizeof buffer, nm)) > 0) {
+        listing.append(buffer, got);
+    }
+    ASSERT_EQ(pclose(nm), 0) << command << ":\n" << listing;
+    std::set<std::string> defined;
+    for (const std::string& line : split_lines(listing)) {
+        std::istringstream fields(line);
+        std::string value, type, name;
+        if (fields >> value >> type >> name && (type == "T" || type == "W")) {
+            defined.insert(name);
+        }
+    }
+    std::istringstream exported(CSLG_EXPORTED_SYMBOLS);
+    std::string name;
+    int count = 0;
+    while (exported >> name) {
+        ++count;
+        EXPECT_EQ(defined.count(name), 1u) << "exported but not defined by the library: " << name;
+    }
+    EXPECT_EQ(count, 7) << CSLG_EXPORTED_SYMBOLS;
+}
+
 // The same program as a position-independent executable (load bias = map
 // start) and as a fixed-address one (load bias 0, map start 0x400000): both
 // resolve every name and line. A resolver that handed libbacktrace dli_fbase

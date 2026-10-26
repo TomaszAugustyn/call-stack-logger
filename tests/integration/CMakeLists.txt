@@ -552,7 +552,11 @@ target_compile_definitions(cslg_integration_tests PRIVATE
     STRIPPED_PROGRAM_PATH="$<TARGET_FILE:cslg_stripped_traced_program>"
     OTHER_LIBBACKTRACE_PROGRAM_PATH="$<TARGET_FILE:cslg_other_libbacktrace_traced_program>"
     VENDORED_LIBBACKTRACE_PATH="$<TARGET_FILE:cslg_libbacktrace>"
+    LOG_EXCEPTIONS_LIBRARY_PATH="$<TARGET_FILE:callstacklogger_log_exceptions>"
 )
+string(JOIN " " CSLG_EXPORTED_SYMBOL_LIST ${CSLG_HOOK_SYMBOLS} ${CSLG_INTERPOSED_SYMBOLS})
+target_compile_definitions(cslg_integration_tests PRIVATE
+    CSLG_EXPORTED_SYMBOLS="${CSLG_EXPORTED_SYMBOL_LIST}")
 if(CSLG_XZ_EXECUTABLE)
     target_compile_definitions(cslg_integration_tests PRIVATE
         MINIDEBUGINFO_PROGRAM_PATH="$<TARGET_FILE:cslg_minidebuginfo_traced_program>")

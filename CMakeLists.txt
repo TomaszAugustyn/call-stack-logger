@@ -234,15 +234,27 @@ endif()
 # executable, which bloats its dynamic symbol table and lets shared libraries
 # bind to the executable's copies of their own symbols. The narrow form,
 # --export-dynamic-symbol=<name> per symbol (GNU ld since binutils 2.35, lld,
-# gold), exports exactly the names above and is used when the linker accepts
-# it; -rdynamic stays the fallback for older linkers and the explicit choice
-# behind CSLG_EXPORT_ALL_SYMBOLS. The one observable difference: an executable
+# gold), exports the names above and leaves the rest of the program's symbols
+# out — except, as in any program, definitions that override a symbol of a
+# shared library on the link line: the five interposers override libstdc++'s,
+# so the linkers export them even without their entries. The narrow form is
+# used when the linker accepts it; -rdynamic stays the fallback for older
+# linkers and the explicit choice behind CSLG_EXPORT_ALL_SYMBOLS. The one observable difference: an executable
 # stripped of its symbol table (strip --strip-all, no separate debug file)
 # keeps its function names in the dynamic symbol table only with -rdynamic;
 # with the narrow form the resolver finds no names and the trace stays empty.
 option(CSLG_EXPORT_ALL_SYMBOLS
     "Link programs that trace with -rdynamic (every symbol exported) instead of exporting only the hooks"
     OFF)
+# The names exported in the narrow form, as the linker sees them (mangled): the
+# two hooks, and with LOG_EXCEPTIONS the five interposed entry points (see
+# verify_interposers in src/exceptions.cpp) — __cxa_throw, __cxa_rethrow,
+# __cxa_begin_catch, std::rethrow_exception(std::exception_ptr) and
+# std::terminate(). A misspelled name exports nothing and no linker complains;
+# ExportListTest checks that the library defines every one of them.
+set(CSLG_HOOK_SYMBOLS __cyg_profile_func_enter __cyg_profile_func_exit)
+set(CSLG_INTERPOSED_SYMBOLS __cxa_throw __cxa_rethrow __cxa_begin_catch
+    _ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE _ZSt9terminatev)
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_LINK_OPTIONS "-Wl,--export-dynamic-symbol=main")
 check_cxx_source_compiles("int main() { return 0; }" CSLG_LINKER_HAS_EXPORT_DYNAMIC_SYMBOL)
@@ -261,13 +273,9 @@ function(cslg_set_consumer_link_options target)
         target_link_options(${target} INTERFACE -rdynamic)
         return()
     endif()
-    set(symbols __cyg_profile_func_enter __cyg_profile_func_exit)
+    set(symbols ${CSLG_HOOK_SYMBOLS})
     if(LOG_EXCEPTIONS)
-        # The five interposed entry points (see verify_interposers in
-        # src/exceptions.cpp): __cxa_throw, __cxa_rethrow, __cxa_begin_catch,
-        # std::rethrow_exception(std::exception_ptr), std::terminate().
-        list(APPEND symbols __cxa_throw __cxa_rethrow __cxa_begin_catch
-             _ZSt17rethrow_exceptionSt13exception_ptr _ZSt9terminatev)
+        list(APPEND symbols ${CSLG_INTERPOSED_SYMBOLS})
     endif()
     foreach(symbol IN LISTS symbols)
         target_link_options(${target} INTERFACE "-Wl,--export-dynamic-symbol=${symbol}")
