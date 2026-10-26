@@ -23,6 +23,7 @@
  * appear in the trace like any other.
  */
 
+#include <algorithm>
 #include <csetjmp>
 #include <cstdio>
 #include <stdexcept>
@@ -111,6 +112,64 @@ NOINLINE void inl_marker_c() {
     std::puts("inl_marker_c");
 }
 
+// --- D. functions without a linkage name inlined into their hosts make normal calls ---
+// DWARF gives no DW_AT_linkage_name to a C function (its name is not mangled)
+// nor, on GCC, to a C++ function with internal linkage, so the symbol table,
+// which only knows the host, must not name the call site: each inlined
+// parent's record is live while its callee runs, and the callee must sit
+// under it. The C function lives in inlined_c_part.c.
+
+NOINLINE void inl_child() {
+    std::puts("inl_child");
+}
+
+NOINLINE void inl_sibling() {
+    std::puts("inl_sibling");
+}
+
+namespace {
+ALWAYS_INLINE void inl_anon_parent() { inl_child(); __asm__ volatile(""); }
+} // namespace
+
+static ALWAYS_INLINE void inl_static_parent() { inl_child(); __asm__ volatile(""); }
+
+NOINLINE void inl_anon_host() {
+    inl_anon_parent();
+    inl_sibling();
+}
+
+NOINLINE void inl_static_host() {
+    inl_static_parent();
+    inl_sibling();
+}
+
+NOINLINE void inl_lambda_host() {
+    auto parent = []() __attribute__((always_inline)) { inl_child(); __asm__ volatile(""); };
+    parent();
+    inl_sibling();
+}
+
+// The everyday shape: a lambda passed to a standard algorithm. At -O2 both
+// std::for_each and the lambda are inlined into the host (GCC does not
+// instrument std::for_each at all; Clang's std filter drops its frames), so
+// each lambda activation is an inlined internal-linkage frame at the host's
+// level, entered three times in a row.
+NOINLINE void inl_for_each_host() {
+    const int values[3] = { 1, 2, 3 };
+    std::for_each(values, values + 3, [](int value) {
+        inl_child();
+        __asm__ volatile("" ::"r"(value));
+    });
+    inl_sibling();
+}
+
+// The C part (inlined_c_part.c): a C function inlined into its host.
+extern "C" void inl_c_host(void);
+
+NOINLINE void inl_marker_d() {
+    std::puts("inl_marker_d");
+}
+
 // clang-format on
 
 int main(int argc, char**) {
@@ -120,5 +179,11 @@ int main(int argc, char**) {
     inl_marker_b();
     inl_lambda_catcher(argc);
     inl_marker_c();
+    inl_anon_host();
+    inl_static_host();
+    inl_lambda_host();
+    inl_for_each_host();
+    inl_c_host();
+    inl_marker_d();
     return 0;
 }

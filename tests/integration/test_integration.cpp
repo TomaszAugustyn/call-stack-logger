@@ -3105,6 +3105,52 @@ TEST_F(LogExceptionsInlinedTest, CallAfterCatchingAnInlinedLambdaSitsUnderTheCat
     EXPECT_EQ(depth_of(trace_lines, "inl_marker_c"), 1) << trace_content;
 }
 
+// Functions without a DWARF linkage name — internal-linkage C++ functions on
+// GCC (anonymous namespace, static, a lambda, a lambda passed to
+// std::for_each) and a C function on both compilers — inlined into their hosts
+// call another function. Each parent's record is live while the call runs, so
+// the callee is its child (3) and the host's next call its sibling (2);
+// nothing is reclaimed, so no line carries a mark. Naming the call site's
+// function from the symbol table, which inside inlined code only knows the
+// HOST, took the parent's live record for a dead one, and every later line sat
+// one or more levels too shallow.
+TEST_F(LogExceptionsInlinedTest, CallsFromInlinedInternalLinkageFunctionsSitUnderThem) {
+    EXPECT_EQ(depth_of(trace_lines, "inl_anon_host"), 1) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_static_host"), 1) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_lambda_host()  (called from:"), 1) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_anon_parent"), 2) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_static_parent"), 2) << trace_content;
+    const std::vector<std::string> lambda_parent = lines_of(trace_lines, "inl_lambda_host()::");
+    ASSERT_EQ(lambda_parent.size(), 1u) << trace_content;
+    EXPECT_EQ(count_indentation_depth(lambda_parent[0]), 2) << lambda_parent[0];
+    EXPECT_EQ(tree_glyph_of(lambda_parent[0]), '|') << "a live frame was reclaimed:\n" << lambda_parent[0];
+    EXPECT_EQ(depth_of(trace_lines, "inl_for_each_host()  (called from:"), 1) << trace_content;
+    std::vector<std::string> for_each_lambdas;
+    for (const auto& line : lines_of(trace_lines, "inl_for_each_host()::")) {
+        for_each_lambdas.push_back(line);
+    }
+    ASSERT_EQ(for_each_lambdas.size(), 3u) << "one line per element of the std::for_each:\n" << trace_content;
+    for (const auto& line : for_each_lambdas) {
+        EXPECT_EQ(count_indentation_depth(line), 2) << line;
+        EXPECT_EQ(tree_glyph_of(line), '|') << "a live frame was reclaimed:\n" << line;
+    }
+    EXPECT_EQ(depths_of(trace_lines, "inl_child"), (std::vector<int>{ 3, 3, 3, 3, 3, 3 }))
+            << "each call must sit under its inlined parent:\n" << trace_content;
+    EXPECT_EQ(depths_of(trace_lines, "inl_sibling"), (std::vector<int>{ 2, 2, 2, 2 })) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_c_host"), 1) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_c_parent"), 2) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_c_child"), 3) << "the call must sit under the inlined C function:\n"
+                                                        << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_c_sibling"), 2) << trace_content;
+    EXPECT_EQ(depth_of(trace_lines, "inl_marker_d"), 1) << "at the end:\n" << trace_content;
+    for (const char* name : { "inl_anon_parent", "inl_static_parent", "inl_child", "inl_sibling",
+                              "inl_c_parent", "inl_c_child", "inl_c_sibling" }) {
+        for (const auto& line : lines_of(trace_lines, name)) {
+            EXPECT_EQ(tree_glyph_of(line), '|') << "a live frame was reclaimed:\n" << line;
+        }
+    }
+}
+
 // ============================================================================
 // Where the resolver's input lives — separate debug files, compressed debug
 // sections, object files that cannot be read, addresses outside every object,

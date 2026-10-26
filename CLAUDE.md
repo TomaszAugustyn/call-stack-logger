@@ -667,6 +667,25 @@ in `tests/unit/test_frame_reconcile.cpp`):
   host exited). Pinned by `LogExceptionsInlinedTest` (driver
   `inlined_traced_program.cpp`, `always_inline` frames, compiled at -O2
   unconditionally), on Clang with its default DWARF 5.
+- **Naming the innermost function for the reconciliation**
+  (`addressResolver::innermost_base_name`, used for `CachedLocation::function_base`
+  and for the innermost entry of an inline chain): the DWARF name whenever DWARF
+  names the function, the symbol-table name otherwise. Inside inlined code the
+  symbol table only knows the physical HOST, and the printed-name rule
+  (`function_name_of`) prefers the symbol table unless DWARF gives a mangled
+  `DW_AT_linkage_name` (to keep a static function's parameter list). No C
+  function has one (C names are not mangled), and on GCC no internal-linkage
+  C++ function has one (static, anonymous namespace, lambdas), so that rule
+  would name the host. A call made from such an inlined function then matched
+  the HOST's record, the live inlined parent above it was reclaimed, and every
+  later exit popped the wrong record (the tree flattened for the rest of the
+  thread, -O2). libbfd got this right through its lookup history: its first
+  lookup inside such a function returned the host's symbol and later ones the
+  DWARF name, and the inlined function's own enter hook made that first lookup
+  when it read the inline chain. Pinned by
+  `LogExceptionsInlinedTest.CallsFromInlinedInternalLinkageFunctionsSitUnderThem`
+  (anonymous-namespace, static and lambda parents, a lambda passed to
+  `std::for_each`, and a C parent from `inlined_c_part.c`).
 - **Thread-stack confinement**: `pthread_getattr_np` bounds, resolved once per
   thread inside the enter hook's barrier (the main thread's lookup reads
   /proc/self/maps). Records off the thread stack (fibers, sigaltstack) are
@@ -983,6 +1002,7 @@ call-stack-logger/
 |       |-- throwing_lib.cpp      # Shared lib built without instrumentation whose only function throws
 |       |-- uncaught_traced_program.cpp # Instrumented, LOG_EXCEPTIONS + LOG_ELAPSED; every path to std::terminate, one per mode (terminate line), incl. a std::thread
 |       |-- inlined_traced_program.cpp # Instrumented at -O2, LOG_EXCEPTIONS; always_inline thrower chain and retry leaf (inline chains)
+|       |-- inlined_c_part.c    # C part of the inlined driver: a C function (no DWARF linkage name) inlined into its host
 |       |-- crash_traced_program.cpp # Instrumented, LOG_ELAPSED; abort()s mid-chain (pending-placeholder crash diagnostics)
 |       |-- global_dtor_traced_program.cpp # Instrumented; global object dtor calls traced code during exit()
 |       |-- cancel_traced_program.cpp # Instrumented; worker thread is pthread_cancel()ed while tracing
@@ -1034,7 +1054,7 @@ replacement) with:
   `DwarfEntry` / `Lookup` (what libbacktrace reports for one address: the
   innermost-first DWARF entries and the containing symbol) and `AddressInfo`
   (a `dladdr1` result plus the load bias, taken outside the mutex)
-- Static methods: `ensure_object_loaded()`, `query_address()`, `resolve()`,
+- Static methods: `ensure_object_loaded()`, `query_address()`, `resolve()`, `innermost_base_name()`,
   `resolve_function_name()`, `resolve_filename_and_line()`, `look_up()`,
   `function_name_of()`, `state()`, `get_argv0()`, `object_file_path()`,
   `mapped_object_path()`
@@ -1646,13 +1666,17 @@ Test pure/deterministic functions from the include headers:
   sanitized messages (control characters, a 300-byte text cut to 127, `throw 42`),
   the order of events along the flow (throw, cleanup helper, catch, marker; a throw
   inside a handler), and the worker thread's own events; `LogExceptionsElapsedTest`
-  adds the event column words. `LogExceptionsInlinedTest` (2 tests) drives
+  adds the event column words. `LogExceptionsInlinedTest` (4 tests) drives
   `cslg_traced_test_program_log_exceptions_inlined`, built from
-  `inlined_traced_program.cpp` at -O2 with `always_inline` frames: the call after a
-  catch whose thrower chain was inlined into the catcher sits under the catcher, the
-  catch line too, the inlined frames carry `!_`; and a retry loop whose longjmp'ing leaf
-  is inlined keeps its marker at the loop's depth with every leaf marked `~_` — both
-  need the DWARF inline chains (read from Clang's default DWARF 5 as well). `LogExceptionsUncaughtTest` (6 tests) drives
+  `inlined_traced_program.cpp` and `inlined_c_part.c` at -O2 with `always_inline`
+  frames: the call after a catch whose thrower chain was inlined into the catcher sits
+  under the catcher, the catch line too, the inlined frames carry `!_`; a retry loop
+  whose longjmp'ing leaf is inlined keeps its marker at the loop's depth with every
+  leaf marked `~_`; the call after catching what an inlined lambda threw sits under
+  the catcher; and calls made from inlined functions without a DWARF linkage name
+  (GCC's internal-linkage functions, a lambda passed to `std::for_each`, a C
+  function) sit under them, unmarked — all four need the DWARF inline chains (read
+  from Clang's default DWARF 5 as well). `LogExceptionsUncaughtTest` (6 tests) drives
   `cslg_uncaught_traced_program_log_exceptions_elapsed` in one mode per test (its
   command-line argument): the plain uncaught throw (the process must die, the last
   line is the `terminate` line at the thrower's depth + 1, the throw line precedes

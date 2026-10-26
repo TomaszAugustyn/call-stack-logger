@@ -322,6 +322,8 @@ target_link_libraries(cslg_traced_test_program_log_exceptions_all PRIVATE Thread
 # and hook placement match the optimized builds the README recommends.
 cslg_add_flag_variant(log_exceptions_inlined inlined_traced_program.cpp LOG_EXCEPTIONS)
 target_compile_options(cslg_traced_test_program_log_exceptions_inlined PRIVATE -O2)
+# Scenario D's C function (a C name has no DWARF linkage name on either compiler).
+target_sources(cslg_traced_test_program_log_exceptions_inlined PRIVATE inlined_c_part.c)
 
 # Combined-flags variant: both output-content macros defined simultaneously.
 # Exercises LOG_ELAPSED's byte-offset math under the line-layout changes

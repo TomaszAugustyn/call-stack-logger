@@ -201,6 +201,19 @@ private:
     NO_INSTRUMENT
     static std::string function_name_of(const Lookup& lookup, NameOf name_of);
 
+    /// The base name (function_base_name in frameReconcile.h) of the innermost
+    /// function at the address, for the frame reconciliation only — it is never
+    /// printed. Taken from DWARF whenever DWARF names the function: inside
+    /// inlined code the symbol table only knows the inline HOST, and
+    /// function_name_of() prefers the symbol table unless DWARF gives a mangled
+    /// linkage name, which no C function has and, on GCC, no internal-linkage
+    /// C++ function (static, anonymous namespace, lambda) — it would name the
+    /// host there. Falls back to function_name_of() (symbol table, then
+    /// nothing) when DWARF has no name for the address. Empty when nothing
+    /// names it.
+    NO_INSTRUMENT
+    static std::string innermost_base_name(const Lookup& lookup);
+
     /// Names the callee from `address_info`, the dladdr() result for
     /// callee_address (`valid` false when dladdr() failed). Must be called
     /// with s_resolver_mutex held; the dladdr() call itself is made by

@@ -369,6 +369,21 @@ std::string addressResolver::function_name_of(const Lookup& lookup, NameOf name_
     return lookup.symbol;
 }
 
+std::string addressResolver::innermost_base_name(const Lookup& lookup) {
+    // libbfd answered with the inlined function's own DWARF name as well, but
+    // only from its second lookup inside that function on: the first one
+    // returned the host's symbol and the reply was then cached in its DWARF
+    // tables. The enter hook of an inlined function always looked its inline
+    // chain up first, so the call sites inside it got the DWARF name. Taking
+    // the DWARF name every time keeps that answer without the history.
+    const std::string& dwarf = lookup.entries.empty() ? std::string() : lookup.entries.front().function;
+    const std::string name = dwarf.empty() ? function_name_of(lookup, NameOf::innermost_function) : dwarf;
+    if (name.empty()) {
+        return std::string();
+    }
+    return std::string(function_base_name(demangle_cxa(name.c_str())));
+}
+
 std::optional<std::string> addressResolver::resolve_function_name(void* address, const AddressInfo& address_info,
                                                                   NameOf name_of) {
     // An invalid address_info means dladdr() failed for this address (its
@@ -449,12 +464,15 @@ addressResolver::CachedLocation addressResolver::resolve_filename_and_line(void*
     }
 
     const Lookup lookup = look_up(*object, address);
-    // The innermost function containing the address — an inlined copy's own
-    // name when the site lies inside one (DWARF inline info) — chosen as BFD
-    // chose it (see function_name_of).
+    // The innermost function containing the address, as the printed fallback
+    // text names it (see function_name_of) ...
     const std::string function = function_name_of(lookup, NameOf::innermost_function);
-    if (!function.empty()) {
-        location.function_base = std::string(function_base_name(demangle_cxa(function.c_str())));
+    // ... and, for the frame reconciliation, as DWARF names it: inside an
+    // inlined function the call site's direct parent is that function, which
+    // the symbol table cannot name (see innermost_base_name).
+    const std::string base = innermost_base_name(lookup);
+    if (!base.empty()) {
+        location.function_base = base;
     }
     // A DWARF position needs both a file and a line: libbacktrace reports the
     // compilation unit's file with line 0 for an address no line row covers,
@@ -732,13 +750,14 @@ std::vector<std::string> addressResolver::read_inline_chain(void* address, const
     if (lookup.entries.empty() || lookup.entries.front().file.empty() || lookup.entries.front().line == 0) {
         return chain;
     }
-    const std::string innermost = function_name_of(lookup, NameOf::innermost_function);
+    std::string innermost = innermost_base_name(lookup);
     if (innermost.empty()) {
         return chain;
     }
-    // The innermost function (named as every lookup names it), then each
-    // function it was inlined into, outward — the order libbacktrace reports.
-    chain.emplace_back(function_base_name(demangle_cxa(innermost.c_str())));
+    // The innermost function (named from DWARF, see innermost_base_name), then
+    // each function it was inlined into, outward — the order libbacktrace
+    // reports.
+    chain.push_back(std::move(innermost));
     for (size_t i = 1; i < lookup.entries.size(); ++i) {
         if (!lookup.entries[i].function.empty()) {
             chain.emplace_back(function_base_name(demangle_cxa(lookup.entries[i].function.c_str())));
