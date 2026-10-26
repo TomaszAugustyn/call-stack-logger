@@ -29,7 +29,7 @@ services:
       - .:/workspace
     command: >
       bash -c "
-        cmake -B build-clang -DBUILD_TESTS=ON -DCMAKE_CXX_COMPILER=clang++ &&
+        cmake -B build-clang -DBUILD_TESTS=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ &&
         cmake --build build-clang -j$$(nproc) &&
         cd build-clang && ctest --output-on-failure
       "
@@ -57,7 +57,7 @@ services:
       - .:/workspace
     command: >
       bash -c "
-        cmake -B build-clang-optimized -DBUILD_TESTS=ON -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo &&
+        cmake -B build-clang-optimized -DBUILD_TESTS=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo &&
         cmake --build build-clang-optimized -j$$(nproc) &&
         cd build-clang-optimized && ctest --output-on-failure
       "
@@ -140,7 +140,7 @@ services:
       UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
     command: >
       bash -c "
-        cmake -B build-asan-clang -DBUILD_TESTS=ON -DSANITIZE=address+undefined -DCMAKE_CXX_COMPILER=clang++ -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
+        cmake -B build-asan-clang -DBUILD_TESTS=ON -DSANITIZE=address+undefined -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
         cmake --build build-asan-clang -j$$(nproc) &&
         cd build-asan-clang && ctest --output-on-failure
       "
@@ -153,7 +153,7 @@ services:
       TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
     command: >
       bash -c "
-        cmake -B build-tsan-clang -DBUILD_TESTS=ON -DSANITIZE=thread -DCMAKE_CXX_COMPILER=clang++ -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
+        cmake -B build-tsan-clang -DBUILD_TESTS=ON -DSANITIZE=thread -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DLOG_EXCEPTIONS=ON -DLOG_ELAPSED=ON -DLOG_ADDR=ON &&
         cmake --build build-tsan-clang -j$$(nproc) &&
         cd build-tsan-clang && ctest --output-on-failure
       "

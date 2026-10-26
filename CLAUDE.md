@@ -1962,7 +1962,9 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with sev
   `get_call_stack()` chain the API test keeps physical with `noinline` +
   `-fno-optimize-sibling-calls`). Locally available as the `test-optimized` docker
   compose service.
-- **clang**: builds with `-DCMAKE_CXX_COMPILER=clang++`, runs tests.
+- **clang**: builds with `-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++`, runs
+  tests. Both compilers: libbacktrace and `src/backtraceExtension.c` are C, and with
+  the C++ compiler alone they were compiled by GCC in every "Clang" job.
 - **clang-optimized**: the same with `-DCMAKE_BUILD_TYPE=RelWithDebInfo`. Clang at -O2
   lays the instrumented code out differently from GCC at -O2 and from Clang at -O0
   (tail-called exit hooks, its own inlining and landing pads, no exit hook on the

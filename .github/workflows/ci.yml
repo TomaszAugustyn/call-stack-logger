@@ -96,7 +96,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y clang libc6-dbg
 
     - name: Configure CMake
-      run: cmake -B build -DBUILD_TESTS=ON -DCMAKE_CXX_COMPILER=clang++
+      run: cmake -B build -DBUILD_TESTS=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 
     - name: Build
       run: cmake --build build
@@ -122,7 +122,7 @@ jobs:
     # here (the inlined driver is built at -O2 in every job, the rest of the
     # suite is not).
     - name: Configure CMake
-      run: cmake -B build -DBUILD_TESTS=ON -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      run: cmake -B build -DBUILD_TESTS=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
     - name: Build
       run: cmake --build build

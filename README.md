@@ -49,8 +49,8 @@ mkdir build && cd build
 
 # Configure cmake with default logging (GCC is the default compiler)
 cmake ..
-# or to build with Clang instead of GCC
-cmake -DCMAKE_CXX_COMPILER=clang++ ..
+# or to build with Clang instead of GCC (both compilers: the bundled libbacktrace is C)
+cmake -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ ..
 # or to log the execution time of each function entry
 cmake -DLOG_ELAPSED=ON ..
 # or to include each callee's address in the output
