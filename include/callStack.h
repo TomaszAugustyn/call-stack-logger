@@ -280,8 +280,9 @@ private:
 
     /// Path of the object file described by `symbol_info` to register with
     /// libbacktrace: /proc/self/exe for the main executable, else the mapped
-    /// file's absolute path, else dli_fname verbatim. Empty when nothing usable
-    /// exists.
+    /// file's absolute path, else dli_fname when it is absolute. Empty when
+    /// nothing usable exists — also for a mapping whose file was deleted, and
+    /// for the vdso (whose dli_fname is a bare name).
     NO_INSTRUMENT
     static std::string object_file_path(const Dl_info& symbol_info);
 

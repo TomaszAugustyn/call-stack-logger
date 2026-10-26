@@ -24,6 +24,13 @@
  *              the file instead (same text as above, and the program lives).
  *   nomodule   the public resolve() API is handed addresses that belong to
  *              no loaded object (0x1, a heap block); the result is printed.
+ *   planted    like "deleted", but a copy of the same plugin is then put
+ *              under the name the kernel shows for the deleted mapping,
+ *              "<path> (deleted)": it must not be read either.
+ *   vdso       a copy of the plugin is planted in a fresh current directory as
+ *              "linux-vdso.so.1", the name dladdr() reports for the vdso, and
+ *              an address in the vdso is resolved at the plugin function's
+ *              offset: the planted file must not be read as the vdso.
  *   dwarf      the version of the copy's first .debug_info unit is set to 99,
  *              a DWARF version no reader knows: the DWARF data cannot be
  *              used, but the symbol table can, so the plugin's functions must
@@ -39,6 +46,7 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <link.h> // for ElfW
+#include <sys/auxv.h> // for getauxval(AT_SYSINFO_EHDR)
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -163,8 +171,61 @@ void print_resolution(const char* label, void* callee, void* caller) {
 
 } // namespace
 
+// Copies a file; returns false on failure.
+bool copy_file(const char* from, const char* to) {
+    FILE* in = std::fopen(from, "rb");
+    FILE* out = in != nullptr ? std::fopen(to, "wb") : nullptr;
+    bool ok = out != nullptr;
+    char buffer[65536];
+    size_t got;
+    while (ok && (got = std::fread(buffer, 1, sizeof buffer, in)) > 0) {
+        ok = std::fwrite(buffer, 1, got, out) == got;
+    }
+    if (in != nullptr) {
+        std::fclose(in);
+    }
+    if (out != nullptr) {
+        std::fclose(out);
+    }
+    return ok;
+}
+
+// Resolves an address of the vdso while a copy of the plugin sits in the
+// current directory under the vdso's name. The address is the vdso's base plus
+// the offset of dlopen_plugin_entry in the plugin, so a resolver that read the
+// planted file would name it after that function.
+int resolve_vdso_with_planted_file() {
+    char dir[] = "/tmp/cslg_vdso_XXXXXX";
+    if (mkdtemp(dir) == nullptr || chdir(dir) != 0 || !copy_file(DAMAGED_PLUGIN_PATH, "linux-vdso.so.1")) {
+        std::perror("setup");
+        return 2;
+    }
+    void* plugin = dlopen(DAMAGED_PLUGIN_PATH, RTLD_NOW);
+    void* entry = plugin != nullptr ? dlsym(plugin, "dlopen_plugin_entry") : nullptr;
+    Dl_info plugin_info {};
+    char* vdso = reinterpret_cast<char*>(getauxval(AT_SYSINFO_EHDR));
+    if (entry == nullptr || vdso == nullptr || dladdr(entry, &plugin_info) == 0) {
+        std::puts("VDSO_SKIP no vdso or no plugin");
+        return 0;
+    }
+    char* address = vdso + (static_cast<char*>(entry) - static_cast<char*>(plugin_info.dli_fbase));
+    Dl_info vdso_info {};
+    if (dladdr(address, &vdso_info) == 0 || vdso_info.dli_fbase != vdso) {
+        std::puts("VDSO_SKIP the vdso is smaller than the plugin's offset");
+        return 0;
+    }
+    print_resolution("vdso", address, address + 1);
+    unlink("linux-vdso.so.1");
+    rmdir(dir);
+    std::puts("DAMAGED_DONE");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const char* mode = argc > 1 ? argv[1] : "";
+    if (std::strcmp(mode, "vdso") == 0) {
+        return resolve_vdso_with_planted_file();
+    }
     if (std::strcmp(mode, "nomodule") == 0) {
         print_resolution("tiny", reinterpret_cast<void*>(0x1), reinterpret_cast<void*>(0x2));
         void* heap = std::malloc(64);
@@ -175,8 +236,9 @@ int main(int argc, char** argv) {
     }
     const bool truncated = std::strcmp(mode, "truncated") == 0;
     const bool bad_dwarf = std::strcmp(mode, "dwarf") == 0;
-    if (!truncated && !bad_dwarf && std::strcmp(mode, "deleted") != 0) {
-        std::fprintf(stderr, "usage: %s deleted|truncated|dwarf|nomodule\n", argv[0]);
+    const bool planted = std::strcmp(mode, "planted") == 0;
+    if (!truncated && !bad_dwarf && !planted && std::strcmp(mode, "deleted") != 0) {
+        std::fprintf(stderr, "usage: %s deleted|planted|truncated|dwarf|vdso|nomodule\n", argv[0]);
         return 2;
     }
     char dir[64];
@@ -204,8 +266,15 @@ int main(int argc, char** argv) {
     if (!truncated && !bad_dwarf) {
         unlink(copy);
     }
+    char planted_copy[128];
+    std::snprintf(planted_copy, sizeof planted_copy, "%s (deleted)", copy);
+    if (planted && !copy_file(DAMAGED_PLUGIN_PATH, planted_copy)) {
+        std::perror("plant");
+        return 2;
+    }
     const int rc = call_plugin(handle);
     unlink(copy);
+    unlink(planted_copy);
     rmdir(dir);
     std::puts("DAMAGED_DONE");
     return rc;

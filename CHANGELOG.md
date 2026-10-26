@@ -29,6 +29,12 @@ of `master`.
   `<not sectioned address>` no longer occur. Separate debug files
   (`.gnu_debuglink`, build IDs under `/usr/lib/debug`), zlib- and
   zstd-compressed debug sections and MiniDebugInfo (`.gnu_debugdata`) are read.
+- The resolver opens only files the kernel names for a mapping: a plugin
+  deleted after loading is reported as `<could not open object file>` even
+  when a file has been created under the name `/proc/self/maps` shows for it
+  (`<path> (deleted)`), and the vdso, which dladdr() names
+  `linux-vdso.so.1`, is never looked up in the current directory. Earlier
+  releases opened both names and read whatever file they found.
 - A truncated object file (a half-copied plugin, for example) is rejected and
   reported as `<could not open object file>`; libbacktrace alone would map
   the missing bytes and fault when reading them.

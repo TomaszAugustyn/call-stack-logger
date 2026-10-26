@@ -26,6 +26,7 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <unistd.h>
 
 namespace {
@@ -62,6 +63,10 @@ instrumentation::ResolvedFrame own_frame(const instrumentation::ResolvedFrameVie
     frame.caller_line_number = view.caller_line_number;
     return frame;
 }
+
+// What the kernel appends, in /proc/self/maps, to the path of a mapping whose
+// file has been unlinked since it was mapped.
+constexpr std::string_view DELETED_MAPPING_SUFFIX = " (deleted)";
 
 // libbacktrace's error callback. It is called for malformed or unreadable
 // files at registration and, per lookup, with errnum -1 when the registered
@@ -271,14 +276,30 @@ std::string addressResolver::object_file_path(const Dl_info& symbol_info) {
     // then names an unrelated file (symbol names and lines come from the wrong
     // object) or nothing ("<could not open object file>" for every frame).
     // The kernel records the absolute path of each file-backed mapping at mmap
-    // time, so the mapping containing dli_fbase is the reliable source. A
-    // mapping of a since-deleted file carries a " (deleted)" suffix; opening
-    // that fails and the object is negative-cached — honest, unlike silently
-    // reading whatever file now sits at the old path.
+    // time, so the mapping containing dli_fbase is the reliable source.
     if (std::optional<std::string> mapped = mapped_object_path(symbol_info.dli_fbase)) {
+        // The kernel appends DELETED_MAPPING_SUFFIX to the path of a mapping
+        // whose file was unlinked after it was mapped. No file can be trusted
+        // for such an object: the old path may now hold a rebuilt or unrelated
+        // file, and anyone who can write to the directory can create a file
+        // under the suffixed name too. The object is negative-cached instead —
+        // honest, unlike reading whatever file now sits there.
+        const std::string_view path(*mapped);
+        if (path.size() >= DELETED_MAPPING_SUFFIX.size()
+            && path.substr(path.size() - DELETED_MAPPING_SUFFIX.size()) == DELETED_MAPPING_SUFFIX) {
+            return std::string();
+        }
         return *mapped;
     }
-    return symbol_info.dli_fname != nullptr ? std::string(symbol_info.dli_fname) : std::string();
+    // No file-backed mapping contains the object (the vdso, whose [vdso]
+    // mapping has no file; or /proc is not mounted). dli_fname is used only
+    // when it is absolute: for the vdso it is "linux-vdso.so.1", which an
+    // open() would look up in the CURRENT directory, where any file of that
+    // name would be read as the vdso's symbols and lines.
+    if (symbol_info.dli_fname != nullptr && symbol_info.dli_fname[0] == '/') {
+        return std::string(symbol_info.dli_fname);
+    }
+    return std::string();
 }
 
 addressResolver::AddressInfo addressResolver::query_address(void* address) {

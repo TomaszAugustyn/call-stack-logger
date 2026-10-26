@@ -3364,6 +3364,38 @@ TEST(DamagedObjectTest, TruncatedPluginFileIsRejectedNotMapped) {
             << trace;
 }
 
+// The deleted plugin's mapping shows "<path> (deleted)" in /proc/self/maps, and
+// a file was created under exactly that name (here a copy of the same plugin,
+// so that reading it would visibly succeed). It must not be read: whatever
+// sits under that name is not the mapped file.
+TEST(DamagedObjectTest, FilePlantedUnderTheDeletedMappingsNameIsNotRead) {
+    int status = 0;
+    std::string out;
+    const std::string trace = run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "planted", status, out);
+    ASSERT_EQ(status, 0) << out;
+    EXPECT_NE(out.find("plugin result=11"), std::string::npos) << out;
+    EXPECT_NE(trace.find("|_ <could not open object file>  (called from: "), std::string::npos)
+            << "the planted file was read as the deleted plugin. Trace:\n" << trace;
+    EXPECT_EQ(trace.find("dlopen_plugin_helper"), std::string::npos) << trace;
+}
+
+// dladdr() names the vdso "linux-vdso.so.1", a bare name with no file behind
+// it. A resolver that opened that name would read a file of that name in the
+// current directory (here a planted copy of the plugin, looked up at the
+// offset of one of its functions) as the vdso's symbols.
+TEST(DamagedObjectTest, VdsoIsNotLookedUpInTheCurrentDirectory) {
+    int status = 0;
+    std::string out;
+    run_traced_program(DAMAGED_OBJECTS_PROGRAM_PATH, "vdso", status, out);
+    ASSERT_EQ(status, 0) << out;
+    if (out.find("VDSO_SKIP") != std::string::npos) {
+        GTEST_SKIP() << out;
+    }
+    EXPECT_NE(out.find("vdso: NAME=<could not open object file>"), std::string::npos)
+            << "the planted ./linux-vdso.so.1 was read as the vdso:\n" << out;
+    EXPECT_EQ(out.find("dlopen_plugin"), std::string::npos) << out;
+}
+
 // A plugin whose DWARF data no reader can use (its first unit claims DWARF
 // version 99) but whose symbol table is intact: the symbol table still names
 // every function, the lines read "???". Rejecting the whole file would turn

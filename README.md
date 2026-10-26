@@ -342,7 +342,9 @@ address is located through `/proc/self/maps`, so a plugin loaded by a relative
 path (`dlopen("./plugin.so")`) resolves correctly even if the program `chdir()`s
 before the first traced call into it. A plugin whose file was deleted or replaced
 on disk after loading reports `<could not open object file>` instead of symbols
-from the wrong file.
+from the wrong file, and so does an object without a file of its own (the vdso):
+the resolver only opens absolute paths it got from the kernel, never a bare name
+that would be looked up in the current directory.
 
 ## :gear: Configuration ##
 

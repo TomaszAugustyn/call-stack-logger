@@ -102,10 +102,17 @@ Address resolution happens in stages (implemented in `src/callStack.cpp`):
    mmap time, so maps is immune to chdir. `/proc/self/map_files/<range>` would
    be the cleaner source but opening it needs `CAP_SYS_ADMIN` /
    checkpoint-restore rights (EPERM for a normal user). A since-deleted
-   object's mapping carries a ` (deleted)` suffix; the open fails and the object
-   is negative-cached rather than silently reading a replacement file. Pinned
-   by `DlopenPluginTest.RelativeDlopenPathResolvesAfterChdir` and
-   `DamagedObjectTest.DeletedPluginFileIsReportedNotRead`.
+   object's mapping carries a ` (deleted)` suffix (`DELETED_MAPPING_SUFFIX`);
+   such a path is refused outright and the object negative-cached, because a
+   file may have been created under that very name (or a rebuilt one at the old
+   path) — opening it would read symbols and lines from the wrong file. When no
+   file-backed mapping contains the object (the vdso; `/proc` not mounted),
+   `dli_fname` is used only if it is ABSOLUTE: the vdso's is the bare name
+   `linux-vdso.so.1`, which an open() looks up in the current directory. Pinned
+   by `DlopenPluginTest.RelativeDlopenPathResolvesAfterChdir`,
+   `DamagedObjectTest.DeletedPluginFileIsReportedNotRead`,
+   `DamagedObjectTest.FilePlantedUnderTheDeletedMappingsNameIsNotRead` and
+   `DamagedObjectTest.VdsoIsNotLookedUpInTheCurrentDirectory`.
    **The load-bias rule:** the base handed to `elf_add()` is `link_map::l_addr`,
    never `dli_fbase`. The two coincide for PIEs and shared objects and differ
    for a non-PIE executable (bias 0, map start 0x400000), where every lookup
@@ -1710,9 +1717,14 @@ Test pure/deterministic functions from the include headers:
 - `CompressedDebugSectionsTest` (2 tests) — call sites inside libraries built with
   `-gz=zlib` and `-gz=zstd` resolve to file and line; the zstd test skips when the
   toolchain lacks `-gz=zstd` (`CSLG_HAVE_ZSTD_DEBUG`).
-- `DamagedObjectTest` (3 tests) — `cslg_damaged_objects_traced_program` copies the
+- `DamagedObjectTest` (6 tests) — `cslg_damaged_objects_traced_program` copies the
   dlopen plugin: deleted after loading → `<could not open object file>` /
   `<could not open caller object file>:???` and no name from the vanished file;
+  the same with a copy planted under `<path> (deleted)`, which must not be read;
+  a copy planted as `./linux-vdso.so.1` while a vdso address is resolved at the
+  plugin function's offset, which must not be read as the vdso; a copy whose
+  first `.debug_info` unit claims DWARF version 99 → names from the symbol table,
+  `:???` for lines;
   truncated right after the last PT_LOAD (the loader still maps it, the section
   headers are gone) → the same texts and exit 0 — the file-size guard in
   `backtraceExtension.c` is what keeps this from a SIGBUS; addresses in no object
