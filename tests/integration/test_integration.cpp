@@ -27,6 +27,7 @@
 #include <limits>
 #include <link.h> // ElfW, for the ELF section-name check of the fixture files
 #include <map>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -34,6 +35,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+
+#ifndef ELFCOMPRESS_ZSTD
+#define ELFCOMPRESS_ZSTD 2 // an older <elf.h> may lack it
+#endif
 
 // TRACED_PROGRAM_PATH is defined by CMake as a compile definition
 // pointing to the absolute path of the traced_test_program executable.
@@ -803,6 +808,9 @@ TEST(StrippedCallerTest, CallerInStrippedLibraryDoesNotHang) {
     // symbol, no line info in the stripped .so: "<unknown function>:???").
     EXPECT_NE(content.find("traced_callback"), std::string::npos)
             << "traced_callback entry missing from trace. Trace:\n" << content;
+    EXPECT_NE(content.find("|_ traced_callback()  (called from: <unknown function>:\?\?\?)"),
+              std::string::npos)
+            << "the caller inside the stripped library is not reported as unknown. Trace:\n" << content;
 }
 
 // ============================================================================
@@ -3201,27 +3209,25 @@ std::vector<std::string> entry_lines_of(const std::string& trace) {
     return entries;
 }
 
-// Whether the ELF file at `path` has a section called `name` — read from its
-// section header string table, not by searching the file's bytes: a program
-// that contains the symbolizer carries the section names of DWARF as string
-// literals in its own data. Used to confirm a fixture's post-build step
-// (strip, objcopy) really ran.
-bool elf_has_section(const std::string& path, const std::string& name) {
-    const std::string content = read_file(path);
+// The header of the section called `name` in the ELF file `content` (the
+// whole file) — read from its section header string table, not by searching
+// the file's bytes: a program that contains the symbolizer carries the section
+// names of DWARF as string literals in its own data.
+std::optional<ElfW(Shdr)> elf_section(const std::string& content, const std::string& name) {
     if (content.size() < sizeof(ElfW(Ehdr))) {
-        return false;
+        return std::nullopt;
     }
     ElfW(Ehdr) ehdr {};
     std::memcpy(&ehdr, content.data(), sizeof ehdr);
     if (ehdr.e_shoff == 0 || ehdr.e_shstrndx >= ehdr.e_shnum
         || ehdr.e_shoff + static_cast<size_t>(ehdr.e_shnum) * sizeof(ElfW(Shdr)) > content.size()) {
-        return false;
+        return std::nullopt;
     }
     std::vector<ElfW(Shdr)> headers(ehdr.e_shnum);
     std::memcpy(headers.data(), content.data() + ehdr.e_shoff, headers.size() * sizeof(ElfW(Shdr)));
     const ElfW(Shdr)& strings = headers[ehdr.e_shstrndx];
     if (strings.sh_offset + strings.sh_size > content.size()) {
-        return false;
+        return std::nullopt;
     }
     for (const ElfW(Shdr)& header : headers) {
         if (header.sh_name >= strings.sh_size) {
@@ -3229,10 +3235,31 @@ bool elf_has_section(const std::string& path, const std::string& name) {
         }
         const char* section_name = content.data() + strings.sh_offset + header.sh_name;
         if (std::strncmp(section_name, name.c_str(), strings.sh_size - header.sh_name) == 0) {
-            return true;
+            return header;
         }
     }
-    return false;
+    return std::nullopt;
+}
+
+// Whether the ELF file at `path` has a section called `name`. Used to confirm
+// a fixture's post-build step (strip, objcopy) really ran.
+bool elf_has_section(const std::string& path, const std::string& name) {
+    return elf_section(read_file(path), name).has_value();
+}
+
+// How the section called `name` in the ELF file at `path` is compressed: the
+// ch_type of its compression header (ELFCOMPRESS_ZLIB, ELFCOMPRESS_ZSTD), or
+// 0 when it is stored as it is or missing.
+unsigned elf_section_compression(const std::string& path, const std::string& name) {
+    const std::string content = read_file(path);
+    const std::optional<ElfW(Shdr)> section = elf_section(content, name);
+    if (!section || (section->sh_flags & SHF_COMPRESSED) == 0
+        || section->sh_offset + sizeof(ElfW(Chdr)) > content.size()) {
+        return 0;
+    }
+    ElfW(Chdr) header {};
+    std::memcpy(&header, content.data() + section->sh_offset, sizeof header);
+    return header.ch_type;
 }
 
 // Every build of traced_program.cpp — PIE, non-PIE, stripped with a debug
@@ -3304,6 +3331,8 @@ TEST(SeparateDebugFileTest, DebuglinkFileSuppliesNamesAndLines) {
 // -gz=zlib: the debug sections carry the SHF_COMPRESSED flag and a compression
 // header; libbacktrace inflates them itself (no zlib dependency).
 TEST(CompressedDebugSectionsTest, ZlibCompressedLinesResolve) {
+    ASSERT_EQ(elf_section_compression(ZLIB_DEBUG_LIB_PATH, ".debug_info"), unsigned { ELFCOMPRESS_ZLIB })
+            << "the fixture's .debug_info is not zlib-compressed, so the decoder is not exercised";
     int status = 0;
     std::string out;
     const std::string trace = run_traced_program(DEBUG_OBJECTS_PROGRAM_PATH, "", status, out);
@@ -3318,6 +3347,8 @@ TEST(CompressedDebugSectionsTest, ZstdCompressedLinesResolve) {
 #ifndef CSLG_HAVE_ZSTD_DEBUG
     GTEST_SKIP() << "the toolchain does not support -gz=zstd";
 #else
+    ASSERT_EQ(elf_section_compression(ZSTD_DEBUG_LIB_PATH, ".debug_info"), unsigned { ELFCOMPRESS_ZSTD })
+            << "the fixture's .debug_info is not zstd-compressed, so the decoder is not exercised";
     int status = 0;
     std::string out;
     const std::string trace = run_traced_program(DEBUG_OBJECTS_PROGRAM_PATH, "", status, out);

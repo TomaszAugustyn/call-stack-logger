@@ -1625,8 +1625,9 @@ Test pure/deterministic functions from the include headers:
   caller address lies in a file-local function of the stripped
   `libcslg_stripped_caller.so`, so `dladdr` yields no symbol and the symbolizer
   finds neither a symbol nor a line; the resolver must return the
-  `<unknown function>:???` fallback instead of spinning forever while holding
-  `s_resolver_mutex`. The program runs under `timeout 10`, so a regression fails
+  `<unknown function>:???` fallback (asserted on the callback's line) instead of
+  spinning forever while holding `s_resolver_mutex`. The program runs under
+  `timeout 10`, so a regression fails
   fast with exit code 124 instead of hanging the suite.
 - `LogAddrFlagTest` (2 tests) exercises the build-time CMake option `-DLOG_ADDR=ON`.
   The flag has its own library variant in `tests/integration/CMakeLists.txt` —
@@ -1765,8 +1766,11 @@ Test pure/deterministic functions from the include headers:
   (no `.debug_info`, a `.gnu_debuglink`) and that the helper's call site inside the
   library resolves to `separate_debug_lib.cpp:<line>`.
 - `CompressedDebugSectionsTest` (2 tests) — call sites inside libraries built with
-  `-gz=zlib` and `-gz=zstd` resolve to file and line; the zstd test skips when the
-  toolchain lacks `-gz=zstd` (`CSLG_HAVE_ZSTD_DEBUG`).
+  `-gz=zlib` and `-gz=zstd` resolve to file and line; each test first requires its
+  library's `.debug_info` to carry a compression header of the right type
+  (`ELFCOMPRESS_ZLIB` / `ELFCOMPRESS_ZSTD`), so a toolchain that ignored the flag cannot
+  leave a decoder untested; the zstd test skips when the toolchain lacks `-gz=zstd`
+  (`CSLG_HAVE_ZSTD_DEBUG`).
 - `DamagedObjectTest` (11 tests) — `cslg_damaged_objects_traced_program` copies the
   dlopen plugin: deleted after loading → `<could not open object file>` /
   `<could not open caller object file>:???` and no name from the vanished file;
