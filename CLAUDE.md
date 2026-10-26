@@ -1204,7 +1204,8 @@ The core implementation. Key functions:
   the main executable (PATH-found argv[0] is no path), else the mapping's absolute path from
   `mapped_object_path()` (`/proc/self/maps`, immune to a relative `dlopen` path + later
   `chdir`), else `dli_fname`
-- `get_call_stack()` - Uses `backtrace()` to build full call stack (max 1000 frames);
+- `get_call_stack()` - Uses `backtrace()` to build the full call stack (room for 1000
+  frames first, doubled while `backtrace()` fills it — no depth limit);
   each frame goes through `addressResolver::resolve_physical_frame(return_address,
   caller)`, which names the frame after the OUTERMOST function at `return_address - 1`
   (`NameOf::outermost_function`, cached in `frame_name_cache()`). The hooks keep the

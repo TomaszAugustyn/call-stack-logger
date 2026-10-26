@@ -43,6 +43,15 @@
 
 #include "elf.c"
 
+/* backtrace_create_state()'s flag for a state used by several threads (its
+   FLAGS argument is a bit mask; libbacktrace has no name for the bit). */
+#define CSLG_BACKTRACE_THREADED 1
+
+/* Sanity bound on the number of section headers a file may claim before the
+   layout check maps them. Real object files have a few dozen; the bound only
+   keeps a corrupt count from mapping an absurd range. */
+#define CSLG_MAX_SECTION_HEADERS 65536
+
 /* libbacktrace maps file ranges with mmap and never compares them with the
    file's size: the section header table or a debug section of a TRUNCATED
    file lies beyond the end of the file, is mapped without complaint and
@@ -98,7 +107,7 @@ static int cslg_elf_layout_fits_file(int descriptor, backtrace_error_callback er
         }
         shnum = shdr0.sh_size;
     }
-    if (shnum > 65536 || shnum * shentsize > file_size - shoff) {
+    if (shnum > CSLG_MAX_SECTION_HEADERS || shnum * shentsize > file_size - shoff) {
         error_callback(data, "ELF section headers beyond end of file", 0);
         return 0;
     }
@@ -126,9 +135,10 @@ static int cslg_elf_layout_fits_file(int descriptor, backtrace_error_callback er
 }
 
 struct backtrace_state* cslg_backtrace_create_state(backtrace_error_callback error_callback, void* data) {
-    /* Flag 1 = THREADED (a bit mask since July 2026; the value 1 meant the
-       same in the older boolean parameter). */
-    struct backtrace_state* state = backtrace_create_state(NULL, 1, error_callback, data);
+    /* The flags are a bit mask since July 2026; the value 1 meant the same in
+       the older boolean parameter. */
+    struct backtrace_state* state
+            = backtrace_create_state(NULL, CSLG_BACKTRACE_THREADED, error_callback, data);
     if (state == NULL) {
         return NULL;
     }

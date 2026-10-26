@@ -68,6 +68,40 @@ instrumentation::ResolvedFrame own_frame(const instrumentation::ResolvedFrameVie
 // file has been unlinked since it was mapped.
 constexpr std::string_view DELETED_MAPPING_SUFFIX = " (deleted)";
 
+// The main executable's file, whatever path it was started by and even if it
+// has been replaced on disk since.
+constexpr const char* EXECUTABLE_FILE = "/proc/self/exe";
+
+// Columns of a /proc/self/maps line between the address range and the path:
+// permissions, offset, device, inode.
+constexpr int MAPS_COLUMNS_BEFORE_PATH = 4;
+
+// Every name mangled under the Itanium C++ ABI starts with this; a DWARF name
+// that does is a linkage name (DW_AT_linkage_name), not a bare one.
+constexpr std::string_view MANGLED_NAME_PREFIX = "_Z";
+
+// What separates a function's name from a compiler clone suffix in the
+// symbol table ("foo.cold", "foo.constprop.0", "foo.isra.0").
+constexpr char CLONE_SUFFIX_SEPARATOR = '.';
+
+// The texts printed in place of a callee name or a call site when the
+// resolver has nothing better; they are part of the trace format (tests and
+// the README spell them).
+constexpr const char* NO_OBJECT_FOR_CALLEE = "<address to object not found>";
+constexpr const char* NO_OBJECT_FOR_CALLER = "<caller address to object not found>";
+constexpr const char* UNREADABLE_CALLEE_OBJECT = "<could not open object file>";
+constexpr const char* UNREADABLE_CALLER_OBJECT = "<could not open caller object file>";
+constexpr const char* UNNAMED_FUNCTION = "<unknown function>";
+
+// A return address points at the instruction AFTER a call. One byte back lies
+// inside the call instruction itself, so a call that ends a source line, or a
+// function, is attributed to its own line and function, not to whatever
+// follows it.
+NO_INSTRUMENT
+void* inside_call_instruction(const void* return_address) {
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(return_address) - 1);
+}
+
 // libbacktrace's error callback. It is called for malformed or unreadable
 // files at registration and, per lookup, with errnum -1 when the registered
 // files carry no debug information for the address ("no debug info ..."). Both
@@ -197,7 +231,7 @@ addressResolver::ObjectFile* addressResolver::ensure_object_loaded(const Dl_info
         // warnings, instead of leaving an empty file to puzzle over. Shared
         // libraries without symbols are not reported: system libraries come
         // that way, and their functions are not the ones being traced.
-        if (path == "/proc/self/exe" && !object.has_dwarf && !object.has_symtab_section) {
+        if (path == EXECUTABLE_FILE && !object.has_dwarf && !object.has_symtab_section) {
             std::fprintf(stderr,
                          "[call-stack-logger] WARNING: the executable has no symbol table and no debug "
                          "information (stripped, and no .debug file found next to it or under "
@@ -236,7 +270,7 @@ std::optional<std::string> addressResolver::mapped_object_path(void* base) {
         }
         // Skip the four fixed columns (perms, offset, dev, inode) to reach the path.
         size_t pos = static_cast<size_t>(cursor - line.c_str());
-        for (int column = 0; column < 4; ++column) {
+        for (int column = 0; column < MAPS_COLUMNS_BEFORE_PATH; ++column) {
             pos = line.find_first_not_of(' ', pos);
             if (pos == std::string::npos) {
                 return std::nullopt;
@@ -267,7 +301,7 @@ std::string addressResolver::object_file_path(const Dl_info& symbol_info) {
         // but display the path that /proc/self/exe links to. (libbacktrace
         // resolves the symlink itself when it looks for a separate debug
         // file next to the executable.)
-        return "/proc/self/exe";
+        return EXECUTABLE_FILE;
     }
     // For every other object dli_fname is the string the dynamic linker loaded
     // it by, verbatim — for dlopen("./plugin.so") that is the relative string.
@@ -377,14 +411,14 @@ std::string addressResolver::function_name_of(const Lookup& lookup, NameOf name_
     const std::string& dwarf = lookup.entries.empty()
             ? std::string()
             : (outermost ? lookup.entries.back().function : lookup.entries.front().function);
-    if (!dwarf.empty() && dwarf.compare(0, 2, "_Z") == 0) {
+    if (!dwarf.empty() && dwarf.compare(0, MANGLED_NAME_PREFIX.size(), MANGLED_NAME_PREFIX) == 0) {
         return dwarf;
     }
     if (lookup.symbol.empty()) {
         return dwarf;
     }
     if (!dwarf.empty() && lookup.symbol.compare(0, dwarf.size(), dwarf) == 0
-        && (lookup.symbol.size() == dwarf.size() || lookup.symbol[dwarf.size()] == '.')) {
+        && (lookup.symbol.size() == dwarf.size() || lookup.symbol[dwarf.size()] == CLONE_SUFFIX_SEPARATOR)) {
         return dwarf;
     }
     return lookup.symbol;
@@ -410,7 +444,7 @@ std::optional<std::string> addressResolver::resolve_function_name(void* address,
     // An invalid address_info means dladdr() failed for this address (its
     // Dl_info contents are undefined then).
     if (!address_info.valid) {
-        return "<address to object not found>";
+        return NO_OBJECT_FOR_CALLEE;
     }
     const Dl_info& info = address_info.info;
     // dli_sname is null for every callee without a dynamic symbol: static
@@ -432,7 +466,7 @@ std::optional<std::string> addressResolver::resolve_function_name(void* address,
 
     const ObjectFile* object = ensure_object_loaded(info, address_info.load_bias);
     if (object == nullptr) {
-        return "<could not open object file>";
+        return UNREADABLE_CALLEE_OBJECT;
     }
 
     const std::string name = function_name_of(look_up(*object, address), name_of);
@@ -468,7 +502,7 @@ addressResolver::CachedLocation addressResolver::resolve_filename_and_line(void*
     // An invalid address_info means dladdr() failed for the caller address (see
     // resolve_function_name()).
     if (!address_info.valid) {
-        location.file = "<caller address to object not found>";
+        location.file = NO_OBJECT_FOR_CALLER;
         return location;
     }
     const Dl_info& info = address_info.info;
@@ -480,7 +514,7 @@ addressResolver::CachedLocation addressResolver::resolve_filename_and_line(void*
 
     const ObjectFile* object = ensure_object_loaded(info, address_info.load_bias);
     if (object == nullptr) {
-        location.file = "<could not open caller object file>";
+        location.file = UNREADABLE_CALLER_OBJECT;
         return location;
     }
 
@@ -521,7 +555,7 @@ addressResolver::CachedLocation addressResolver::resolve_filename_and_line(void*
         location.file = demangle_cxa(info.dli_sname);
         return location;
     }
-    location.file = "<unknown function>";
+    location.file = UNNAMED_FUNCTION;
     return location;
 }
 
@@ -735,6 +769,7 @@ addressResolver::CachedLocation addressResolver::resolve_event_site_location(voi
     // The containing symbol: the function (or object) symbol whose range holds
     // the address, and its first byte.
     const Lookup at_site_lookup = look_up(*object, address);
+    // (A symbol at address 0 has no byte before it to compare with.)
     if (at_site_lookup.symbol.empty() || at_site_lookup.symbol_value == 0) {
         return location;
     }
@@ -744,6 +779,8 @@ addressResolver::CachedLocation addressResolver::resolve_event_site_location(voi
         || !at_site.same_as(line_row_at(look_up(*object, reinterpret_cast<void*>(symbol_start - 1))))) {
         return location;
     }
+    // `address` lies inside the call (the interposer's return address minus
+    // one), so one byte further is the instruction the call returns to.
     const LineRow after_call = outermost_line_row_at(
             look_up(*object, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(address) + 1)));
     if (after_call.line == 0 || after_call.same_as(at_site)) {
@@ -820,7 +857,7 @@ std::optional<ResolvedFrame> addressResolver::resolve_physical_frame(void* retur
     // function returns to the first byte of the next one, which would
     // otherwise name the frame. The outermost function at that byte is the
     // frame's own even when the resume point sits in inlined code.
-    void* inside = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(return_address) - 1);
+    void* inside = inside_call_instruction(return_address);
     if (!resolve_no_unwind(inside, caller_address, view, NameOf::outermost_function)) {
         return std::nullopt;
     }
@@ -846,7 +883,7 @@ bool addressResolver::resolve(void* callee_address, void* caller_address, Resolv
     // enclosing physical frame, so the reported call site is that frame's — one
     // level up. Documented in README's RelWithDebInfo tip.
     return resolve_no_unwind(
-            callee_address, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(caller_address) - 1),
+            callee_address, inside_call_instruction(caller_address),
             out);
 }
 
@@ -854,9 +891,11 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
     // Public API entry point — hold the re-entrancy guard for the whole capture
     // (rationale on TracerScope in tracerScope.h).
     TracerScope guard;
-    const size_t MAX_FRAMES = 1000;
-    std::vector<void*> stack(MAX_FRAMES);
-    int num = backtrace(&stack[0], MAX_FRAMES);
+    // Room for this many frames first; doubled while backtrace() fills it, so
+    // the depth has no limit.
+    const size_t INITIAL_FRAMES = 1000;
+    std::vector<void*> stack(INITIAL_FRAMES);
+    int num = backtrace(&stack[0], static_cast<int>(INITIAL_FRAMES));
     if (num <= 0) {
         throw std::runtime_error("Callstack could not be built");
     }
@@ -887,7 +926,7 @@ std::vector<std::optional<ResolvedFrame>> get_call_stack() {
     for (size_t i = 1; i < n; ++i) {
         void* caller = stack[i];
         if (i + 1 < n) {
-            caller = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(stack[i + 1]) - 1);
+            caller = inside_call_instruction(stack[i + 1]);
         }
         res.push_back(addressResolver::resolve_physical_frame(stack[i], caller));
     }

@@ -411,7 +411,8 @@ private:
 /**
  * Returns a vector of the ResolvedFrames representing current call-stack.
  *
- * The depth of the stack is by default 1000. Throws runtime_error when call stack cannot be built.
+ * There is no depth limit (room for 1000 frames first, doubled as needed). Throws runtime_error when the
+ * call stack cannot be built.
  */
 NO_INSTRUMENT
 std::vector<std::optional<ResolvedFrame>> get_call_stack();
