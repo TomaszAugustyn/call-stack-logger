@@ -169,7 +169,7 @@ jobs:
 
     # CSLG_EXPORT_ALL_SYMBOLS=ON links every tracing program with -rdynamic
     # instead of the narrow --export-dynamic-symbol list: the link every
-    # release before v1.0.0 used, and the one the root CMakeLists falls back
+    # release before v1.0 used, and the one the root CMakeLists falls back
     # to with a linker that lacks the option (GNU ld before binutils 2.35).
     # No other job builds it, and StrippedExecutableTest has a branch only
     # this configuration runs (a stripped executable keeps its names in the

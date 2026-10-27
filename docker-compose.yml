@@ -77,7 +77,7 @@ services:
       "
 
   # Link every tracing program with -rdynamic (CSLG_EXPORT_ALL_SYMBOLS=ON: the
-  # link of the releases before v1.0.0, and the fallback for linkers without
+  # link of the releases before v1.0, and the fallback for linkers without
   # --export-dynamic-symbol), every LOG_* option on, run all tests.
   test-export-all:
     build: .

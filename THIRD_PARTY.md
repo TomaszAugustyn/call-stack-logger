@@ -10,7 +10,7 @@ the first commercial sale.
 
 ## Components
 
-Since v1.0.0, addresses are resolved with libbacktrace, which is licensed under
+Since v1.0, addresses are resolved with libbacktrace, which is licensed under
 a 3-clause BSD license. It is compiled from source into the library, and the
 only other components a program needs are the C and C++ runtime libraries of
 the system, which carry permissive terms, weak-copyleft terms that dynamic
@@ -32,9 +32,9 @@ Headers included by the library's own translation units from outside the C++
 standard library and glibc: `backtrace.h` of libbacktrace (private; the public
 header `include/callStack.h` includes no third-party header).
 
-## Licensing history: releases before v1.0.0 used libbfd
+## Licensing history: releases before v1.0 used libbfd
 
-Releases before v1.0.0 resolved addresses with libbfd, the "Binary File
+Releases before v1.0 resolved addresses with libbfd, the "Binary File
 Descriptor" library of GNU binutils, which is licensed under the GNU GPL,
 version 3 or later. On Ubuntu it is a shared library (`libbfd-2.42-system.so`
 on 24.04) that every instrumented program listed as `NEEDED`; on Fedora it is a

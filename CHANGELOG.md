@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.0
+## v1.0
 
 The first numbered release. The library's behavior is the one documented in
 the README; this entry lists what changed against the last unnumbered state
@@ -91,6 +91,10 @@ of `master`.
   named then and the trace would otherwise stay empty without explanation.
   MiniDebugInfo (`.gnu_debugdata`, what Fedora's stripped binaries keep)
   counts as a symbol table.
+- The CMake project declares its version with
+  `project(call-stack-logger VERSION 1.0)`, so a consumer that pulls the
+  library in with FetchContent or `add_subdirectory` can read
+  `call-stack-logger_VERSION`.
 - `DISABLE_INSTRUMENTATION=ON` now makes `callstacklogger::instrumented`
   contribute nothing to a program: no `-finstrument-functions`, no `-g`, no
   exported symbols, no library. A program that calls `get_call_stack()` in
@@ -115,7 +119,7 @@ of `master`.
   (`bench/run_bench.sh`), with a `bench` target behind `BUILD_BENCH=ON`.
 - A CI job (`export-all-symbols`) and a compose service (`test-export-all`)
   build with `CSLG_EXPORT_ALL_SYMBOLS=ON`: the `-rdynamic` link of the
-  releases before v1.0.0, and the fallback for linkers without
+  releases before v1.0, and the fallback for linkers without
   `--export-dynamic-symbol`.
 - CI and the Docker image install no `binutils-dev`; the LeakSanitizer
   suppression file for libbfd is gone (the sanitizer jobs run without

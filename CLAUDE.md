@@ -150,7 +150,7 @@ Address resolution happens in stages (implemented in `src/callStack.cpp`):
    for a non-PIE executable (bias 0, map start 0x400000), where every lookup
    with `dli_fbase` would miss. Pinned by `PieTest`.
    **What libbacktrace reports, and the mapping onto libbfd's answers (the
-   resolver of releases before v1.0.0)**
+   resolver of releases before v1.0)**
    (`look_up()` + `function_name_of()`): `backtrace_pcinfo` calls back once per
    function containing the address, innermost first (an inlined copy, then
    each function it was inlined into; each entry's file:line is the position
@@ -174,7 +174,7 @@ Address resolution happens in stages (implemented in `src/callStack.cpp`):
    `:???`, then to the dynamic symbol's name, then to `<unknown function>`.
    Nothing in the file names the address and no dynamic symbol → the callee is
    not loggable (dropped), as with libbfd. Texts libbfd-era releases printed and
-   v1.0.0 no longer does: `<bfd_error>`,
+   v1.0 no longer does: `<bfd_error>`,
    `name <bfd_error>`, `<no sections in object file>`, `<not sectioned
    address>`. Where libbacktrace's symbol search differs from BFD's raw walk:
    it only knows FUNC/OBJECT symbols with a size (a zero-size assembler label
@@ -996,7 +996,7 @@ the timestamp and the rest (compatible with `LOG_ADDR`):
 ```
 call-stack-logger/
 |-- CMakeLists.txt              # Root CMake config (project definition, run target, symbol-export rule)
-|-- CHANGELOG.md                # Release notes, first entry v1.0.0
+|-- CHANGELOG.md                # Release notes, first entry v1.0
 |-- THIRD_PARTY.md              # Every third-party component of a built program, its license and notice obligation
 |-- Dockerfile                  # Ubuntu 24.04 build environment
 |-- docker-compose.yml          # Build, test, coverage services
@@ -2030,7 +2030,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `master` with eig
   switch would otherwise rot unnoticed. Locally the `test-disabled` compose service.
 - **export-all-symbols**: `-DCSLG_EXPORT_ALL_SYMBOLS=ON` with every `LOG_*` option on,
   the full suite. Links every tracing program with `-rdynamic`, as every release
-  before v1.0.0 did and as the root CMakeLists falls back to with a linker without
+  before v1.0 did and as the root CMakeLists falls back to with a linker without
   `--export-dynamic-symbol` (GNU ld before binutils 2.35). No other job builds it, and
   `StrippedExecutableTest.StrippedWithoutSymbolsDegradesGracefully` has a branch
   (`CSLG_PROGRAMS_EXPORT_ALL_SYMBOLS`: names from the dynamic symbol table, `:???`
@@ -2205,7 +2205,7 @@ Clang sanitizer runs are intentionally NOT in CI — Clang's LSan drifts across 
 13. **The symbolizer is libbacktrace, vendored, registered per object (the license fix):**
    libbfd is GPL-3.0-or-later and made every shipped instrumented program a GPL
    program, which the commercial license cannot cover; `THIRD_PARTY.md` has the
-   before/after tables. libbacktrace (BSD-3-Clause) replaced it in v1.0.0 with the
+   before/after tables. libbacktrace (BSD-3-Clause) replaced it in v1.0 with the
    one-state-plus-extension design described in the resolution pipeline (why the
    public API alone could not register plugins and dlopen()ed libraries, the
    `elf_add()` dependency, the load-bias rule, the name mapping that keeps the
@@ -2261,7 +2261,7 @@ The project evolved through these milestones (earliest first):
     in-place marks on the frames they left) and the level-keyed frame reconciliation,
     which started inside the option and then moved to every build once its cost was
     measured, retiring the Clang-exception and longjmp drifts as documented limitations
-13. v1.0.0: symbol resolution moved from libbfd (GPL) to libbacktrace (BSD), vendored at a
+13. v1.0: symbol resolution moved from libbfd (GPL) to libbacktrace (BSD), vendored at a
     pinned commit and registered per object through `src/backtraceExtension.c`; no binutils
     dependency; programs export only the hooks and the interposers instead of `-rdynamic`;
     `callstacklogger::instrumented` is inert under `DISABLE_INSTRUMENTATION`; Clang's

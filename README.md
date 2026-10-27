@@ -306,7 +306,7 @@ The exported symbols are the two hooks, `__cyg_profile_func_enter` and
 plus the five interposed runtime entry points with `LOG_EXCEPTIONS`. They are exported
 one by one with `--export-dynamic-symbol`; with a linker that lacks the option (GNU ld
 before binutils 2.35) or with `-DCSLG_EXPORT_ALL_SYMBOLS=ON`, `-rdynamic` exports every
-symbol instead, as releases before v1.0.0 did.
+symbol instead, as releases before v1.0 did.
 
 Trace files are opened lazily on each thread's first traced call, so a program
 that links the plain library only for `get_call_stack()` never creates a trace
@@ -937,7 +937,7 @@ of tail position.)
 outermost function of the inline chain at the frame's return address. At `-O2` the
 instruction a call returns to often belongs to a helper inlined right after the call,
 such as a vector's iterator constructor after `get_call_stack()` itself; naming by the
-innermost function there, as releases before v1.0.0 did, called the frame after that helper.
+innermost function there, as releases before v1.0 did, called the frame after that helper.
 
 ## :bug: Sanitizers ##
 
@@ -1031,7 +1031,7 @@ GitHub Actions runs on every push and pull request to `master`:
 - **Clang (build, test):** Builds and runs unit and integration tests.
 - **Clang RelWithDebInfo (optimized build, test):** The same suite with Clang at `-O2 -g`. Clang at -O2 lays the instrumented code out differently from GCC at -O2 and from Clang at -O0 (tail-called exit hooks, its own inlining and landing pads, and no exit hook on the exception-unwind path), so the frame reconciliation and the exception paths meet that combination only here.
 - **Instrumentation disabled (build, unit tests):** Configures with `-DDISABLE_INSTRUMENTATION=ON` and every `LOG_*` option on, builds, and runs the unit tests (the integration tests are skipped at configure time by design). Keeps the `#ifdef` seams between the options and the kill switch building; nothing else exercises that configuration.
-- **GCC, every symbol exported (-rdynamic):** Builds with `-DCSLG_EXPORT_ALL_SYMBOLS=ON` and every `LOG_*` option on, and runs the full suite. This is the link every release before v1.0.0 used, and the one CMake falls back to with a linker that lacks `--export-dynamic-symbol` (GNU ld before binutils 2.35); `StrippedExecutableTest` has a branch only this configuration runs.
+- **GCC, every symbol exported (-rdynamic):** Builds with `-DCSLG_EXPORT_ALL_SYMBOLS=ON` and every `LOG_*` option on, and runs the full suite. This is the link every release before v1.0 used, and the one CMake falls back to with a linker that lacks `--export-dynamic-symbol` (GNU ld before binutils 2.35); `StrippedExecutableTest` has a branch only this configuration runs.
 - **Sanitize (GCC, ASan + UBSan + LSan):** Builds with `SANITIZE=address+undefined` and every `LOG_*` option on (`LOG_EXCEPTIONS`, `LOG_ELAPSED`, `LOG_ADDR`), and runs the full test suite under AddressSanitizer, UndefinedBehaviorSanitizer, and LeakSanitizer, so the exception interposers, the in-place patching and the address column run sanitized in the shipped library too, not only in the per-flag test variants. Fails on any memory error, UB, or leak.
 - **Sanitize (GCC, TSan):** Builds with `SANITIZE=thread` and the same options, and runs the full test suite under ThreadSanitizer.
 

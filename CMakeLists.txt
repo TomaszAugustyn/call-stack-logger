@@ -8,7 +8,7 @@
 
 cmake_minimum_required(VERSION 3.14)
 
-project(call-stack-logger)
+project(call-stack-logger VERSION 1.0)
 
 option(BUILD_TESTS "Build unit and integration tests (top-level builds only)" OFF)
 option(COVERAGE "Enable code coverage (requires GCC)" OFF)
